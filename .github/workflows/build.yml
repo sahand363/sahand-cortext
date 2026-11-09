@@ -23,9 +23,9 @@ jobs:
           bash -n install.sh
           bash -n scripts/cortext-menu.sh
 
-      - name: Run automated tests
+      - name: Run automated tests with race detector
         run: |
-          go test -v ./...
+          go test -v -race ./...
 
       - name: Build server binary
         run: |
