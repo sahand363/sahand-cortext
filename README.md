@@ -1,82 +1,175 @@
-# Sahand-Cortext · v0.2.0
+# Sahand-CorText · v0.2.2
 
-A private, single-user AI workspace hosted on Ubuntu. The browser connects to the hub; provider requests are sent server-side.
+**A private, secure, single-user AI workspace hosted on your own Ubuntu server.**
 
-## Install
+Sahand-CorText provides a private AI gateway where browser communication goes directly to your self-hosted server, while upstream AI provider requests are routed server-side to protect your client IP address.
 
-On a clean Ubuntu 22.04/24.04 server:
+---
+
+## 🚀 Quick Installation
+
+### One-Line Installer
+
+On a clean Ubuntu 22.04 or 24.04 server, run the following command with root privileges:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/sahand363/sahand-cortext/main/install.sh | sudo bash
 ```
 
-The installer displays numbered progress stages and APT's package progress, creates the first admin login, builds the Go server, and registers a systemd service.
+The installer automatically:
 
-After installation, the terminal prints the panel URL. Open it in your browser, sign in, and use the first-run Gemini setup card to save your API key. Then start chatting.
+- Checks and installs required prerequisites.
+- Downloads the latest optimized pre-built release.
+- Creates a restricted system service account (`cortext`).
+- Registers a sandboxed `systemd` service.
+- Configures the application environment.
+- Sets up your initial administrator credentials.
 
-## SSH control menu
+Once installation is complete, access your workspace using the displayed panel address.
 
-At any time:
+---
 
-```bash
-sudo cortext
-```
+## 🎛️ Server Administration
 
-Menu options include:
-1. Show panel address
-2. Change username and password
-3. Configure/renew HTTPS with Caddy
-4. Restart service
-5. View live logs
-6. Uninstall (with a separate confirmation before deleting the database)
+Sahand-CorText includes an interactive command-line management utility directly accessible from your server terminal.
 
-## HTTPS
-
-Point a DNS A record to the server and make sure inbound TCP ports 80 and 443 are allowed. Run:
+Run:
 
 ```bash
 sudo cortext
 ```
 
-Choose option 3 and enter the domain and certificate email. Caddy obtains and renews Let's Encrypt certificates automatically.
+### Control Center Menu
 
-## Gemini setup
+| Option | Description |
+|---|---|
+| **1. Update Sahand-CorText** | Installs the latest application binary and web interface assets without repeating the full installation process. |
+| **2. Show Panel Address** | Displays your local and remote panel URLs. |
+| **3. Change Credentials** | Securely updates your administrator username and password. |
+| **4. Configure / Renew SSL** | Installs Caddy, provisions Let's Encrypt certificates, and configures HTTPS and secure cookie flags. |
+| **5. Restart Service** | Restarts the background application service. |
+| **6. View Live Logs** | Streams real-time application logs using `journalctl`. |
+| **7. Uninstall** | Removes application binaries, system services, and optionally database files. |
 
-Sign in to the panel and enter the Gemini API key in the setup card or Settings → Gemini provider. The key is stored server-side in SQLite and is never saved in browser local storage. Protect `/var/lib/sahand-cortext` and keep server backups private.
+**Quick Update Command**
 
-Models in this MVP: `gemini-2.5-flash` and `gemini-2.5-pro`.
-
-## Operations
+You can also update the application directly without opening the management menu:
 
 ```bash
-sudo systemctl status sahand-cortext
-sudo journalctl -u sahand-cortext -f
-sudo systemctl restart sahand-cortext
-sudo cortext
+sudo cortext update
 ```
 
-Database: `/var/lib/sahand-cortext/cortext.db`  
-Environment: `/etc/sahand-cortext.env`
+---
 
-## Current functionality
+## ✳️ Gemini AI Setup & Model Verification
 
-- Single-user sign-in (bcrypt password hash, HTTP-only cookie)
-- First-run Gemini API key setup inside the web panel
-- Gemini chat with model selection
-- SQLite conversation persistence and session list
-- Responsive desktop/mobile interface
-- Settings, provider, memory, orchestration, usage and activity surfaces in the UI
-- SSH management menu, systemd, optional Caddy HTTPS
+Follow these steps to connect your Google Gemini account:
 
-## Planned modules (UI is scaffolded; backend is not yet implemented)
+1. Open your browser and navigate to your server panel:
 
-- Provider registry and additional providers
-- Multi-model orchestration and coordinator agent
-- Topic summaries, topic extraction and relevant memory retrieval
-- Token/cost telemetry
-- Backup/restore and session export
-- API key rotation and encrypted secrets vault
+   ```text
+   http://YOUR-SERVER-IP:8787
+   ```
 
-## Security notes
+2. Log in using your administrator credentials.
 
-This is an early single-user MVP, not a hardened public multi-tenant service. Use HTTPS for remote access. Add rate limiting, CSRF protections, session persistence/rotation, database encryption or a dedicated secrets store, audit logs, and backup/restore before relying on it for sensitive production workloads. The current chat endpoint sends each prompt as a single-turn request; conversation context assembly is a planned next step.
+3. Navigate to **Settings → AI Providers**, or click the **Set up Gemini** banner.
+
+4. Enter your **Google AI Studio API Key** and click **Save Key & Load Models**.
+
+5. Sahand-CorText queries Google's live API model catalog and displays the models available to your API key.
+
+6. Click any model card to perform a live generation test.
+
+   Successfully tested models are highlighted in green, displaying their measured response latency:
+
+   ```text
+   ✓ WORKING · 180 ms
+   ```
+
+   The successfully tested model is automatically selected as your active chat model.
+
+---
+
+## 🛠️ Technology Stack
+
+| Component | Technology |
+|---|---|
+| **Server OS** | Ubuntu Linux (AMD64 & ARM64) |
+| **Backend** | Go (`net/http`, standard library concurrency) |
+| **Database** | Embedded SQLite (`modernc.org/sqlite`, WAL mode) |
+| **Authentication** | Bcrypt password hashing + persistent SQLite sessions |
+| **Frontend** | Vanilla HTML5, CSS3, and JavaScript |
+| **Deployment** | Pre-built static binary via GitHub Actions |
+| **Service Management** | Sandboxed `systemd` service |
+| **Reverse Proxy / SSL** | Caddy + Let's Encrypt (optional) |
+
+---
+
+## 📋 Core Capabilities
+
+### 🔐 Private AI Gateway
+All upstream AI provider requests originate from your Ubuntu server rather than your local browser, keeping your client IP address separate from provider-facing requests.
+
+### 🔍 Live Model Discovery & Testing
+Dynamically discovers available Gemini `generateContent` models based on your API key and verifies model availability through live generation tests.
+
+### 💬 Persistent Conversations
+- SQLite-backed conversation storage.
+- Persistent chat history across server restarts.
+- Automatic conversation title generation based on the first prompt.
+
+### 🛡️ Secure Session Management
+- HTTP-only session cookies.
+- Bcrypt password hashing.
+- Persistent SQLite-backed sessions.
+- Multi-day session persistence across server restarts.
+
+### 👤 Single-User Architecture
+Designed as a private personal AI workspace rather than a public, multi-tenant SaaS platform.
+
+---
+
+## 🗺️ Roadmap
+
+The following modules are planned for future releases:
+
+- [ ] **Multi-Provider Registry:** Native integrations for OpenAI (GPT), Anthropic (Claude), DeepSeek, and custom OpenAI-compatible endpoints.
+- [ ] **AI Orchestration Layer:** Multi-agent coordination with intelligent task routing across specialized models.
+- [ ] **Topic-Based Memory:** Cross-session vector or keyword-based memory retrieval for long-term project context.
+- [ ] **Token & Cost Telemetry:** Usage analytics, token consumption tracking, and request latency history.
+
+---
+
+## 📂 Installation Directories
+
+| Path | Description |
+|---|---|
+| `/opt/sahand-cortext/` | Application root directory and web assets (`web/dist/`). |
+| `/var/lib/sahand-cortext/` | Persistent application data and SQLite database (`cortext.db`). |
+| `/etc/sahand-cortext.env` | Environment configuration and security keys. |
+| `/etc/systemd/system/sahand-cortext.service` | Background system service configuration. |
+| `/usr/local/bin/cortext` | SSH-based management CLI utility. |
+
+---
+
+## 🔒 Security Recommendations
+
+- **Enable HTTPS:** Always configure SSL using `sudo cortext` → Option 4 before exposing your panel to the public internet.
+- **Protect Application Data:** Restrict access to `/var/lib/sahand-cortext/` and maintain regular database backups.
+- **Use Strong Credentials:** Choose a strong administrator password and rotate it periodically through the SSH Control Center.
+- **Keep Updated:** Regularly install the latest releases using `sudo cortext update`.
+- **Protect API Keys:** Never share your provider API keys or expose them in frontend code.
+
+---
+
+## 📄 License
+
+See the [LICENSE](LICENSE) file for licensing information.
+
+---
+
+<p align="center">
+  <b>Sahand-CorText</b><br>
+  Private Intelligence. Your Server. Your Control.
+</p>
