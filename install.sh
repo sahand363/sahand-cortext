@@ -2,6 +2,7 @@
 set -Eeuo pipefail
 APP=sahand-cortext
 REPO=https://github.com/sahand363/sahand-cortext.git
+RELEASE_URL=https://github.com/sahand363/sahand-cortext/releases/latest/download/sahand-cortext
 DIR=/opt/sahand-cortext
 DATA=/var/lib/sahand-cortext
 ENV=/etc/sahand-cortext.env
@@ -23,52 +24,48 @@ cat <<'EOF'
  ____) | (_| | | | | (_| | | | | (_| |     | |___| (_) | |    | |  __/>  <| |_ 
 |_____/ \__,_|_| |_|\__,_|_| |_|\__,_|      \_____\___/|_|    |_|\___/_/\_\\__|
 EOF
-echo -e "${N}${G}Sahand-CorText · Ubuntu Installer${N}"
+echo -e "${N}${G}Sahand-CorText · Fast Installer${N}"
 
-step 5 "Checking system and privileges"
+step 10 "Checking system and packages"
 . /etc/os-release
 [[ "${ID:-}" == ubuntu ]] || echo -e "${Y}This installer is designed for Ubuntu.${N}"
-
-step 15 "Installing system dependencies (APT progress is shown below)"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -o Dpkg::Progress-Fancy=1
 apt-get install -y -o Dpkg::Progress-Fancy=1 git curl ca-certificates openssl gnupg
 
-step 30 "Preparing Go toolchain"
-export PATH="/usr/local/go/bin:/usr/local/bin:$PATH"
-if ! command -v go >/dev/null 2>&1 || ! go version | grep -Eq 'go1\.(23|24|25)'; then
-  arch=$(dpkg --print-architecture)
-  case "$arch" in
-    amd64) ga=amd64;;
-    arm64) ga=arm64;;
-    *) echo "Unsupported CPU architecture: $arch"; exit 1;;
-  esac
-  curl -fL --progress-bar "https://go.dev/dl/go1.23.12.linux-${ga}.tar.gz" -o /tmp/go.tgz
-  rm -rf /usr/local/go
-  tar -C /usr/local -xzf /tmp/go.tgz
-  ln -sf /usr/local/go/bin/go /usr/local/bin/go
-  rm -f /tmp/go.tgz
-fi
-
-step 40 "Downloading Sahand-CorText source"
+step 30 "Downloading Sahand-CorText assets"
 if [[ -d "$DIR/.git" ]]; then
   git -C "$DIR" fetch --all --prune
   git -C "$DIR" reset --hard origin/main
 else
   rm -rf "$DIR"
-  git clone --progress "$REPO" "$DIR"
+  git clone --depth 1 "$REPO" "$DIR"
 fi
 
-step 55 "Resolving Go dependencies and building application"
-cd "$DIR"
-go mod tidy
-CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o "$BIN" ./cmd/server
+step 50 "Installing application binary"
+mkdir -p /usr/local/bin
+if curl -fsSL --progress-bar "$RELEASE_URL" -o "$BIN"; then
+  chmod +x "$BIN"
+  echo -e "${G}✓ Using pre-built GitHub release (zero dependencies downloaded).${N}"
+else
+  echo -e "${Y}Pre-built binary not found. Building locally...${N}"
+  export PATH="/usr/local/go/bin:$PATH"
+  if ! command -v go >/dev/null 2>&1; then
+    arch=$(dpkg --print-architecture); case "$arch" in amd64) ga=amd64;; arm64) ga=arm64;; *) exit 1;; esac
+    curl -fL "https://go.dev/dl/go1.23.12.linux-${ga}.tar.gz" -o /tmp/go.tgz
+    rm -rf /usr/local/go && tar -C /usr/local -xzf /tmp/go.tgz && rm -f /tmp/go.tgz
+  fi
+  cd "$DIR"
+  go mod tidy
+  CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o "$BIN" ./cmd/server
+  rm -rf /root/.cache/go-build /tmp/go.tgz
+fi
 
 step 70 "Creating restricted service account and data directory"
 id cortext >/dev/null 2>&1 || useradd --system --home "$DATA" --shell /usr/sbin/nologin cortext
 install -d -o cortext -g cortext -m 750 "$DATA"
 
-step 80 "Creating your first admin account"
+step 85 "Setting up admin credentials"
 read -rp "Panel username [admin]: " username </dev/tty
 username=${username:-admin}
 while true; do
@@ -93,7 +90,7 @@ EOF
 chmod 600 "$ENV"
 unset p1 p2 hash
 
-step 90 "Registering system service and SSH control menu"
+step 95 "Registering system service"
 cat > "$SERVICE" <<EOF
 [Unit]
 Description=Sahand-CorText private AI hub
