@@ -24,7 +24,7 @@ cat <<'EOF'
  ____) | (_| | | | | (_| | | | | (_| |     | |___| (_) | |    | |  __/>  <| |_ 
 |_____/ \__,_|_| |_|\__,_|_| |_|\__,_|      \_____\___/|_|    |_|\___/_/\_\\__|
 EOF
-echo -e "${N}${G}Sahand-CorText · Fast Installer${N}"
+echo -e "${N}${G}Sahand-CorText · Fast Installer & Updater${N}"
 
 step 10 "Checking system and packages"
 . /etc/os-release
@@ -33,7 +33,7 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update -o Dpkg::Progress-Fancy=1
 apt-get install -y -o Dpkg::Progress-Fancy=1 git curl ca-certificates openssl gnupg
 
-step 30 "Downloading Sahand-CorText assets"
+step 30 "Downloading Sahand-CorText web assets"
 if [[ -d "$DIR/.git" ]]; then
   git -C "$DIR" fetch --all --prune
   git -C "$DIR" reset --hard origin/main
@@ -44,10 +44,12 @@ fi
 
 step 50 "Installing application binary"
 mkdir -p /usr/local/bin
-if curl -fsSL --progress-bar "$RELEASE_URL" -o "$BIN"; then
-  chmod +x "$BIN"
-  echo -e "${G}✓ Using pre-built GitHub release (zero dependencies downloaded).${N}"
+if curl -fsSL --progress-bar "$RELEASE_URL" -o "${BIN}.tmp"; then
+  chmod +x "${BIN}.tmp"
+  mv -f "${BIN}.tmp" "$BIN"
+  echo -e "${G}✓ Pre-built GitHub release installed.${N}"
 else
+  rm -f "${BIN}.tmp"
   echo -e "${Y}Pre-built binary not found. Building locally...${N}"
   export PATH="/usr/local/go/bin:$PATH"
   if ! command -v go >/dev/null 2>&1; then
@@ -57,29 +59,33 @@ else
   fi
   cd "$DIR"
   go mod tidy
-  CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o "$BIN" ./cmd/server
+  CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o "${BIN}.tmp" ./cmd/server
+  mv -f "${BIN}.tmp" "$BIN"
   rm -rf /root/.cache/go-build /tmp/go.tgz
 fi
 
-step 70 "Creating restricted service account and data directory"
+step 70 "Preparing service account and data directory"
 id cortext >/dev/null 2>&1 || useradd --system --home "$DATA" --shell /usr/sbin/nologin cortext
 install -d -o cortext -g cortext -m 750 "$DATA"
 
-step 85 "Setting up admin credentials"
-read -rp "Panel username [admin]: " username </dev/tty
-username=${username:-admin}
-while true; do
-  read -rsp "Panel password (at least 12 characters): " p1 </dev/tty
+step 85 "Checking admin credentials"
+if [[ -f "$ENV" ]] && grep -q "^HUB_PASSWORD_HASH=" "$ENV"; then
+  echo -e "${G}✓ Existing admin credentials preserved (use 'sudo cortext' option 2 to change).${N}"
+else
+  read -rp "Panel username [admin]: " username </dev/tty
+  username=${username:-admin}
+  while true; do
+    read -rsp "Panel password (at least 12 characters): " p1 </dev/tty
+    echo
+    [[ ${#p1} -ge 12 ]] && break
+    echo "Use at least 12 characters."
+  done
+  read -rsp "Confirm password: " p2 </dev/tty
   echo
-  [[ ${#p1} -ge 12 ]] && break
-  echo "Use at least 12 characters."
-done
-read -rsp "Confirm password: " p2 </dev/tty
-echo
-[[ "$p1" == "$p2" ]] || { echo "Passwords do not match."; exit 1; }
-hash=$("$BIN" hash-password "$p1")
-umask 077
-cat > "$ENV" <<EOF
+  [[ "$p1" == "$p2" ]] || { echo "Passwords do not match."; exit 1; }
+  hash=$("$BIN" hash-password "$p1")
+  umask 077
+  cat > "$ENV" <<EOF
 HUB_ADDR=0.0.0.0:8787
 HUB_DATA_DIR=$DATA
 HUB_WEB_DIR=$DIR/web/dist
@@ -87,10 +93,11 @@ HUB_USERNAME=$username
 HUB_PASSWORD_HASH=$hash
 HUB_COOKIE_SECURE=false
 EOF
-chmod 600 "$ENV"
-unset p1 p2 hash
+  chmod 600 "$ENV"
+  unset p1 p2 hash
+fi
 
-step 95 "Registering system service"
+step 95 "Registering and restarting system service"
 cat > "$SERVICE" <<EOF
 [Unit]
 Description=Sahand-CorText private AI hub
@@ -117,7 +124,8 @@ WantedBy=multi-user.target
 EOF
 install -m 755 "$DIR/scripts/cortext-menu.sh" "$MENU"
 systemctl daemon-reload
-systemctl enable --now "$APP"
+systemctl enable "$APP"
+systemctl restart "$APP"
 
 step 100 "Installation complete"
 if [[ -r /dev/tty ]]; then
