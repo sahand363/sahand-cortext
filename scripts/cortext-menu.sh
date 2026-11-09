@@ -7,6 +7,8 @@ BIN=/usr/local/bin/sahand-cortext
 DIR=/opt/sahand-cortext
 DATA=/var/lib/sahand-cortext
 CADDY=/etc/caddy/Caddyfile
+RELEASE_URL=https://github.com/sahand363/sahand-cortext/releases/latest/download/sahand-cortext
+
 G='\033[0;32m'; C='\033[0;36m'; Y='\033[1;33m'; R='\033[0;31m'; N='\033[0m'
 [[ $EUID -eq 0 ]] || { echo "Run: sudo cortext"; exit 1; }
 
@@ -31,7 +33,7 @@ header(){
     echo -e "  ${G}✓ INSTALLATION COMPLETE — SAHAND-CORTEXT IS RUNNING${N}"
   fi
   echo -e "  ${Y}PANEL LINK :${N} ${C}$(panel_url)${N}"
-  echo -e "  ${Y}STATUS     :${N} $(systemctl is-active "$APP" 2>/dev/null || echo unknown)   |   ${Y}SSH MENU :${N} sudo cortext"
+  echo -e "  ${Y}STATUS     :${N} $(systemctl is-active "$APP" 2>/dev/null || echo unknown)   |   ${Y}QUICK UPDATE :${N} sudo cortext update"
   echo -e "${G}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${N}"
   echo -e "${C}"
   cat <<'EOF'
@@ -45,6 +47,44 @@ EOF
   echo -e "${N}"
   echo -e "  ${G}SAHAND-CORTEXT CONTROL CENTER${N}"
   echo
+}
+
+update_app(){
+  echo -e "\n${C}[1/3] Pulling latest web interface and scripts from GitHub...${N}"
+  if [[ -d "$DIR/.git" ]]; then
+    git -C "$DIR" fetch --depth 1 origin main
+    git -C "$DIR" reset --hard origin/main
+  else
+    rm -rf "$DIR"
+    git clone --depth 1 https://github.com/sahand363/sahand-cortext.git "$DIR"
+  fi
+
+  echo -e "${C}[2/3] Downloading latest pre-built server binary...${N}"
+  rm -f "${BIN}.tmp"
+  if curl -fL --http1.1 --retry 5 --retry-delay 2 --retry-all-errors --connect-timeout 15 --progress-bar "$RELEASE_URL" -o "${BIN}.tmp"; then
+    chmod +x "${BIN}.tmp"
+    mv -f "${BIN}.tmp" "$BIN"
+    echo -e "${G}✓ Binary updated.${N}"
+  else
+    rm -f "${BIN}.tmp"
+    echo -e "${Y}Release download interrupted. Building locally with Go 1.23...${N}"
+    if ! /usr/local/go/bin/go version 2>/dev/null | grep -Eq 'go1\.(23|24|25)'; then
+      arch=$(dpkg --print-architecture)
+      case "$arch" in amd64) ga=amd64;; arm64) ga=arm64;; *) exit 1;; esac
+      curl -fL --http1.1 --retry 5 --retry-delay 2 --retry-all-errors --progress-bar "https://go.dev/dl/go1.23.12.linux-${ga}.tar.gz" -o /tmp/go.tgz
+      rm -rf /usr/local/go && tar -C /usr/local -xzf /tmp/go.tgz && rm -f /tmp/go.tgz
+    fi
+    cd "$DIR"
+    /usr/local/go/bin/go mod tidy
+    CGO_ENABLED=0 /usr/local/go/bin/go build -trimpath -ldflags="-s -w" -o "${BIN}.tmp" ./cmd/server
+    mv -f "${BIN}.tmp" "$BIN"
+  fi
+
+  echo -e "${C}[3/3] Restarting service...${N}"
+  install -m 755 "$DIR/scripts/cortext-menu.sh" /usr/local/bin/cortext
+  systemctl daemon-reload
+  systemctl restart "$APP"
+  echo -e "\n${G}✓ Sahand-CorText updated and restarted! Panel: $(panel_url)${N}"
 }
 
 change_login(){
@@ -100,30 +140,37 @@ uninstall_app(){
   systemctl daemon-reload
   read -rp "Also delete database and conversation history at $DATA? [y/N]: " db </dev/tty
   [[ "$db" =~ ^[Yy]$ ]] && rm -rf "$DATA"
-  echo -e "${G}Sahand-CorText and all build remnants uninstalled cleanly.${N}"
+  echo -e "${G}Sahand-CorText uninstalled cleanly.${N}"
   exit 0
 }
+
+if [[ "${1:-}" == "update" || "${1:-}" == "--update" ]]; then
+  update_app
+  exit 0
+fi
 
 while true; do
   header
   INSTALLED_NOW=0
   cat <<EOF
-  1) Show panel address
-  2) Change username and password
-  3) Configure / renew SSL (HTTPS)
-  4) Restart service
-  5) View live logs
-  6) Uninstall Sahand-CorText
+  1) Update Sahand-CorText (Fast Update)
+  2) Show panel address
+  3) Change username and password
+  4) Configure / renew SSL (HTTPS)
+  5) Restart service
+  6) View live logs
+  7) Uninstall Sahand-CorText
   0) Exit
 EOF
   read -rp $'\nSelect an option: ' choice </dev/tty
   case "$choice" in
-    1) echo -e "\nPanel URL: ${C}$(panel_url)${N}"; pause ;;
-    2) change_login ;;
-    3) ssl_setup ;;
-    4) systemctl restart "$APP"; systemctl --no-pager --full status "$APP"; pause ;;
-    5) journalctl -u "$APP" -f ;;
-    6) uninstall_app ;;
+    1) update_app; pause ;;
+    2) echo -e "\nPanel URL: ${C}$(panel_url)${N}"; pause ;;
+    3) change_login ;;
+    4) ssl_setup ;;
+    5) systemctl restart "$APP"; systemctl --no-pager --full status "$APP"; pause ;;
+    6) journalctl -u "$APP" -f ;;
+    7) uninstall_app ;;
     0) exit 0 ;;
     *) echo "Invalid option."; sleep 1 ;;
   esac
