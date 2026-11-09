@@ -1,82 +1,29 @@
-name: Build Sahand CorText (Windows Desktop + Ubuntu Server)
+name: Build
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [main]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
-  build-all:
-    runs-on: windows-latest
-
+  build:
+    runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Go 1.22
-        uses: actions/setup-go@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
-
-      - name: Build Ubuntu Linux VPS Server Binary
-        shell: pwsh
+          go-version: '1.23.x'
+          cache: true
+      - name: Build Linux binary
         run: |
-          $env:CGO_ENABLED="0"
-          $env:GOOS="linux"
-          $env:GOARCH="amd64"
-          go build -ldflags="-s -w" -o sahand-cortext-server main.go
-
-      - name: Upload Ubuntu VPS Server Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: sahand-cortext-ubuntu-server
-          path: sahand-cortext-server
-          if-no-files-found: error
-
-      - name: Generate Windows WebView2 Launcher & Build Desktop .exe
-        shell: pwsh
-        run: |
-          @'
-          //go:build windows
-          package main
-
-          import (
-              "os/exec"
-              "github.com/jchv/go-webview2"
-          )
-
-          func init() {
-              desktopLauncher = func(serverURL string) {
-                  w := webview2.NewWithOptions(webview2.WebViewOptions{
-                      Debug:     true,
-                      AutoFocus: true,
-                      WindowOptions: webview2.WindowOptions{
-                          Title:  "Sahand CorText — Self-Learning AI Hub",
-                          Width:  1180,
-                          Height: 760,
-                      },
-                  })
-                  if w == nil {
-                      _ = exec.Command("rundll32", "url.dll,FileProtocolHandler", serverURL).Start()
-                      select {}
-                  }
-                  defer w.Destroy()
-                  w.SetSize(1180, 760, webview2.HintNone)
-                  w.Navigate(serverURL)
-                  w.Run()
-              }
-          }
-          '@ | Set-Content -Path webview_windows.go -Encoding UTF8
-
-          $env:GOOS="windows"
-          $env:GOARCH="amd64"
-          go get github.com/jchv/go-webview2@latest
           go mod tidy
-          go build -ldflags="-H windowsgui -s -w" -o sahand-cortext.exe .
-
-      - name: Upload Windows Desktop .exe Artifact
-        uses: actions/upload-artifact@v4
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o dist/sahand-cortext ./cmd/server
+      - uses: actions/upload-artifact@v4
         with:
-          name: sahand-cortext-windows
-          path: sahand-cortext.exe
-          if-no-files-found: error
+          name: sahand-cortext-linux-amd64
+          path: dist/sahand-cortext
