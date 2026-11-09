@@ -1,0 +1,35 @@
+name: Build Sahand CorText Windows App
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go 1.22
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Resolve Go dependencies
+        run: |
+          go get github.com/jchv/go-webview2@latest
+          go mod tidy
+
+      - name: Compile Windows GUI Executable (.exe)
+        run: |
+          go build -ldflags="-H windowsgui -s -w" -o sahand-cortext.exe main.go
+
+      - name: Upload sahand-cortext.exe Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sahand-cortext-windows
+          path: sahand-cortext.exe
+          if-no-files-found: error
