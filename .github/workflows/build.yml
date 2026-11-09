@@ -1,15 +1,12 @@
-name: Build
-
+name: Build and validate
 on:
   push:
     branches: [main]
   pull_request:
     branches: [main]
   workflow_dispatch:
-
 permissions:
   contents: read
-
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -19,7 +16,11 @@ jobs:
         with:
           go-version: '1.23.x'
           cache: true
-      - name: Build Linux binary
+      - name: Validate installer scripts
+        run: |
+          bash -n install.sh
+          bash -n scripts/cortext-menu.sh
+      - name: Build server
         run: |
           go mod tidy
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o dist/sahand-cortext ./cmd/server
