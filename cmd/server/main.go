@@ -32,6 +32,7 @@ type App struct {
 type Session struct {
 	ID        string `json:"id"`
 	Title     string `json:"title"`
+	Pinned    bool   `json:"pinned"`
 	UpdatedAt string `json:"updated_at"`
 }
 
@@ -107,12 +108,17 @@ func providerLabel(p string) string {
 
 func (a *App) initDB() error {
 	_, err := a.db.Exec(`
-	CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY,title TEXT NOT NULL DEFAULT 'New conversation',created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP);
+	CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY,title TEXT NOT NULL DEFAULT 'New conversation',pinned INTEGER NOT NULL DEFAULT 0,created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP);
 	CREATE TABLE IF NOT EXISTS messages(id INTEGER PRIMARY KEY AUTOINCREMENT,session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,role TEXT NOT NULL,content TEXT NOT NULL,created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP);
 	CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);
 	CREATE TABLE IF NOT EXISTS auth_sessions(token TEXT PRIMARY KEY,expires_at DATETIME NOT NULL);
 	PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;`)
-	return err
+	if err != nil {
+		return err
+	}
+	// Seamless migration for existing databases created prior to v0.3.1
+	_, _ = a.db.Exec(`ALTER TABLE sessions ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;`)
+	return nil
 }
 
 func (a *App) setting(key string) string {
@@ -278,7 +284,7 @@ func (a *App) status(w http.ResponseWriter, r *http.Request) {
 	cCfg := a.providerKey("codecraft") != ""
 	jsonOut(w, 200, map[string]any{
 		"status":                "online",
-		"version":               "0.3.0",
+		"version":               "0.3.1",
 		"gemini_configured":     gCfg,
 		"openrouter_configured": oCfg,
 		"codecraft_configured":  cCfg,
@@ -293,7 +299,6 @@ func (a *App) status(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// POST /api/setup/provider (also aliases /api/setup/gemini)
 func (a *App) saveProviderKey(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", 405)
@@ -330,7 +335,6 @@ func (a *App) saveProviderKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// If no active model is set yet or active provider matches, ensure a sensible default
 	if len(models) > 0 && (a.setting("active_model") == "" || a.activeProvider() == provider) {
 		a.setActiveSelection(provider, models[0].ID)
 	}
@@ -345,7 +349,6 @@ func (a *App) saveProviderKey(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// GET /api/models?provider=gemini|openrouter|codecraft|all
 func (a *App) handleModels(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", 405)
@@ -409,7 +412,6 @@ func (a *App) handleModels(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// POST /api/models/test - Tests a specific model ID on a specific provider
 func (a *App) handleTestModel(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", 405)
@@ -585,7 +587,6 @@ func (a *App) fetchGeminiModels(key string) ([]ModelInfo, error) {
 }
 
 func (a *App) fetchOpenRouterModels(key string) ([]ModelInfo, error) {
-	// Validate the key against OpenRouter's /auth/key endpoint first so invalid keys are caught immediately
 	authReq, _ := http.NewRequest(http.MethodGet, "https://openrouter.ai/api/v1/auth/key", nil)
 	authReq.Header.Set("Authorization", "Bearer "+key)
 	client := &http.Client{Timeout: 25 * time.Second}
@@ -673,7 +674,6 @@ func (a *App) fetchOpenRouterModels(key string) ([]ModelInfo, error) {
 		})
 	}
 
-	// Sort: Working first -> Free models first -> Untested before Failed -> Alphabetical
 	sort.Slice(out, func(i, j int) bool {
 		if statusRank(out[i].Status) != statusRank(out[j].Status) {
 			return statusRank(out[i].Status) < statusRank(out[j].Status)
@@ -693,7 +693,7 @@ func (a *App) fetchCodeCraftModels(key string) ([]ModelInfo, error) {
 	}
 	req.Header.Set("Authorization", "Bearer "+key)
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "Sahand-CorText/0.3.0")
+	req.Header.Set("User-Agent", "Sahand-CorText/0.3.1")
 	client := &http.Client{Timeout: 25 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -746,7 +746,7 @@ func (a *App) fetchCodeCraftModels(key string) ([]ModelInfo, error) {
 		inPer1M := m.Pricing.InputPer1K * 1000
 		priceInfo := "Free Starter Credits"
 		if inPer1M > 0 {
-			priceInfo = fmt.Sprintf("$%.2f / 1M tokens (Free tier eligible)", inPer1M)
+			priceInfo = fmt.Sprintf("$%.2f / 1M tokens", inPer1M)
 		}
 		desc := m.Description
 		if len(m.Capabilities) > 0 && desc != "" {
@@ -767,7 +767,6 @@ func (a *App) fetchCodeCraftModels(key string) ([]ModelInfo, error) {
 		})
 	}
 
-	// Sort: Working first -> Untested before Failed -> Lowest token cost first
 	sort.Slice(out, func(i, j int) bool {
 		if statusRank(out[i].Status) != statusRank(out[j].Status) {
 			return statusRank(out[i].Status) < statusRank(out[j].Status)
@@ -819,7 +818,7 @@ func extractAPIError(raw []byte) string {
 }
 
 func (a *App) listSessions(w http.ResponseWriter, r *http.Request) {
-	rows, err := a.db.Query(`SELECT id,title,updated_at FROM sessions ORDER BY updated_at DESC`)
+	rows, err := a.db.Query(`SELECT id,title,pinned,updated_at FROM sessions ORDER BY pinned DESC, updated_at DESC`)
 	if err != nil {
 		jsonOut(w, 500, map[string]string{"error": "database error"})
 		return
@@ -828,7 +827,9 @@ func (a *App) listSessions(w http.ResponseWriter, r *http.Request) {
 	out := []Session{}
 	for rows.Next() {
 		var s Session
-		if rows.Scan(&s.ID, &s.Title, &s.UpdatedAt) == nil {
+		var pinnedInt int
+		if rows.Scan(&s.ID, &s.Title, &pinnedInt, &s.UpdatedAt) == nil {
+			s.Pinned = pinnedInt != 0
 			out = append(out, s)
 		}
 	}
@@ -842,11 +843,82 @@ func (a *App) createSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id = id[:16]
-	if _, e = a.db.Exec(`INSERT INTO sessions(id,title) VALUES(?,?)`, id, "New conversation"); e != nil {
+	if _, e = a.db.Exec(`INSERT INTO sessions(id,title,pinned) VALUES(?,?,0)`, id, "New conversation"); e != nil {
 		jsonOut(w, 500, map[string]string{"error": "database error"})
 		return
 	}
-	jsonOut(w, 201, Session{ID: id, Title: "New conversation"})
+	jsonOut(w, 201, Session{ID: id, Title: "New conversation", Pinned: false})
+}
+
+// PATCH /api/sessions - Rename session title and/or toggle pinned state
+func (a *App) updateSession(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		ID     string  `json:"id"`
+		Title  *string `json:"title"`
+		Pinned *bool   `json:"pinned"`
+	}
+	if json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&body) != nil || strings.TrimSpace(body.ID) == "" {
+		jsonOut(w, 400, map[string]string{"error": "Session ID is required"})
+		return
+	}
+	id := strings.TrimSpace(body.ID)
+
+	if body.Title != nil {
+		t := strings.TrimSpace(*body.Title)
+		if t == "" {
+			jsonOut(w, 400, map[string]string{"error": "Title cannot be empty"})
+			return
+		}
+		if len([]rune(t)) > 120 {
+			t = string([]rune(t)[:120])
+		}
+		if _, err := a.db.Exec(`UPDATE sessions SET title=? WHERE id=?`, t, id); err != nil {
+			jsonOut(w, 500, map[string]string{"error": "Failed to rename session"})
+			return
+		}
+	}
+
+	if body.Pinned != nil {
+		pinVal := 0
+		if *body.Pinned {
+			pinVal = 1
+		}
+		if _, err := a.db.Exec(`UPDATE sessions SET pinned=? WHERE id=?`, pinVal, id); err != nil {
+			jsonOut(w, 500, map[string]string{"error": "Failed to update pin state"})
+			return
+		}
+	}
+
+	var s Session
+	var pinnedInt int
+	if err := a.db.QueryRow(`SELECT id,title,pinned,updated_at FROM sessions WHERE id=?`, id).Scan(&s.ID, &s.Title, &pinnedInt, &s.UpdatedAt); err != nil {
+		jsonOut(w, 404, map[string]string{"error": "Session not found"})
+		return
+	}
+	s.Pinned = pinnedInt != 0
+	jsonOut(w, 200, s)
+}
+
+// DELETE /api/sessions?id=... - Delete session and its messages
+func (a *App) deleteSession(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimSpace(r.URL.Query().Get("id"))
+	if id == "" {
+		var body struct {
+			ID string `json:"id"`
+		}
+		_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&body)
+		id = strings.TrimSpace(body.ID)
+	}
+	if id == "" {
+		jsonOut(w, 400, map[string]string{"error": "Session ID is required"})
+		return
+	}
+	_, _ = a.db.Exec(`DELETE FROM messages WHERE session_id=?`, id)
+	if _, err := a.db.Exec(`DELETE FROM sessions WHERE id=?`, id); err != nil {
+		jsonOut(w, 500, map[string]string{"error": "Failed to delete session"})
+		return
+	}
+	jsonOut(w, 200, map[string]bool{"ok": true})
 }
 
 func (a *App) getMessages(w http.ResponseWriter, r *http.Request) {
@@ -878,8 +950,8 @@ func (a *App) sendMessage(w http.ResponseWriter, r *http.Request) {
 		jsonOut(w, 400, map[string]string{"error": "Invalid message text"})
 		return
 	}
-	var exists int
-	if a.db.QueryRow(`SELECT 1 FROM sessions WHERE id=?`, body.SessionID).Scan(&exists) != nil {
+	var currentTitle string
+	if a.db.QueryRow(`SELECT title FROM sessions WHERE id=?`, body.SessionID).Scan(&currentTitle) != nil {
 		jsonOut(w, 404, map[string]string{"error": "session not found"})
 		return
 	}
@@ -933,8 +1005,8 @@ func (a *App) sendMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	var count int
 	_ = a.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE session_id=?`, body.SessionID).Scan(&count)
-	if count <= 2 {
-		title := body.Message
+	if count <= 2 && (currentTitle == "" || currentTitle == "New conversation") {
+		title := strings.TrimSpace(body.Message)
 		if len([]rune(title)) > 42 {
 			title = string([]rune(title)[:42]) + "…"
 		}
@@ -1050,7 +1122,7 @@ func callOpenAICompatible(endpoint, key, prompt, model, label string) (string, e
 	req.Header.Set("Authorization", "Bearer "+key)
 	req.Header.Set("HTTP-Referer", "https://github.com/sahand363/sahand-cortext")
 	req.Header.Set("X-Title", "Sahand-CorText")
-	req.Header.Set("User-Agent", "Sahand-CorText/0.3.0")
+	req.Header.Set("User-Agent", "Sahand-CorText/0.3.1")
 
 	client := &http.Client{Timeout: 90 * time.Second}
 	resp, err := client.Do(req)
@@ -1133,11 +1205,16 @@ func main() {
 	mux.HandleFunc("/api/models", app.auth(app.handleModels))
 	mux.HandleFunc("/api/models/test", app.auth(app.handleTestModel))
 	mux.HandleFunc("/api/sessions", app.auth(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet {
+		switch r.Method {
+		case http.MethodGet:
 			app.listSessions(w, r)
-		} else if r.Method == http.MethodPost {
+		case http.MethodPost:
 			app.createSession(w, r)
-		} else {
+		case http.MethodPatch, http.MethodPut:
+			app.updateSession(w, r)
+		case http.MethodDelete:
+			app.deleteSession(w, r)
+		default:
 			http.Error(w, "method not allowed", 405)
 		}
 	}))
