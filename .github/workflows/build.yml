@@ -23,6 +23,10 @@ jobs:
           bash -n install.sh
           bash -n scripts/cortext-menu.sh
 
+      - name: Run automated tests
+        run: |
+          go test -v ./...
+
       - name: Build server binary
         run: |
           go mod tidy
