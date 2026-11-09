@@ -1,109 +1,82 @@
-# Sahand-Cortext
+# Sahand-Cortext · v0.2.0
 
-A lightweight, single-user private AI hub. The Ubuntu server hosts the web interface and sends provider requests server-side.
+A private, single-user AI workspace hosted on Ubuntu. The browser connects to the hub; provider requests are sent server-side.
 
-## Current MVP
+## Install
 
-- Single-user login with bcrypt password hash and HTTP-only session cookie
-- Gemini chat (Gemini 3.8 Flash / Gemini 4 Argon)
-- Persistent conversations and messages in SQLite
-- Model selection
-- Server/provider status
-- Minimal responsive web UI
-- systemd service and optional Caddy HTTPS
-
-Modules for additional providers, orchestration, topic memory, token analytics, and backups are represented in the UI/architecture but are not implemented yet.
-
-## Install on Ubuntu
-
-Use a clean Ubuntu 22.04/24.04 server. Point a domain's DNS A record to the server first if you want HTTPS.
+On a clean Ubuntu 22.04/24.04 server:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/sahand363/sahand-cortext/main/install.sh | sudo bash
 ```
 
-The installer installs dependencies, clones this repository, builds the Go server, asks for a panel username/password and optional Gemini API key, creates a restricted system user, and registers a systemd service.
+The installer displays numbered progress stages and APT's package progress, creates the first admin login, builds the Go server, and registers a systemd service.
 
-If you skip the domain, the app remains bound to localhost for safety. Use an SSH tunnel (`ssh -L 8787:127.0.0.1:8787 YOUR_USER@YOUR_SERVER`) and open `http://127.0.0.1:8787`. For normal access from Windows/mobile browsers, configure a domain with DNS pointing to the server and enable Caddy HTTPS during installation. Do not expose the app over plain HTTP on an untrusted network.
+After installation, the terminal prints the panel URL. Open it in your browser, sign in, and use the first-run Gemini setup card to save your API key. Then start chatting.
 
-## Gemini API key
+## SSH control menu
 
-Create a key in Google AI Studio and provide it during installation. To update it later:
+At any time:
 
 ```bash
-sudo nano /etc/sahand-cortext.env
-sudo systemctl restart sahand-cortext
+sudo cortext
 ```
 
-Keep this file private; it contains the provider key and password hash. The key is never sent to the browser.
+Menu options include:
+1. Show panel address
+2. Change username and password
+3. Configure/renew HTTPS with Caddy
+4. Restart service
+5. View live logs
+6. Uninstall (with a separate confirmation before deleting the database)
 
-## Useful commands
+## HTTPS
+
+Point a DNS A record to the server and make sure inbound TCP ports 80 and 443 are allowed. Run:
+
+```bash
+sudo cortext
+```
+
+Choose option 3 and enter the domain and certificate email. Caddy obtains and renews Let's Encrypt certificates automatically.
+
+## Gemini setup
+
+Sign in to the panel and enter the Gemini API key in the setup card or Settings → Gemini provider. The key is stored server-side in SQLite and is never saved in browser local storage. Protect `/var/lib/sahand-cortext` and keep server backups private.
+
+Models in this MVP: `gemini-2.5-flash` and `gemini-2.5-pro`.
+
+## Operations
 
 ```bash
 sudo systemctl status sahand-cortext
 sudo journalctl -u sahand-cortext -f
 sudo systemctl restart sahand-cortext
+sudo cortext
 ```
 
-Database and application data: `/var/lib/sahand-cortext/cortext.db`
+Database: `/var/lib/sahand-cortext/cortext.db`  
+Environment: `/etc/sahand-cortext.env`
 
-## Local development
+## Current functionality
 
-Requires Go 1.23+.
+- Single-user sign-in (bcrypt password hash, HTTP-only cookie)
+- First-run Gemini API key setup inside the web panel
+- Gemini chat with model selection
+- SQLite conversation persistence and session list
+- Responsive desktop/mobile interface
+- Settings, provider, memory, orchestration, usage and activity surfaces in the UI
+- SSH management menu, systemd, optional Caddy HTTPS
 
-```bash
-go mod tidy
-go run ./cmd/server
-```
+## Planned modules (UI is scaffolded; backend is not yet implemented)
 
-Set environment variables before running:
-
-```bash
-export HUB_USERNAME=admin
-export HUB_PASSWORD_HASH='<bcrypt hash>'
-export HUB_DATA_DIR=./data
-export HUB_WEB_DIR=./web/dist
-export HUB_ADDR=127.0.0.1:8787
-export GEMINI_API_KEY='your-key'
-go run ./cmd/server
-```
-
-Generate a bcrypt password hash:
-
-```bash
-go run ./cmd/server hash-password 'your-long-password'
-```
+- Provider registry and additional providers
+- Multi-model orchestration and coordinator agent
+- Topic summaries, topic extraction and relevant memory retrieval
+- Token/cost telemetry
+- Backup/restore and session export
+- API key rotation and encrypted secrets vault
 
 ## Security notes
 
-- The service binds to `127.0.0.1:8787`; Caddy is the recommended public HTTPS reverse proxy.
-- The installer creates a dedicated unprivileged `cortext` account.
-- SQLite data is stored outside the Git checkout.
-- API keys are stored in a root-readable environment file, not in browser storage.
-- Sessions are in-memory and expire after 24 hours; restarting the service signs users out.
-- This is an early MVP. Add rate limiting, CSRF defenses beyond SameSite cookies, session persistence/rotation, encrypted secrets, backup/restore, and stronger operational monitoring before treating it as a hardened production service.
-
-## Project layout
-
-```text
-sahand-cortext/
-├── cmd/server/main.go
-├── web/dist/
-│   ├── index.html
-│   ├── style.css
-│   └── app.js
-├── install.sh
-├── go.mod
-├── .gitignore
-└── README.md
-```
-
-## Roadmap
-
-1. Provider interface and additional AI providers
-2. Secure provider-key management and health checks
-3. Token usage and cost telemetry
-4. Topic memory with configurable retrieval
-5. Multi-model orchestration / agent coordinator
-6. Backup and restore
-7. GitHub Actions release artifacts
+This is an early single-user MVP, not a hardened public multi-tenant service. Use HTTPS for remote access. Add rate limiting, CSRF protections, session persistence/rotation, database encryption or a dedicated secrets store, audit logs, and backup/restore before relying on it for sensitive production workloads. The current chat endpoint sends each prompt as a single-turn request; conversation context assembly is a planned next step.
