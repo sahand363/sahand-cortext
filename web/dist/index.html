@@ -4,7 +4,7 @@
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="theme-color" content="#0b0d12"><title>Sahand-CorText</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@400;500;600;700;800&family=Noto+Sans+Arabic:wght@400;500;600;700&family=Vazirmatn:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -31,7 +31,7 @@
       <button class="nav-link" data-page="memory"><span class="nav-icon">◉</span>Topic memory <span class="soon">SOON</span></button>
       <button class="nav-link" data-page="sessions"><span class="nav-icon">◷</span>Sessions</button>
     </nav>
-    <div class="nav-caption recent-caption">RECENT CONVERSATIONS <button id="refresh-sessions" class="tiny-icon" title="Refresh">↻</button></div>
+    <div class="nav-caption recent-caption">CONVERSATIONS <button id="refresh-sessions" class="tiny-icon" title="Refresh">↻</button></div>
     <div class="session-list" id="session-list"></div>
     <div class="sidebar-bottom">
       <nav class="main-nav bottom-nav">
@@ -68,12 +68,31 @@
           <div class="capability-row"><span><i>✳</i> Google Gemini</span><span><i>⇄</i> OpenRouter (Free Models)</span><span><i>⚡</i> CodeCraft API</span></div>
         </div>
         <div id="chat-active" class="chat-active hidden">
-          <div class="conversation-head"><div><div class="eyebrow">PRIVATE CONVERSATION</div><h2 id="conversation-title">New conversation</h2></div><div class="conversation-tools"><span class="secure-label"><i></i> PRIVATE</span><button class="icon-btn" id="clear-view" title="New conversation">＋</button></div></div>
+          <div class="conversation-head">
+            <div class="conversation-title-area">
+              <div class="eyebrow">PRIVATE CONVERSATION</div>
+              <div class="title-display-row" id="title-display-row">
+                <span id="pinned-indicator" class="pinned-badge hidden" title="Pinned conversation">📌</span>
+                <h2 id="conversation-title" dir="auto">New conversation</h2>
+              </div>
+              <form id="rename-form" class="rename-bar hidden">
+                <input id="rename-input" dir="auto" type="text" maxlength="120" placeholder="Enter conversation name…">
+                <button type="submit" class="btn btn-primary btn-small">Save</button>
+                <button type="button" id="rename-cancel" class="btn btn-quiet btn-small">Cancel</button>
+              </form>
+            </div>
+            <div class="conversation-tools">
+              <button type="button" class="tool-btn" id="pin-session-btn" title="Pin or unpin conversation">📌 <span id="pin-session-label">Pin</span></button>
+              <button type="button" class="tool-btn" id="rename-session-btn" title="Rename conversation">✎ <span>Rename</span></button>
+              <button type="button" class="tool-btn danger" id="delete-session-btn" title="Delete conversation">🗑 <span id="delete-session-label">Delete</span></button>
+              <button type="button" class="tool-btn" id="clear-view" title="New conversation">＋ <span>New</span></button>
+            </div>
+          </div>
           <div class="messages" id="messages"></div>
           <div class="composer-area">
             <div class="composer-context"><span><i class="live-dot"></i> <b id="active-provider-label">Gemini</b> · <span id="active-model-label">gemini-2.0-flash</span></span><span>Responses are routed through your hub</span></div>
             <form id="chat-form" class="composer">
-              <textarea id="message-input" rows="1" placeholder="Ask anything. Start with an idea…" required></textarea>
+              <textarea id="message-input" dir="auto" rows="1" placeholder="Ask anything in Persian or English… / پیام خود را بنویسید…" required></textarea>
               <div class="composer-bottom">
                 <div class="composer-left">
                   <div class="model-picker"><span class="gemini-glyph">✳</span><select id="model"><option value="gemini::gemini-2.0-flash">gemini-2.0-flash</option></select><span class="select-arrow">⌄</span></div>
@@ -104,15 +123,17 @@
         </div>
 
         <div class="provider-feature">
-          <div class="provider-main">
-            <div class="provider-logo gemini-logo" id="models-feature-logo">✳</div>
-            <div>
-              <div class="provider-overline">SELECTED PROVIDER</div>
-              <h3 id="models-feature-title">Google Gemini API</h3>
-              <p id="models-feature-desc">Click any model card below to test live generation and set it as your active chat model.</p>
+          <div class="provider-feature-head">
+            <div class="provider-main">
+              <div class="provider-logo gemini-logo" id="models-feature-logo">✳</div>
+              <div>
+                <div class="provider-overline">SELECTED PROVIDER</div>
+                <h3 id="models-feature-title">Google Gemini API</h3>
+                <p id="models-feature-desc">Click any model card below to test live generation and set it as your active chat model.</p>
+              </div>
             </div>
+            <span class="status-pill" id="models-provider-status">Needs setup</span>
           </div>
-          <span class="status-pill" id="models-provider-status">Needs setup</span>
 
           <div class="filter-bar">
             <div id="models-page-summary" class="models-summary">Select a provider or add its API key in Settings.</div>
@@ -131,7 +152,7 @@
 
       <section id="page-memory" class="page module-page hidden"><div class="page-heading"><div><div class="eyebrow">CONTEXT THAT COMPOUNDS</div><h1>Topic memory</h1><p>Keep useful context across conversations without carrying everything.</p></div><span class="status-pill planned">IN DEVELOPMENT</span></div><div class="memory-layout"><div class="memory-card"><div class="memory-card-top"><span>◉</span><span class="soon-pill">PREVIEW</span></div><h3>Relevant by design.</h3><p>Topic summaries, important facts and project context can be retrieved when a new conversation needs them.</p><div class="memory-switch-row"><div><b>Topic memory</b><small>Enable cross-session retrieval</small></div><span class="switch disabled"><i></i></span></div></div><div class="memory-card"><div class="memory-card-top"><span>⌁</span></div><h3>Context selection</h3><p>Only information relevant to the current topic should be added to the model context.</p><div class="memory-tags"><span>Topic summaries</span><span>Key facts</span><span>Project context</span></div></div></div></section>
 
-      <section id="page-sessions" class="page module-page hidden"><div class="page-heading"><div><div class="eyebrow">YOUR WORK, ORGANIZED</div><h1>Sessions</h1><p>Pick up where you left off.</p></div><button class="btn btn-primary btn-small" id="sessions-new">＋ New session</button></div><div id="sessions-grid" class="sessions-grid"></div></section>
+      <section id="page-sessions" class="page module-page hidden"><div class="page-heading"><div><div class="eyebrow">YOUR WORK, ORGANIZED</div><h1>Sessions</h1><p>Pin important chats, rename conversations, or clean up old threads.</p></div><button class="btn btn-primary btn-small" id="sessions-new">＋ New session</button></div><div id="sessions-grid" class="sessions-grid"></div></section>
 
       <section id="page-usage" class="page module-page hidden"><div class="page-heading"><div><div class="eyebrow">OBSERVABILITY</div><h1>Usage & analytics</h1><p>Understand model activity, response times and token usage.</p></div><span class="status-pill planned">IN DEVELOPMENT</span></div><div class="metric-grid"><div class="metric-card"><span>Tokens used</span><b>—</b><small>Waiting for telemetry module</small></div><div class="metric-card"><span>Requests</span><b>—</b><small>Waiting for telemetry module</small></div><div class="metric-card"><span>Average latency</span><b>—</b><small>Response timing will appear here</small></div></div><div class="chart-placeholder"><div class="chart-bars"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div><span>ACTIVITY VISUALIZATION · COMING SOON</span></div></section>
 
@@ -196,13 +217,13 @@
               </div>
             </div>
 
-            <div id="general-settings" class="settings-panel hidden"><div class="settings-section-head"><div><h2>Workspace preferences</h2><p>Personalize how your workspace behaves.</p></div></div><div class="setting-row"><div><b>Multi-provider gateway</b><small>Gemini, OpenRouter, and CodeCraft API unified in one hub.</small></div><span class="status-pill connected">Active</span></div><div class="setting-row"><div><b>Topic memory</b><small>Recall relevant information between sessions.</small></div><span class="status-pill planned">COMING SOON</span></div><div class="setting-row"><div><b>Interface scale</b><small>Optimized 130% readable typography and layout.</small></div><span class="status-pill connected">130% Comfort</span></div></div>
+            <div id="general-settings" class="settings-panel hidden"><div class="settings-section-head"><div><h2>Workspace preferences</h2><p>Personalize how your workspace behaves.</p></div></div><div class="setting-row"><div><b>Persian & BiDi typography</b><small>Vazirmatn font + automatic RTL/LTR mixed sentence alignment.</small></div><span class="status-pill connected">Enabled</span></div><div class="setting-row"><div><b>Multi-provider gateway</b><small>Gemini, OpenRouter, and CodeCraft API unified in one hub.</small></div><span class="status-pill connected">Active</span></div><div class="setting-row"><div><b>Interface scale</b><small>Optimized 130% readable typography and layout.</small></div><span class="status-pill connected">130% Comfort</span></div></div>
             <div id="security-settings" class="settings-panel hidden"><div class="settings-section-head"><div><h2>Security & access</h2><p>Controls for your private, single-user installation.</p></div></div><div class="setting-row"><div><b>Single-user authentication</b><small>Login protected with a bcrypt password hash and persistent SQLite session.</small></div><span class="status-pill connected">Enabled</span></div><div class="setting-row"><div><b>Server-side provider keys</b><small>API credentials are never stored in browser storage.</small></div><span class="status-pill connected">Enabled</span></div><div class="setting-row"><div><b>Change login credentials</b><small>Use the SSH control center: <code>sudo cortext</code></small></div><span class="status-pill">SSH menu</span></div></div>
           </div>
         </div>
       </section>
     </div>
-    <footer><span>SAHAND-CORTEXT</span><i>·</i> PRIVATE MULTI-PROVIDER AI WORKSPACE <b>v0.3.0</b></footer>
+    <footer><span>SAHAND-CORTEXT</span><i>·</i> PRIVATE MULTI-PROVIDER AI WORKSPACE <b>v0.3.1</b></footer>
   </main>
 </div>
 <div id="toast" class="toast"></div>
