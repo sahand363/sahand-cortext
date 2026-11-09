@@ -5,29 +5,35 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/sahand363/sahand-cortext/internal/chat"
+	"github.com/sahand363/sahand-cortext/internal/orchestration"
 	"github.com/sahand363/sahand-cortext/internal/provider"
 	"golang.org/x/crypto/bcrypt"
 	_ "modernc.org/sqlite"
 )
 
 type App struct {
-	db       *sql.DB
-	mu       sync.RWMutex
-	sessions map[string]time.Time
-	router   *provider.Router
+	db          *sql.DB
+	mu          sync.RWMutex
+	sessions    map[string]time.Time
+	router      *provider.Router
+	orchStorage *orchestration.Storage
+	orchPool    *orchestration.WorkerPool
 }
 
 type Session struct {
@@ -53,9 +59,9 @@ type ModelInfo struct {
 	IsFree      bool    `json:"is_free"`
 	PriceInfo   string  `json:"price_info"`
 	SortPrice   float64 `json:"-"`
-	Status      string  `json:"status"`     // "untested", "working", "failed"
-	LatencyMs   int64   `json:"latency_ms"` // last test latency
-	LastError   string  `json:"last_error"` // error from last test if failed
+	Status      string  `json:"status"`
+	LatencyMs   int64   `json:"latency_ms"`
+	LastError   string  `json:"last_error"`
 }
 
 type ModelTestRecord struct {
@@ -67,6 +73,15 @@ type ModelTestRecord struct {
 func env(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
+	}
+	return fallback
+}
+
+func envInt(key string, fallback int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
 	}
 	return fallback
 }
@@ -113,7 +128,7 @@ func (a *App) initDB() error {
 		}
 	}
 	_, _ = a.db.Exec(`ALTER TABLE sessions ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;`)
-	return nil
+	return a.orchStorage.InitSchema()
 }
 
 func (a *App) setting(key string) string {
@@ -295,7 +310,7 @@ func (a *App) status(w http.ResponseWriter, r *http.Request) {
 	cCfg := a.providerKey("codecraft") != ""
 	jsonOut(w, 200, map[string]any{
 		"status":                "online",
-		"version":               "0.3.5",
+		"version":               "0.4.0",
 		"gemini_configured":     gCfg,
 		"openrouter_configured": oCfg,
 		"codecraft_configured":  cCfg,
@@ -892,7 +907,6 @@ func (a *App) getMessages(w http.ResponseWriter, r *http.Request) {
 	jsonOut(w, 200, out)
 }
 
-// sendMessage now dispatches the full multi-turn conversational history for the session
 func (a *App) sendMessage(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		SessionID string `json:"session_id"`
@@ -934,14 +948,14 @@ func (a *App) sendMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 1. Record incoming user turn in SQLite
+	// 1. Persist user turn
 	_, err := a.db.Exec(`INSERT INTO messages(session_id,role,content) VALUES(?,?,?)`, body.SessionID, "user", body.Message)
 	if err != nil {
 		jsonOut(w, 500, map[string]string{"error": "database error"})
 		return
 	}
 
-	// 2. Load conversation history strictly for this session
+	// 2. Fetch entire history for session and apply safe context truncation
 	rows, err := a.db.Query(`SELECT role, content FROM messages WHERE session_id=? ORDER BY id ASC`, body.SessionID)
 	if err != nil {
 		jsonOut(w, 500, map[string]string{"error": "database error"})
@@ -956,26 +970,9 @@ func (a *App) sendMessage(w http.ResponseWriter, r *http.Request) {
 			history = append(history, provider.Message{Role: role, Content: content})
 		}
 	}
+	promptMessages := chat.TruncateHistory(history, chat.DefaultConfig())
 
-	// 3. Apply safe context window truncation
-	maxMsgs := 20
-	if v := os.Getenv("HUB_MAX_CHAT_HISTORY_MESSAGES"); v != "" {
-		if n, e := strconv.Atoi(v); e == nil && n > 0 {
-			maxMsgs = n
-		}
-	}
-	maxChars := 32000
-	if v := os.Getenv("HUB_MAX_CHAT_HISTORY_CHARS"); v != "" {
-		if n, e := strconv.Atoi(v); e == nil && n > 0 {
-			maxChars = n
-		}
-	}
-	promptMessages := chat.TruncateHistory(history, chat.HistoryConfig{
-		MaxMessages: maxMsgs,
-		MaxChars:    maxChars,
-	})
-
-	// 4. Dispatch structured history to the selected provider
+	// 3. Dispatch structured history to provider
 	answer, elapsed, err := a.router.Call(r.Context(), normProvider, key, chosenModel, promptMessages, provider.CallOpts{})
 	if err != nil {
 		a.saveTestRecord(normProvider, chosenModel, ModelTestRecord{Status: "failed", LatencyMs: elapsed, LastError: err.Error()})
@@ -986,14 +983,14 @@ func (a *App) sendMessage(w http.ResponseWriter, r *http.Request) {
 	a.saveTestRecord(normProvider, chosenModel, ModelTestRecord{Status: "working", LatencyMs: elapsed})
 	a.setActiveSelection(normProvider, chosenModel)
 
-	// 5. Persist assistant reply in SQLite
+	// 4. Persist assistant reply
 	_, err = a.db.Exec(`INSERT INTO messages(session_id,role,content) VALUES(?,?,?)`, body.SessionID, "assistant", answer)
 	if err != nil {
 		jsonOut(w, 500, map[string]string{"error": "database error"})
 		return
 	}
 
-	// 6. Update session metadata and title if first exchange
+	// 5. Update session title
 	var count int
 	_ = a.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE session_id=?`, body.SessionID).Scan(&count)
 	if count <= 2 && (currentTitle == "" || currentTitle == "New conversation") {
@@ -1014,6 +1011,118 @@ func (a *App) sendMessage(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// Orchestration REST Endpoints
+func (a *App) orchCreateJob(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", 405)
+		return
+	}
+	var req struct {
+		Task      string         `json:"task"`
+		MaxRounds int            `json:"max_rounds"`
+		MaxCalls  int            `json:"max_calls"`
+		Metadata  map[string]any `json:"metadata"`
+	}
+	if json.NewDecoder(http.MaxBytesReader(w, r.Body, 64*1024)).Decode(&req) != nil || strings.TrimSpace(req.Task) == "" {
+		jsonOut(w, 400, map[string]string{"error": "Valid task description is required"})
+		return
+	}
+
+	metaBytes, _ := json.Marshal(req.Metadata)
+	job, err := a.orchStorage.CreateJob(r.Context(), req.Task, req.MaxRounds, req.MaxCalls, string(metaBytes))
+	if err != nil {
+		jsonOut(w, 500, map[string]string{"error": "Failed creating job: " + err.Error()})
+		return
+	}
+
+	jsonOut(w, 201, job)
+}
+
+func (a *App) orchListJobs(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", 405)
+		return
+	}
+	limit := 50
+	if l := r.URL.Query().Get("limit"); l != "" {
+		if n, err := strconv.Atoi(l); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	offset := 0
+	if o := r.URL.Query().Get("offset"); o != "" {
+		if n, err := strconv.Atoi(o); err == nil && n >= 0 {
+			offset = n
+		}
+	}
+	status := r.URL.Query().Get("status")
+
+	jobs, err := a.orchStorage.ListJobs(r.Context(), limit, offset, status)
+	if err != nil {
+		jsonOut(w, 500, map[string]string{"error": "Failed listing jobs: " + err.Error()})
+		return
+	}
+	jsonOut(w, 200, jobs)
+}
+
+func (a *App) orchGetJob(w http.ResponseWriter, r *http.Request) {
+	jobID := strings.TrimPrefix(r.URL.Path, "/api/orchestration/jobs/")
+	jobID = strings.TrimSuffix(jobID, "/events")
+	jobID = strings.TrimSuffix(jobID, "/cancel")
+
+	if jobID == "" {
+		jsonOut(w, 400, map[string]string{"error": "Job ID is required"})
+		return
+	}
+
+	if strings.HasSuffix(r.URL.Path, "/events") {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", 405)
+			return
+		}
+		events, err := a.orchStorage.GetJobEvents(r.Context(), jobID)
+		if err != nil {
+			jsonOut(w, 500, map[string]string{"error": "Failed retrieving events: " + err.Error()})
+			return
+		}
+		jsonOut(w, 200, events)
+		return
+	}
+
+	if strings.HasSuffix(r.URL.Path, "/cancel") {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", 405)
+			return
+		}
+		if err := a.orchStorage.CancelJob(r.Context(), jobID); err != nil {
+			if errors.Is(err, orchestration.ErrJobNotFound) {
+				jsonOut(w, 404, map[string]string{"error": "Job not found or already completed"})
+				return
+			}
+			jsonOut(w, 500, map[string]string{"error": "Cancellation failed: " + err.Error()})
+			return
+		}
+		jsonOut(w, 200, map[string]any{"id": jobID, "status": "cancelled", "cancelled": true})
+		return
+	}
+
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", 405)
+		return
+	}
+
+	job, err := a.orchStorage.GetJob(r.Context(), jobID)
+	if err != nil {
+		if errors.Is(err, orchestration.ErrJobNotFound) {
+			jsonOut(w, 404, map[string]string{"error": "Job not found"})
+			return
+		}
+		jsonOut(w, 500, map[string]string{"error": "Error retrieving job: " + err.Error()})
+		return
+	}
+	jsonOut(w, 200, job)
+}
+
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "hash-password" {
 		if len(os.Args) < 3 {
@@ -1027,10 +1136,9 @@ func main() {
 		fmt.Println(string(h))
 		return
 	}
+
 	dataDir := env("HUB_DATA_DIR", "./data")
-	if e := os.MkdirAll(dataDir, 0700); e != nil {
-		log.Fatal(e)
-	}
+	_ = os.MkdirAll(dataDir, 0700)
 	db, e := sql.Open("sqlite", filepath.Join(dataDir, "cortext.db"))
 	if e != nil {
 		log.Fatal(e)
@@ -1038,14 +1146,23 @@ func main() {
 	defer db.Close()
 	db.SetMaxOpenConns(1)
 
+	orchStorage := orchestration.NewStorage(db)
+	orchPool := orchestration.NewWorkerPool(orchStorage, nil, envInt("ORCHESTRATION_WORKERS", 2))
+
 	app := &App{
-		db:       db,
-		sessions: map[string]time.Time{},
-		router:   provider.NewRouter(),
+		db:          db,
+		sessions:    map[string]time.Time{},
+		router:      provider.NewRouter(),
+		orchStorage: orchStorage,
+		orchPool:    orchPool,
 	}
 	if e = app.initDB(); e != nil {
 		log.Fatal(e)
 	}
+
+	// Start worker pool with root context
+	workerCtx, workerCancel := context.WithCancel(context.Background())
+	orchPool.Start(workerCtx)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/login", app.login)
@@ -1055,6 +1172,8 @@ func main() {
 	mux.HandleFunc("/api/setup/provider", app.auth(app.saveProviderKey))
 	mux.HandleFunc("/api/models", app.auth(app.handleModels))
 	mux.HandleFunc("/api/models/test", app.auth(app.handleTestModel))
+
+	// Sessions & Ordinary Chat
 	mux.HandleFunc("/api/sessions", app.auth(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
@@ -1079,15 +1198,45 @@ func main() {
 		}
 	}))
 
+	// Orchestration REST Endpoints
+	mux.HandleFunc("/api/orchestration/jobs", app.auth(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			app.orchListJobs(w, r)
+		} else if r.Method == http.MethodPost {
+			app.orchCreateJob(w, r)
+		} else {
+			http.Error(w, "method not allowed", 405)
+		}
+	}))
+	mux.HandleFunc("/api/orchestration/jobs/", app.auth(app.orchGetJob))
+
 	webDir := env("HUB_WEB_DIR", "./web/dist")
 	mux.Handle("/", http.FileServer(http.Dir(webDir)))
+
 	server := &http.Server{
 		Addr:              env("HUB_ADDR", "0.0.0.0:8787"),
 		Handler:           securityHeaders(mux),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
-	log.Printf("Sahand-CorText v0.3.5 listening on %s", server.Addr)
-	log.Fatal(server.ListenAndServe())
+
+	// Graceful Shutdown handling
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-sigChan
+		log.Println("[Server] Graceful shutdown signal received. Stopping worker pool...")
+		workerCancel()
+		orchPool.Stop()
+
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutdownCancel()
+		_ = server.Shutdown(shutdownCtx)
+	}()
+
+	log.Printf("Sahand-CorText v0.4.0 listening on %s", server.Addr)
+	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		log.Fatal(err)
+	}
 }
 
 func securityHeaders(next http.Handler) http.Handler {
