@@ -1,0 +1,73 @@
+package orchestration
+
+import "time"
+
+// JobStatus represents the state of an orchestration job
+type JobStatus string
+
+const (
+	StatusQueued    JobStatus = "queued"
+	StatusRunning   JobStatus = "running"
+	StatusWaiting   JobStatus = "waiting"
+	StatusCompleted JobStatus = "completed"
+	StatusFailed    JobStatus = "failed"
+	StatusCancelled JobStatus = "cancelled"
+)
+
+// EventType represents the durable event category in the audit trail
+type EventType string
+
+const (
+	EventJobCreated     EventType = "job_created"
+	EventJobClaimed     EventType = "job_claimed"
+	EventJobStarted     EventType = "job_started"
+	EventJobWaiting     EventType = "job_waiting"
+	EventRetryScheduled EventType = "retry_scheduled"
+	EventJobFailed      EventType = "job_failed"
+	EventJobCompleted   EventType = "job_completed"
+	EventJobCancelled   EventType = "job_cancelled"
+	EventWorkerRecovery EventType = "worker_recovery"
+	EventStepProgress   EventType = "step_progress"
+)
+
+// Job represents an orchestration workflow execution unit
+type Job struct {
+	ID              string     `json:"id"`
+	Task            string     `json:"task"`
+	Status          JobStatus  `json:"status"`
+	MaxRounds       int        `json:"max_rounds"`
+	MaxCalls        int        `json:"max_calls"`
+	CurrentRound    int        `json:"current_round"`
+	TotalCalls      int        `json:"total_calls"`
+	RetryCount      int        `json:"retry_count"`
+	MaxRetries      int        `json:"max_retries"`
+	ClaimedBy       string     `json:"claimed_by,omitempty"`
+	LeaseExpiresAt  *time.Time `json:"lease_expires_at,omitempty"`
+	Metadata        string     `json:"metadata"`
+	ExecutionResult string     `json:"execution_result,omitempty"`
+	ErrorMessage    string     `json:"error_message,omitempty"`
+	CreatedAt       time.Time  `json:"created_at"`
+	UpdatedAt       time.Time  `json:"updated_at"`
+	StartedAt       *time.Time `json:"started_at,omitempty"`
+	CompletedAt     *time.Time `json:"completed_at,omitempty"`
+}
+
+// Event represents an immutable timestamped execution step
+type Event struct {
+	ID        int64     `json:"id"`
+	JobID     string    `json:"job_id"`
+	EventType EventType `json:"event_type"`
+	Phase     string    `json:"phase"`
+	WorkerID  string    `json:"worker_id,omitempty"`
+	Message   string    `json:"message"`
+	Payload   string    `json:"payload"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// WorkerLease tracks background worker health
+type WorkerLease struct {
+	WorkerID      string    `json:"worker_id"`
+	LastHeartbeat time.Time `json:"last_heartbeat"`
+	ActiveJobID   string    `json:"active_job_id,omitempty"`
+	Status        string    `json:"status"`
+}
