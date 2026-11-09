@@ -1,10 +1,12 @@
 const $ = id => document.getElementById(id);
-let currentSession = null, toastTimer;
+let currentSession = null, toastTimer, deleteConfirmTimer;
+let sessionsCache = [];
 
 let selectedProvider = "gemini"; // currently viewed tab in Settings / Models
 let activeProvider = "gemini";   // active provider used for Chat
 let activeModel = "gemini-2.0-flash";
 let freeOnlyOpenRouter = true;   // default to showing :free models first on OpenRouter
+let deleteArmed = false;
 
 const providerCatalog = {
   gemini: {
@@ -35,7 +37,7 @@ const providerCatalog = {
     icon: "⚡",
     placeholder: "Paste your CodeCraft API key (cc_...)",
     label: "CodeCraft API Key (https://codecraftapi.com/v1)",
-    desc: "Connect CodeCraft API to test which of their 33 hosted models respond on your free starter plan.",
+    desc: "Connect CodeCraft API to test which of their hosted models respond on your plan.",
     helpText: "Get a CodeCraft API key:",
     helpUrl: "https://codecraftapi.com/docs/getting-started",
     helpBtn: "Open CodeCraft Docs ↗"
@@ -182,7 +184,6 @@ function switchProviderTab(provider) {
   $("models-feature-title").textContent = meta.name;
   $("models-feature-desc").textContent = meta.desc;
 
-  // Show the ":free only" checkbox on OpenRouter
   const showFreeToggle = provider === "openrouter";
   $("settings-free-filter-wrap").classList.toggle("hidden", !showFreeToggle);
   $("models-free-filter-wrap").classList.toggle("hidden", !showFreeToggle);
@@ -236,29 +237,137 @@ $("logout").onclick = async () => {
   try { await api("/api/logout", { method: "POST" }); } finally { showLogin(); }
 };
 
+function updateCurrentSessionHeader() {
+  const cur = sessionsCache.find(s => s.id === currentSession);
+  resetDeleteButton();
+  closeRenameBar();
+  if (!cur) return;
+  $("conversation-title").textContent = cur.title;
+  $("pinned-indicator").classList.toggle("hidden", !cur.pinned);
+  $("pin-session-label").textContent = cur.pinned ? "Unpin" : "Pin";
+  $("pin-session-btn").classList.toggle("active-tool", !!cur.pinned);
+}
+
 async function loadSessions() {
   const sessions = await api("/api/sessions");
+  sessionsCache = sessions || [];
   $("session-list").innerHTML = "";
   $("sessions-grid").innerHTML = "";
-  $("chat-count").textContent = String(sessions.length).padStart(2, "0");
-  sessions.forEach(s => {
-    const b = document.createElement("button");
-    b.className = "session-item" + (s.id === currentSession ? " active" : "");
-    b.textContent = s.title;
-    b.onclick = () => openSession(s.id);
-    $("session-list").appendChild(b);
+  $("chat-count").textContent = String(sessionsCache.length).padStart(2, "0");
 
-    const card = document.createElement("button");
-    card.className = "session-card";
+  sessionsCache.forEach(s => {
+    // Sidebar row with hover quick actions (Pin, Rename, Delete)
+    const row = document.createElement("div");
+    row.className = "session-row" + (s.id === currentSession ? " active" : "");
+
+    const openBtn = document.createElement("button");
+    openBtn.type = "button";
+    openBtn.className = "session-item";
+    openBtn.setAttribute("dir", "auto");
+    openBtn.textContent = (s.pinned ? "📌 " : "") + s.title;
+    openBtn.onclick = () => {
+      switchPage("chat");
+      openSession(s.id);
+    };
+
+    const actions = document.createElement("div");
+    actions.className = "session-row-actions";
+
+    const pinBtn = document.createElement("button");
+    pinBtn.type = "button";
+    pinBtn.className = "mini-act" + (s.pinned ? " is-pinned" : "");
+    pinBtn.title = s.pinned ? "Unpin" : "Pin to top";
+    pinBtn.textContent = "📌";
+    pinBtn.onclick = e => {
+      e.stopPropagation();
+      togglePinSession(s.id, !s.pinned);
+    };
+
+    const renBtn = document.createElement("button");
+    renBtn.type = "button";
+    renBtn.className = "mini-act";
+    renBtn.title = "Rename";
+    renBtn.textContent = "✎";
+    renBtn.onclick = async e => {
+      e.stopPropagation();
+      if (currentSession !== s.id) {
+        switchPage("chat");
+        await openSession(s.id, false);
+      }
+      openRenameBar();
+    };
+
+    const delBtn = document.createElement("button");
+    delBtn.type = "button";
+    delBtn.className = "mini-act danger";
+    delBtn.title = "Delete conversation";
+    delBtn.textContent = "×";
+    delBtn.onclick = e => {
+      e.stopPropagation();
+      deleteSessionById(s.id);
+    };
+
+    actions.append(pinBtn, renBtn, delBtn);
+    row.append(openBtn, actions);
+    $("session-list").appendChild(row);
+
+    // Sessions Page Card
+    const card = document.createElement("div");
+    card.className = "session-card" + (s.pinned ? " is-pinned" : "");
+
+    const cardMain = document.createElement("div");
+    cardMain.className = "session-card-main";
+    cardMain.onclick = () => { switchPage("chat"); openSession(s.id); };
+
     const title = document.createElement("b");
-    title.textContent = s.title;
+    title.setAttribute("dir", "auto");
+    title.textContent = (s.pinned ? "📌 " : "") + s.title;
     const meta = document.createElement("span");
     meta.textContent = "Open conversation →";
-    card.append(title, meta);
-    card.onclick = () => { switchPage("chat"); openSession(s.id); };
+    cardMain.append(title, meta);
+
+    const cardTools = document.createElement("div");
+    cardTools.className = "session-card-tools";
+
+    const cPin = document.createElement("button");
+    cPin.type = "button";
+    cPin.className = "tool-btn small";
+    cPin.textContent = s.pinned ? "📌 Unpin" : "📌 Pin";
+    cPin.onclick = () => togglePinSession(s.id, !s.pinned);
+
+    const cRen = document.createElement("button");
+    cRen.type = "button";
+    cRen.className = "tool-btn small";
+    cRen.textContent = "✎ Rename";
+    cRen.onclick = async () => {
+      switchPage("chat");
+      await openSession(s.id, false);
+      openRenameBar();
+    };
+
+    const cDel = document.createElement("button");
+    cDel.type = "button";
+    cDel.className = "tool-btn small danger";
+    cDel.textContent = "🗑 Delete";
+    cDel.onclick = () => deleteSessionById(s.id);
+
+    cardTools.append(cPin, cRen, cDel);
+    card.append(cardMain, cardTools);
     $("sessions-grid").appendChild(card);
   });
-  if (!currentSession && sessions.length) await openSession(sessions[0].id, false);
+
+  if (currentSession && !sessionsCache.some(s => s.id === currentSession)) {
+    currentSession = null;
+  }
+
+  if (!currentSession && sessionsCache.length) {
+    await openSession(sessionsCache[0].id, false);
+  } else if (!sessionsCache.length) {
+    $("chat-active").classList.add("hidden");
+    $("chat-empty").classList.remove("hidden");
+  } else {
+    updateCurrentSessionHeader();
+  }
 }
 
 async function newSession() {
@@ -279,10 +388,97 @@ async function openSession(id, refresh = true) {
   $("chat-active").classList.remove("hidden");
   $("messages").innerHTML = "";
   msgs.forEach(addMessage);
-  const sessionBtn = [...$("session-list").children].find(x => x.classList.contains("active"));
-  $("conversation-title").textContent = sessionBtn?.textContent || "Conversation";
   if (refresh) await loadSessions();
+  updateCurrentSessionHeader();
   $("messages").scrollTop = $("messages").scrollHeight;
+}
+
+async function togglePinSession(id, pinned) {
+  try {
+    await api("/api/sessions", {
+      method: "PATCH",
+      body: JSON.stringify({ id, pinned })
+    });
+    toast(pinned ? "📌 Conversation pinned to top" : "Conversation unpinned");
+    await loadSessions();
+  } catch (err) {
+    toast("Could not update pin: " + err.message);
+  }
+}
+
+function openRenameBar() {
+  if (!currentSession) return;
+  const cur = sessionsCache.find(s => s.id === currentSession);
+  $("title-display-row").classList.add("hidden");
+  $("rename-form").classList.remove("hidden");
+  $("rename-input").value = cur ? cur.title : $("conversation-title").textContent;
+  $("rename-input").focus();
+  $("rename-input").select();
+}
+
+function closeRenameBar() {
+  $("rename-form").classList.add("hidden");
+  $("title-display-row").classList.remove("hidden");
+}
+
+$("rename-session-btn").onclick = () => openRenameBar();
+$("conversation-title").onclick = () => openRenameBar();
+$("rename-cancel").onclick = () => closeRenameBar();
+
+$("rename-form").addEventListener("submit", async e => {
+  e.preventDefault();
+  if (!currentSession) return;
+  const newTitle = $("rename-input").value.trim();
+  if (!newTitle) return;
+  try {
+    await api("/api/sessions", {
+      method: "PATCH",
+      body: JSON.stringify({ id: currentSession, title: newTitle })
+    });
+    closeRenameBar();
+    toast("✓ Conversation renamed");
+    await loadSessions();
+  } catch (err) {
+    toast("Rename failed: " + err.message);
+  }
+});
+
+$("pin-session-btn").onclick = () => {
+  if (!currentSession) return;
+  const cur = sessionsCache.find(s => s.id === currentSession);
+  togglePinSession(currentSession, !(cur && cur.pinned));
+};
+
+function resetDeleteButton() {
+  deleteArmed = false;
+  clearTimeout(deleteConfirmTimer);
+  if ($("delete-session-label")) $("delete-session-label").textContent = "Delete";
+  if ($("delete-session-btn")) $("delete-session-btn").classList.remove("armed");
+}
+
+$("delete-session-btn").onclick = async () => {
+  if (!currentSession) return;
+  if (!deleteArmed) {
+    deleteArmed = true;
+    $("delete-session-label").textContent = "Confirm?";
+    $("delete-session-btn").classList.add("armed");
+    clearTimeout(deleteConfirmTimer);
+    deleteConfirmTimer = setTimeout(() => resetDeleteButton(), 3500);
+    return;
+  }
+  await deleteSessionById(currentSession);
+};
+
+async function deleteSessionById(id) {
+  try {
+    await api("/api/sessions?id=" + encodeURIComponent(id), { method: "DELETE" });
+    resetDeleteButton();
+    if (currentSession === id) currentSession = null;
+    toast("🗑 Conversation deleted");
+    await loadSessions();
+  } catch (err) {
+    toast("Delete failed: " + err.message);
+  }
 }
 
 function addMessage(m) {
@@ -293,6 +489,7 @@ function addMessage(m) {
   av.textContent = m.role === "user" ? "S" : "✳";
   const bubble = document.createElement("div");
   bubble.className = "bubble";
+  bubble.setAttribute("dir", "auto");
   bubble.textContent = m.content;
   row.append(av, bubble);
   $("messages").appendChild(row);
@@ -409,7 +606,6 @@ function syncModelDropdown() {
   if (!sel) return;
   sel.innerHTML = "";
 
-  // Group 1: All Verified Working Models across all providers
   const workingGroup = document.createElement("optgroup");
   workingGroup.label = "★ Verified Working Models";
   let hasWorking = false;
@@ -426,13 +622,11 @@ function syncModelDropdown() {
   });
   if (hasWorking) sel.appendChild(workingGroup);
 
-  // Group per provider
   ["gemini", "openrouter", "codecraft"].forEach(p => {
     const list = providerState[p].models || [];
     if (!list.length) return;
     const grp = document.createElement("optgroup");
     grp.label = providerCatalog[p].name;
-    // For OpenRouter, avoid adding 300+ untested paid models to dropdown; show working + free + top 25
     const filtered = p === "openrouter" ? list.filter((m, idx) => m.status === "working" || m.is_free || idx < 25) : list;
     filtered.forEach(m => {
       const opt = document.createElement("option");
@@ -502,10 +696,13 @@ function renderModelGrids() {
       top.className = "api-model-top";
 
       const titleWrap = document.createElement("div");
+      titleWrap.className = "api-model-title";
       const nameEl = document.createElement("b");
       nameEl.textContent = m.display_name || m.id;
+      nameEl.title = m.display_name || m.id;
       const codeEl = document.createElement("small");
       codeEl.textContent = m.id;
+      codeEl.title = m.id;
       titleWrap.append(nameEl, codeEl);
 
       const badgeWrap = document.createElement("div");
@@ -526,13 +723,13 @@ function renderModelGrids() {
       const statusBadge = document.createElement("span");
       statusBadge.className = `model-badge badge-${m.status || "untested"}`;
       if (m.status === "working") {
-        statusBadge.textContent = `✓ WORKING · ${m.latency_ms} ms`;
+        statusBadge.textContent = `✓ ${m.latency_ms} ms`;
       } else if (m.status === "testing") {
         statusBadge.textContent = "⟳ TESTING…";
       } else if (m.status === "failed") {
         statusBadge.textContent = "✗ FAILED";
       } else {
-        statusBadge.textContent = "CLICK TO TEST";
+        statusBadge.textContent = "TEST";
       }
       badgeWrap.appendChild(statusBadge);
       top.append(titleWrap, badgeWrap);
@@ -548,7 +745,8 @@ function renderModelGrids() {
       } else {
         const ctx = m.context_len ? `Context: ${m.context_len.toLocaleString()} tokens` : "";
         const price = m.price_info ? `${m.price_info}` : "";
-        const infoLine = [price, ctx, m.description].filter(Boolean).join(" · ");
+        const cleanDesc = (m.description || "").replace(/\s+/g, " ").trim();
+        const infoLine = [price, ctx, cleanDesc].filter(Boolean).join(" · ");
         metaRow.textContent = infoLine || "Click to send a test prompt and verify if this model works.";
       }
 
@@ -613,7 +811,6 @@ async function testShownModels() {
   toast(`Done! ${workingCount} working models found on ${providerCatalog[provider].name}.`);
 }
 
-// Save API Key & Load Models for Selected Provider (Does not close window!)
 $("api-key-form").addEventListener("submit", async e => {
   e.preventDefault();
   const provider = selectedProvider;
@@ -679,7 +876,11 @@ document.addEventListener("keydown", e => {
     e.preventDefault();
     newSession();
   }
-  if (e.key === "Escape") $("sidebar").classList.remove("open");
+  if (e.key === "Escape") {
+    $("sidebar").classList.remove("open");
+    closeRenameBar();
+    resetDeleteButton();
+  }
 });
 
 switchProviderTab("gemini");
