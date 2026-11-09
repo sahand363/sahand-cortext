@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="theme-color" content="#0b0d12"><title>Sahand-Cortext</title>
+<meta name="theme-color" content="#0b0d12"><title>Sahand-CorText</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/style.css">
@@ -10,7 +10,7 @@
 <body>
 <div id="login-screen" class="auth-screen">
   <div class="auth-card">
-    <div class="wordmark"><span class="logo-symbol">c.</span><span class="wordmark-name"><b>Sahand</b><i>—</i><b>Cortext</b></span></div>
+    <div class="wordmark"><span class="logo-symbol">c.</span><span class="wordmark-name"><b>Sahand</b><i>—</i><b>CorText</b></span></div>
     <div class="eyebrow">YOUR PRIVATE INTELLIGENCE SPACE</div>
     <h1>Good to have<br>you back.</h1><p class="muted">Sign in to continue to your workspace.</p>
     <form id="login-form"><label>Username<input id="username" autocomplete="username" required value="admin"></label><label>Password<input id="password" type="password" autocomplete="current-password" required></label><button class="btn btn-primary full">Enter workspace <span>↗</span></button><div id="login-error" class="form-error"></div></form>
@@ -21,7 +21,7 @@
 
 <div id="app" class="app hidden">
   <aside class="sidebar" id="sidebar">
-    <div class="brand-row"><div class="wordmark"><span class="logo-symbol">c.</span><span class="wordmark-name"><b>Sahand</b><i>—</i><b>Cortext</b></span></div><button class="icon-btn mobile-close" id="mobile-close">×</button></div>
+    <div class="brand-row"><div class="wordmark"><span class="logo-symbol">c.</span><span class="wordmark-name"><b>Sahand</b><i>—</i><b>CorText</b></span></div><button class="icon-btn mobile-close" id="mobile-close">×</button></div>
     <button class="new-chat" id="new-chat"><span class="plus">＋</span><span>New conversation</span><kbd>⌘ K</kbd></button>
     <div class="nav-caption">WORKSPACE</div>
     <nav class="main-nav">
@@ -47,27 +47,35 @@
     <div class="content">
       <section id="page-chat" class="page chat-page">
         <div id="setup-banner" class="setup-banner hidden">
-          <div class="setup-icon">✳</div><div class="setup-copy"><b>Connect your first intelligence</b><span>Add a Gemini API key to start chatting. It stays on this server.</span></div><button class="btn btn-primary btn-small" id="setup-open">Set up Gemini <span>↗</span></button>
+          <div class="setup-icon">✳</div><div class="setup-copy"><b>Connect your first intelligence</b><span>Add a Gemini API key and click a model to verify it works.</span></div><button class="btn btn-primary btn-small" id="setup-open">Set up Gemini <span>↗</span></button>
         </div>
         <div id="chat-empty" class="chat-empty">
           <div class="hero-mark"><span>c.</span><i></i></div>
           <div class="eyebrow">THINK WITHOUT LIMITS</div>
           <h1>A space for<br><em>what’s next.</em></h1>
           <p>Your models. Your context. One beautifully focused workspace.</p>
-          <div class="hero-actions"><button class="btn btn-primary" id="hero-start">Start a conversation <span>↗</span></button><button class="btn btn-quiet" data-goto="models">Explore providers <span>→</span></button></div>
-          <div class="capability-row"><span><i>✳</i> Gemini connected</span><span><i>◷</i> Persistent sessions</span><span><i>⌘</i> Multi-model ready</span></div>
+          <div class="hero-actions"><button class="btn btn-primary" id="hero-start">Start a conversation <span>↗</span></button><button class="btn btn-quiet" data-goto="models">Explore & test models <span>→</span></button></div>
+          <div class="capability-row"><span><i>✳</i> Gemini connected</span><span><i>◷</i> Persistent sessions</span><span><i>⌘</i> Live model verification</span></div>
         </div>
         <div id="chat-active" class="chat-active hidden">
           <div class="conversation-head"><div><div class="eyebrow">PRIVATE CONVERSATION</div><h2 id="conversation-title">New conversation</h2></div><div class="conversation-tools"><span class="secure-label"><i></i> PRIVATE</span><button class="icon-btn" id="clear-view" title="New conversation">＋</button></div></div>
           <div class="messages" id="messages"></div>
-          <div class="composer-area"><div class="composer-context"><span><i class="live-dot"></i> <b>Gemini</b></span><span>Responses are routed through your hub</span></div>
-            <form id="chat-form" class="composer"><textarea id="message-input" rows="1" placeholder="Ask anything. Start with an idea…" required></textarea><div class="composer-bottom"><div class="composer-left"><div class="model-picker"><span class="gemini-glyph">✳</span><select id="model"><option value="gemini-2.5-flash">Gemini 2.5 Flash</option><option value="gemini-2.5-pro">Gemini 2.5 Pro</option></select><span class="select-arrow">⌄</span></div><span class="composer-hint">↵ to send · Shift + ↵ for new line</span></div><button class="send-button" aria-label="Send message">↑</button></div></form><div class="composer-disclaimer">Sahand-Cortext can make mistakes. Verify important information.</div></div>
+          <div class="composer-area"><div class="composer-context"><span><i class="live-dot"></i> <b>Gemini</b> · <span id="active-model-label">gemini-2.0-flash</span></span><span>Responses are routed through your hub</span></div>
+            <form id="chat-form" class="composer"><textarea id="message-input" rows="1" placeholder="Ask anything. Start with an idea…" required></textarea><div class="composer-bottom"><div class="composer-left"><div class="model-picker"><span class="gemini-glyph">✳</span><select id="model">
+              <option value="gemini-2.0-flash">gemini-2.0-flash</option>
+            </select><span class="select-arrow">⌄</span></div><button type="button" class="btn-link" data-goto="models" title="Check which models work">Test models ↗</button><span class="composer-hint">↵ to send · Shift + ↵ for new line</span></div><button class="send-button" aria-label="Send message">↑</button></div></form><div class="composer-disclaimer">Sahand-CorText can make mistakes. Verify important information.</div></div>
         </div>
       </section>
 
       <section id="page-models" class="page module-page hidden">
-        <div class="page-heading"><div><div class="eyebrow">THE INTELLIGENCE LAYER</div><h1>Models & providers</h1><p>Bring your favorite models into one private workspace.</p></div><button class="btn btn-primary btn-small" id="add-provider">＋ Add provider</button></div>
-        <div class="provider-feature"><div class="provider-main"><div class="provider-logo gemini-logo">✳</div><div><div class="provider-overline">ACTIVE PROVIDER</div><h3>Google Gemini</h3><p>Fast, capable models for everyday thinking and complex work.</p></div></div><span class="status-pill" id="models-gemini-status">Needs setup</span><div class="provider-models"><div><b>Gemini 2.5 Flash</b><span>Fast · General purpose</span><small>gemini-2.5-flash</small></div><div><b>Gemini 2.5 Pro</b><span>Advanced reasoning</span><small>gemini-2.5-pro</small></div></div><div class="provider-footer"><span>API key stored on this server</span><button class="text-action" data-goto="settings">Configure provider →</button></div></div>
+        <div class="page-heading"><div><div class="eyebrow">THE INTELLIGENCE LAYER</div><h1>Models & providers</h1><p>Inspect every model returned by your API key and click any model to test if it responds.</p></div><div class="heading-actions"><button class="btn btn-quiet btn-small" id="refresh-models-page">↻ Refresh list</button><button class="btn btn-primary btn-small" id="test-all-models-page">⚡ Test all models</button></div></div>
+        <div class="provider-feature">
+          <div class="provider-main"><div class="provider-logo gemini-logo">✳</div><div><div class="provider-overline">ACTIVE PROVIDER</div><h3>Google Gemini API</h3><p>Click any model card below to test live generation and set it as your active chat model.</p></div></div>
+          <span class="status-pill" id="models-gemini-status">Needs setup</span>
+          <div id="models-page-summary" class="models-summary">Load your API key in Settings to fetch all available model versions from Google.</div>
+          <div id="models-page-grid" class="api-models-grid"></div>
+          <div class="provider-footer"><span>API key stored securely on this server</span><button class="text-action" data-goto="settings">Manage API key in Settings →</button></div>
+        </div>
         <div class="section-title"><div><h2>Provider ecosystem</h2><p>Designed to grow with your workflow.</p></div><span class="muted-label">ROADMAP</span></div>
         <div class="provider-grid"><article class="provider-tile"><b class="provider-letter openai">O</b><div><h3>OpenAI</h3><p>GPT models and tools</p></div><span class="soon-pill">PLANNED</span></article><article class="provider-tile"><b class="provider-letter anthropic">A</b><div><h3>Anthropic</h3><p>Claude model family</p></div><span class="soon-pill">PLANNED</span></article><article class="provider-tile"><b class="provider-letter deepseek">D</b><div><h3>DeepSeek</h3><p>Reasoning and coding</p></div><span class="soon-pill">PLANNED</span></article><article class="provider-tile"><b class="provider-letter custom">＋</b><div><h3>Custom provider</h3><p>OpenAI-compatible APIs</p></div><span class="soon-pill">PLANNED</span></article></div>
       </section>
@@ -80,17 +88,42 @@
 
       <section id="page-usage" class="page module-page hidden"><div class="page-heading"><div><div class="eyebrow">OBSERVABILITY</div><h1>Usage & analytics</h1><p>Understand model activity, response times and token usage.</p></div><span class="status-pill planned">IN DEVELOPMENT</span></div><div class="metric-grid"><div class="metric-card"><span>Tokens used</span><b>—</b><small>Waiting for telemetry module</small></div><div class="metric-card"><span>Requests</span><b>—</b><small>Waiting for telemetry module</small></div><div class="metric-card"><span>Average latency</span><b>—</b><small>Response timing will appear here</small></div></div><div class="chart-placeholder"><div class="chart-bars"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div><span>ACTIVITY VISUALIZATION · COMING SOON</span></div></section>
 
-      <section id="page-settings" class="page module-page hidden"><div class="page-heading"><div><div class="eyebrow">YOUR HUB, YOUR RULES</div><h1>Settings</h1><p>Manage connections and workspace preferences.</p></div></div>
+      <section id="page-settings" class="page module-page hidden"><div class="page-heading"><div><div class="eyebrow">YOUR HUB, YOUR RULES</div><h1>Settings</h1><p>Manage connections, discover API models, and test which ones respond.</p></div></div>
         <div class="settings-layout"><div class="settings-nav"><button class="settings-tab active" data-tab="provider-settings">AI providers</button><button class="settings-tab" data-tab="general-settings">General</button><button class="settings-tab" data-tab="security-settings">Security</button></div>
           <div class="settings-content">
-            <div id="provider-settings" class="settings-panel"><div class="settings-section-head"><div><h2>Gemini connection</h2><p>Connect your first AI provider. Your key is stored on the server, not in this browser.</p></div><span class="status-pill" id="settings-provider-state">Not connected</span></div><form id="api-key-form" class="api-key-box"><label for="api-key">Google AI Studio API key</label><div class="key-input-wrap"><input id="api-key" type="password" placeholder="Paste your Gemini API key" autocomplete="off"><button type="button" id="toggle-key" class="key-toggle">Show</button></div><div class="key-actions"><span id="key-feedback">Your API key is never displayed again after saving.</span><button class="btn btn-primary btn-small">Save API key <span>↗</span></button></div></form><div class="help-row"><span>Need an API key?</span><a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener">Open Google AI Studio ↗</a></div></div>
-            <div id="general-settings" class="settings-panel hidden"><div class="settings-section-head"><div><h2>Workspace preferences</h2><p>Personalize how your workspace behaves.</p></div></div><div class="setting-row"><div><b>Topic memory</b><small>Recall relevant information between sessions.</small></div><span class="status-pill planned">COMING SOON</span></div><div class="setting-row"><div><b>Automatic model selection</b><small>Let a coordinator choose a model for each task.</small></div><span class="status-pill planned">COMING SOON</span></div><div class="setting-row"><div><b>Interface language</b><small>English · Persian support planned</small></div><span class="status-pill">English</span></div></div>
-            <div id="security-settings" class="settings-panel hidden"><div class="settings-section-head"><div><h2>Security & access</h2><p>Controls for your private, single-user installation.</p></div></div><div class="setting-row"><div><b>Single-user authentication</b><small>Login protected with a bcrypt password hash.</small></div><span class="status-pill connected">Enabled</span></div><div class="setting-row"><div><b>Server-side provider keys</b><small>API credentials are never stored in browser storage.</small></div><span class="status-pill connected">Enabled</span></div><div class="setting-row"><div><b>Change login credentials</b><small>Use the SSH control center: <code>sudo cortext</code></small></div><span class="status-pill">SSH menu</span></div></div>
+            <div id="provider-settings" class="settings-panel">
+              <div class="settings-section-head"><div><h2>Gemini API connection</h2><p>Save your key to load all model versions offered by Google. Click any model below to test if it works.</p></div><span class="status-pill" id="settings-provider-state">Not connected</span></div>
+              <form id="api-key-form" class="api-key-box">
+                <label for="api-key">Google AI Studio API key</label>
+                <div class="key-input-wrap"><input id="api-key" type="password" placeholder="Paste your Gemini API key (AIzaSy...)" autocomplete="off"><button type="button" id="toggle-key" class="key-toggle">Show</button></div>
+                <div class="key-actions">
+                  <button type="submit" class="btn btn-primary btn-small" id="save-key-btn">Save Key & Load Models <span>↗</span></button>
+                  <button type="button" class="btn btn-quiet btn-small" id="reload-models-btn">↻ Reload API Models</button>
+                  <button type="button" class="btn btn-quiet btn-small" id="test-all-models-btn">⚡ Test All Models</button>
+                  <button type="button" class="btn btn-quiet btn-small" data-goto="chat">Go to Chat <span>→</span></button>
+                </div>
+                <div id="key-feedback" class="key-feedback">Enter your API key and click "Save Key & Load Models". This window will stay open so you can test every model.</div>
+              </form>
+
+              <div class="models-explorer">
+                <div class="models-explorer-head">
+                  <div>
+                    <h3>Available Models from Your API Key</h3>
+                    <p id="settings-models-summary">Click any model card below to test whether Google allows generation on that version with your key.</p>
+                  </div>
+                </div>
+                <div id="settings-models-grid" class="api-models-grid"></div>
+              </div>
+
+              <div class="help-row"><span>Need an API key?</span><a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener">Open Google AI Studio ↗</a></div>
+            </div>
+            <div id="general-settings" class="settings-panel hidden"><div class="settings-section-head"><div><h2>Workspace preferences</h2><p>Personalize how your workspace behaves.</p></div></div><div class="setting-row"><div><b>Topic memory</b><small>Recall relevant information between sessions.</small></div><span class="status-pill planned">COMING SOON</span></div><div class="setting-row"><div><b>Automatic model selection</b><small>Let a coordinator choose a model for each task.</small></div><span class="status-pill planned">COMING SOON</span></div><div class="setting-row"><div><b>Interface scale</b><small>Optimized 130% readable typography and layout.</small></div><span class="status-pill connected">130% Comfort</span></div></div>
+            <div id="security-settings" class="settings-panel hidden"><div class="settings-section-head"><div><h2>Security & access</h2><p>Controls for your private, single-user installation.</p></div></div><div class="setting-row"><div><b>Single-user authentication</b><small>Login protected with a bcrypt password hash and persistent SQLite session.</small></div><span class="status-pill connected">Enabled</span></div><div class="setting-row"><div><b>Server-side provider keys</b><small>API credentials are never stored in browser storage.</small></div><span class="status-pill connected">Enabled</span></div><div class="setting-row"><div><b>Change login credentials</b><small>Use the SSH control center: <code>sudo cortext</code></small></div><span class="status-pill">SSH menu</span></div></div>
           </div>
         </div>
       </section>
     </div>
-    <footer><span>SAHAND-CORTEXT</span><i>·</i> PRIVATE INTELLIGENCE WORKSPACE <b>v0.2.0</b></footer>
+    <footer><span>SAHAND-CORTEXT</span><i>·</i> PRIVATE INTELLIGENCE WORKSPACE <b>v0.2.2</b></footer>
   </main>
 </div>
 <div id="toast" class="toast"></div>
