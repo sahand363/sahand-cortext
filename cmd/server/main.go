@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -42,14 +43,17 @@ type Message struct {
 }
 
 type ModelInfo struct {
-	ID          string `json:"id"`
-	DisplayName string `json:"display_name"`
-	Description string `json:"description"`
-	InputLimit  int    `json:"input_limit"`
-	OutputLimit int    `json:"output_limit"`
-	Status      string `json:"status"`     // "untested", "working", "failed"
-	LatencyMs   int64  `json:"latency_ms"` // last test latency
-	LastError   string `json:"last_error"` // error from last test if failed
+	Provider    string  `json:"provider"`
+	ID          string  `json:"id"`
+	DisplayName string  `json:"display_name"`
+	Description string  `json:"description"`
+	ContextLen  int     `json:"context_len"`
+	IsFree      bool    `json:"is_free"`
+	PriceInfo   string  `json:"price_info"`
+	SortPrice   float64 `json:"-"`
+	Status      string  `json:"status"`     // "untested", "working", "failed"
+	LatencyMs   int64   `json:"latency_ms"` // last test latency
+	LastError   string  `json:"last_error"` // error from last test if failed
 }
 
 type ModelTestRecord struct {
@@ -79,6 +83,28 @@ func jsonOut(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
+func normalizeProvider(p string) string {
+	switch strings.ToLower(strings.TrimSpace(p)) {
+	case "openrouter":
+		return "openrouter"
+	case "codecraft":
+		return "codecraft"
+	default:
+		return "gemini"
+	}
+}
+
+func providerLabel(p string) string {
+	switch normalizeProvider(p) {
+	case "openrouter":
+		return "OpenRouter"
+	case "codecraft":
+		return "CodeCraft API"
+	default:
+		return "Google Gemini"
+	}
+}
+
 func (a *App) initDB() error {
 	_, err := a.db.Exec(`
 	CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY,title TEXT NOT NULL DEFAULT 'New conversation',created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP);
@@ -100,30 +126,73 @@ func (a *App) setSetting(key, value string) error {
 	return err
 }
 
-func (a *App) loadTestRecords() map[string]ModelTestRecord {
+func (a *App) providerKey(provider string) string {
+	p := normalizeProvider(provider)
+	if v := a.setting(p + "_api_key"); v != "" {
+		return v
+	}
+	switch p {
+	case "openrouter":
+		return os.Getenv("OPENROUTER_API_KEY")
+	case "codecraft":
+		return os.Getenv("CODECRAFT_API_KEY")
+	default:
+		return os.Getenv("GEMINI_API_KEY")
+	}
+}
+
+func (a *App) loadTestRecords(provider string) map[string]ModelTestRecord {
+	p := normalizeProvider(provider)
 	out := map[string]ModelTestRecord{}
-	raw := a.setting("gemini_model_tests")
+	raw := a.setting(p + "_model_tests")
 	if raw != "" {
 		_ = json.Unmarshal([]byte(raw), &out)
 	}
 	return out
 }
 
-func (a *App) saveTestRecord(model string, rec ModelTestRecord) {
+func (a *App) saveTestRecord(provider, model string, rec ModelTestRecord) {
+	p := normalizeProvider(provider)
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	records := a.loadTestRecords()
+	records := a.loadTestRecords(p)
 	records[model] = rec
 	if data, err := json.Marshal(records); err == nil {
-		_ = a.setSetting("gemini_model_tests", string(data))
+		_ = a.setSetting(p+"_model_tests", string(data))
 	}
 }
 
+func (a *App) activeProvider() string {
+	if p := a.setting("active_provider"); p != "" {
+		return normalizeProvider(p)
+	}
+	if a.providerKey("gemini") != "" {
+		return "gemini"
+	}
+	if a.providerKey("openrouter") != "" {
+		return "openrouter"
+	}
+	if a.providerKey("codecraft") != "" {
+		return "codecraft"
+	}
+	return "gemini"
+}
+
 func (a *App) activeModel() string {
+	if m := a.setting("active_model"); m != "" {
+		return m
+	}
 	if m := a.setting("gemini_active_model"); m != "" {
 		return m
 	}
 	return "gemini-2.0-flash"
+}
+
+func (a *App) setActiveSelection(provider, model string) {
+	p := normalizeProvider(provider)
+	_ = a.setSetting("active_provider", p)
+	_ = a.setSetting("active_model", model)
+	_ = a.setSetting(p+"_active_model", model)
 }
 
 func (a *App) authenticated(r *http.Request) bool {
@@ -204,152 +273,225 @@ func (a *App) logout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) status(w http.ResponseWriter, r *http.Request) {
+	gCfg := a.providerKey("gemini") != ""
+	oCfg := a.providerKey("openrouter") != ""
+	cCfg := a.providerKey("codecraft") != ""
 	jsonOut(w, 200, map[string]any{
-		"status":            "online",
-		"gemini_configured": a.geminiKey() != "",
-		"active_model":      a.activeModel(),
-		"version":           "0.2.2",
-		"provider":          "Gemini",
+		"status":                "online",
+		"version":               "0.3.0",
+		"gemini_configured":     gCfg,
+		"openrouter_configured": oCfg,
+		"codecraft_configured":  cCfg,
+		"any_configured":        gCfg || oCfg || cCfg,
+		"active_provider":       a.activeProvider(),
+		"active_model":          a.activeModel(),
+		"providers": map[string]bool{
+			"gemini":     gCfg,
+			"openrouter": oCfg,
+			"codecraft":  cCfg,
+		},
 	})
 }
 
-func (a *App) geminiKey() string {
-	if v := a.setting("gemini_api_key"); v != "" {
-		return v
-	}
-	return os.Getenv("GEMINI_API_KEY")
-}
-
-// Save API key and immediately fetch all available models for that key
-func (a *App) saveGeminiKey(w http.ResponseWriter, r *http.Request) {
+// POST /api/setup/provider (also aliases /api/setup/gemini)
+func (a *App) saveProviderKey(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", 405)
 		return
 	}
 	var body struct {
-		APIKey string `json:"api_key"`
+		Provider string `json:"provider"`
+		APIKey   string `json:"api_key"`
 	}
 	if json.NewDecoder(http.MaxBytesReader(w, r.Body, 8192)).Decode(&body) != nil {
 		jsonOut(w, 400, map[string]string{"error": "Invalid request payload"})
 		return
 	}
+	provider := normalizeProvider(body.Provider)
 	key := strings.TrimSpace(body.APIKey)
 	if key == "" {
-		key = a.geminiKey()
+		key = a.providerKey(provider)
 	}
-	if len(key) < 15 {
-		jsonOut(w, 400, map[string]string{"error": "Please enter a valid Gemini API key."})
+	if len(key) < 10 {
+		jsonOut(w, 400, map[string]string{"error": "Please enter a valid API key for " + providerLabel(provider)})
 		return
 	}
 
-	// Verify key by listing models from Google API
 	start := time.Now()
-	models, err := a.fetchModelsFromGoogle(key)
+	models, err := a.fetchProviderModels(provider, key)
 	latency := time.Since(start).Milliseconds()
 	if err != nil {
 		jsonOut(w, 400, map[string]any{"error": err.Error()})
 		return
 	}
 
-	// Save key in SQLite
-	if err := a.setSetting("gemini_api_key", key); err != nil {
+	if err := a.setSetting(provider+"_api_key", key); err != nil {
 		jsonOut(w, 500, map[string]string{"error": "Failed to store API key in database"})
 		return
 	}
 
+	// If no active model is set yet or active provider matches, ensure a sensible default
+	if len(models) > 0 && (a.setting("active_model") == "" || a.activeProvider() == provider) {
+		a.setActiveSelection(provider, models[0].ID)
+	}
+
 	jsonOut(w, 200, map[string]any{
-		"ok":           true,
-		"latency_ms":   latency,
-		"models":       models,
-		"active_model": a.activeModel(),
+		"ok":              true,
+		"provider":        provider,
+		"latency_ms":      latency,
+		"models":          models,
+		"active_provider": a.activeProvider(),
+		"active_model":    a.activeModel(),
 	})
 }
 
-// GET /api/models - Returns all generateContent models from Google + their test status
+// GET /api/models?provider=gemini|openrouter|codecraft|all
 func (a *App) handleModels(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", 405)
 		return
 	}
-	key := a.geminiKey()
-	if key == "" {
-		jsonOut(w, 200, map[string]any{"models": []ModelInfo{}, "active_model": a.activeModel(), "configured": false})
+	q := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("provider")))
+	if q == "all" {
+		all := []ModelInfo{}
+		errorsMap := map[string]string{}
+		for _, p := range []string{"gemini", "openrouter", "codecraft"} {
+			k := a.providerKey(p)
+			if k == "" {
+				continue
+			}
+			ms, err := a.fetchProviderModels(p, k)
+			if err != nil {
+				errorsMap[p] = err.Error()
+				continue
+			}
+			all = append(all, ms...)
+		}
+		jsonOut(w, 200, map[string]any{
+			"models":          all,
+			"errors":          errorsMap,
+			"active_provider": a.activeProvider(),
+			"active_model":    a.activeModel(),
+		})
 		return
 	}
-	models, err := a.fetchModelsFromGoogle(key)
+
+	provider := normalizeProvider(q)
+	key := a.providerKey(provider)
+	if key == "" {
+		jsonOut(w, 200, map[string]any{
+			"provider":        provider,
+			"models":          []ModelInfo{},
+			"configured":      false,
+			"active_provider": a.activeProvider(),
+			"active_model":    a.activeModel(),
+		})
+		return
+	}
+	models, err := a.fetchProviderModels(provider, key)
 	if err != nil {
-		jsonOut(w, 400, map[string]any{"error": err.Error(), "models": []ModelInfo{}, "active_model": a.activeModel()})
+		jsonOut(w, 400, map[string]any{
+			"provider":        provider,
+			"error":           err.Error(),
+			"models":          []ModelInfo{},
+			"configured":      true,
+			"active_provider": a.activeProvider(),
+			"active_model":    a.activeModel(),
+		})
 		return
 	}
 	jsonOut(w, 200, map[string]any{
-		"models":       models,
-		"active_model": a.activeModel(),
-		"configured":   true,
+		"provider":        provider,
+		"models":          models,
+		"configured":      true,
+		"active_provider": a.activeProvider(),
+		"active_model":    a.activeModel(),
 	})
 }
 
-// POST /api/models/test - Tests a specific model ID and sets it as active if it works
+// POST /api/models/test - Tests a specific model ID on a specific provider
 func (a *App) handleTestModel(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", 405)
 		return
 	}
 	var body struct {
-		Model      string `json:"model"`
-		SetActive  bool   `json:"set_active"`
+		Provider  string `json:"provider"`
+		Model     string `json:"model"`
+		SetActive bool   `json:"set_active"`
 	}
 	if json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&body) != nil || strings.TrimSpace(body.Model) == "" {
 		jsonOut(w, 400, map[string]string{"error": "Model ID is required"})
 		return
 	}
-	model := strings.TrimPrefix(strings.TrimSpace(body.Model), "models/")
-	key := a.geminiKey()
+	provider := normalizeProvider(body.Provider)
+	model := strings.TrimSpace(body.Model)
+	if provider == "gemini" {
+		model = strings.TrimPrefix(model, "models/")
+	}
+
+	key := a.providerKey(provider)
 	if key == "" {
-		jsonOut(w, 400, map[string]string{"error": "Save your Gemini API key first"})
+		jsonOut(w, 400, map[string]string{"error": "Save your " + providerLabel(provider) + " API key first"})
 		return
 	}
 
 	start := time.Now()
-	reply, err := callGemini(key, "Reply with the single word OK.", model, 12)
+	reply, err := a.callProviderModel(provider, key, "Reply with the single word OK.", model)
 	latency := time.Since(start).Milliseconds()
 
 	if err != nil {
-		a.saveTestRecord(model, ModelTestRecord{
+		a.saveTestRecord(provider, model, ModelTestRecord{
 			Status:    "failed",
 			LatencyMs: latency,
 			LastError: err.Error(),
 		})
 		jsonOut(w, 200, map[string]any{
-			"ok":           false,
-			"model":        model,
-			"status":       "failed",
-			"latency_ms":   latency,
-			"error":        err.Error(),
-			"active_model": a.activeModel(),
+			"ok":              false,
+			"provider":        provider,
+			"model":           model,
+			"status":          "failed",
+			"latency_ms":      latency,
+			"error":           err.Error(),
+			"active_provider": a.activeProvider(),
+			"active_model":    a.activeModel(),
 		})
 		return
 	}
 
-	a.saveTestRecord(model, ModelTestRecord{
+	a.saveTestRecord(provider, model, ModelTestRecord{
 		Status:    "working",
 		LatencyMs: latency,
 		LastError: "",
 	})
 	if body.SetActive {
-		_ = a.setSetting("gemini_active_model", model)
+		a.setActiveSelection(provider, model)
 	}
 
 	jsonOut(w, 200, map[string]any{
-		"ok":           true,
-		"model":        model,
-		"status":       "working",
-		"latency_ms":   latency,
-		"reply":        strings.TrimSpace(reply),
-		"active_model": a.activeModel(),
+		"ok":              true,
+		"provider":        provider,
+		"model":           model,
+		"status":          "working",
+		"latency_ms":      latency,
+		"reply":           strings.TrimSpace(reply),
+		"active_provider": a.activeProvider(),
+		"active_model":    a.activeModel(),
 	})
 }
 
-func (a *App) fetchModelsFromGoogle(key string) ([]ModelInfo, error) {
+func (a *App) fetchProviderModels(provider, key string) ([]ModelInfo, error) {
+	switch normalizeProvider(provider) {
+	case "openrouter":
+		return a.fetchOpenRouterModels(key)
+	case "codecraft":
+		return a.fetchCodeCraftModels(key)
+	default:
+		return a.fetchGeminiModels(key)
+	}
+}
+
+func (a *App) fetchGeminiModels(key string) ([]ModelInfo, error) {
 	endpoint := "https://generativelanguage.googleapis.com/v1beta/models?pageSize=100"
 	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
 	if err != nil {
@@ -382,7 +524,6 @@ func (a *App) fetchModelsFromGoogle(key string) ([]ModelInfo, error) {
 			DisplayName                string   `json:"displayName"`
 			Description                string   `json:"description"`
 			InputTokenLimit            int      `json:"inputTokenLimit"`
-			OutputTokenLimit           int      `json:"outputTokenLimit"`
 			SupportedGenerationMethods []string `json:"supportedGenerationMethods"`
 		} `json:"models"`
 	}
@@ -390,7 +531,7 @@ func (a *App) fetchModelsFromGoogle(key string) ([]ModelInfo, error) {
 		return nil, err
 	}
 
-	records := a.loadTestRecords()
+	records := a.loadTestRecords("gemini")
 	out := []ModelInfo{}
 	for _, m := range parsed.Models {
 		supportsGen := false
@@ -404,7 +545,6 @@ func (a *App) fetchModelsFromGoogle(key string) ([]ModelInfo, error) {
 			continue
 		}
 		id := strings.TrimPrefix(m.Name, "models/")
-		// Focus on Gemini / Gemma text & multimodal chat models
 		if !strings.HasPrefix(id, "gemini") && !strings.HasPrefix(id, "gemma") && !strings.HasPrefix(id, "learnlm") {
 			continue
 		}
@@ -422,36 +562,260 @@ func (a *App) fetchModelsFromGoogle(key string) ([]ModelInfo, error) {
 			disp = id
 		}
 		out = append(out, ModelInfo{
+			Provider:    "gemini",
 			ID:          id,
 			DisplayName: disp,
 			Description: m.Description,
-			InputLimit:  m.InputTokenLimit,
-			OutputLimit: m.OutputTokenLimit,
+			ContextLen:  m.InputTokenLimit,
+			IsFree:      true,
+			PriceInfo:   "Google AI Studio Plan",
 			Status:      status,
 			LatencyMs:   lat,
 			LastError:   lastErr,
 		})
 	}
 
-	// Sort: working models first, then untested, then failed; newest versions first
 	sort.Slice(out, func(i, j int) bool {
-		rank := func(s string) int {
-			switch s {
-			case "working":
-				return 0
-			case "untested":
-				return 1
-			default:
-				return 2
-			}
-		}
-		if rank(out[i].Status) != rank(out[j].Status) {
-			return rank(out[i].Status) < rank(out[j].Status)
+		if statusRank(out[i].Status) != statusRank(out[j].Status) {
+			return statusRank(out[i].Status) < statusRank(out[j].Status)
 		}
 		return out[i].ID > out[j].ID
 	})
-
 	return out, nil
+}
+
+func (a *App) fetchOpenRouterModels(key string) ([]ModelInfo, error) {
+	// Validate the key against OpenRouter's /auth/key endpoint first so invalid keys are caught immediately
+	authReq, _ := http.NewRequest(http.MethodGet, "https://openrouter.ai/api/v1/auth/key", nil)
+	authReq.Header.Set("Authorization", "Bearer "+key)
+	client := &http.Client{Timeout: 25 * time.Second}
+	if authResp, err := client.Do(authReq); err == nil {
+		defer authResp.Body.Close()
+		if authResp.StatusCode == 401 || authResp.StatusCode == 403 {
+			return nil, fmt.Errorf("OpenRouter rejected this API key (HTTP %d)", authResp.StatusCode)
+		}
+	}
+
+	req, err := http.NewRequest(http.MethodGet, "https://openrouter.ai/api/v1/models", nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+key)
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("Network error reaching OpenRouter: %v", err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 5<<20))
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("OpenRouter HTTP %d: %s", resp.StatusCode, extractAPIError(raw))
+	}
+
+	var parsed struct {
+		Data []struct {
+			ID            string `json:"id"`
+			Name          string `json:"name"`
+			Description   string `json:"description"`
+			ContextLength int    `json:"context_length"`
+			Pricing       struct {
+				Prompt     string `json:"prompt"`
+				Completion string `json:"completion"`
+			} `json:"pricing"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return nil, err
+	}
+
+	records := a.loadTestRecords("openrouter")
+	out := []ModelInfo{}
+	for _, m := range parsed.Data {
+		if m.ID == "" {
+			continue
+		}
+		pPrompt, _ := strconv.ParseFloat(m.Pricing.Prompt, 64)
+		pComp, _ := strconv.ParseFloat(m.Pricing.Completion, 64)
+		isFree := strings.HasSuffix(m.ID, ":free") || (m.Pricing.Prompt != "" && pPrompt == 0 && pComp == 0)
+
+		priceInfo := "Paid model"
+		if isFree {
+			priceInfo = "FREE ($0 / 1M tokens)"
+		} else if pPrompt > 0 {
+			priceInfo = fmt.Sprintf("$%.2f / 1M in", pPrompt*1000000)
+		}
+
+		rec, exists := records[m.ID]
+		status := "untested"
+		var lat int64
+		var lastErr string
+		if exists {
+			status = rec.Status
+			lat = rec.LatencyMs
+			lastErr = rec.LastError
+		}
+		disp := m.Name
+		if disp == "" {
+			disp = m.ID
+		}
+		out = append(out, ModelInfo{
+			Provider:    "openrouter",
+			ID:          m.ID,
+			DisplayName: disp,
+			Description: m.Description,
+			ContextLen:  m.ContextLength,
+			IsFree:      isFree,
+			PriceInfo:   priceInfo,
+			SortPrice:   pPrompt,
+			Status:      status,
+			LatencyMs:   lat,
+			LastError:   lastErr,
+		})
+	}
+
+	// Sort: Working first -> Free models first -> Untested before Failed -> Alphabetical
+	sort.Slice(out, func(i, j int) bool {
+		if statusRank(out[i].Status) != statusRank(out[j].Status) {
+			return statusRank(out[i].Status) < statusRank(out[j].Status)
+		}
+		if out[i].IsFree != out[j].IsFree {
+			return out[i].IsFree
+		}
+		return out[i].ID < out[j].ID
+	})
+	return out, nil
+}
+
+func (a *App) fetchCodeCraftModels(key string) ([]ModelInfo, error) {
+	req, err := http.NewRequest(http.MethodGet, "https://codecraftapi.com/v1/models", nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+key)
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "Sahand-CorText/0.3.0")
+	client := &http.Client{Timeout: 25 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("Network error reaching CodeCraft API: %v", err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("CodeCraft API HTTP %d: %s", resp.StatusCode, extractAPIError(raw))
+	}
+
+	var parsed struct {
+		Data []struct {
+			ID            string   `json:"id"`
+			Name          string   `json:"name"`
+			Description   string   `json:"description"`
+			Type          string   `json:"type"`
+			ContextWindow int      `json:"context_window"`
+			Capabilities  []string `json:"capabilities"`
+			Pricing       struct {
+				InputPer1K  float64 `json:"input_per_1k"`
+				OutputPer1K float64 `json:"output_per_1k"`
+			} `json:"pricing"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return nil, fmt.Errorf("Invalid JSON from CodeCraft /v1/models: %v", err)
+	}
+
+	records := a.loadTestRecords("codecraft")
+	out := []ModelInfo{}
+	for _, m := range parsed.Data {
+		if m.ID == "" || strings.EqualFold(m.Type, "embedding") || strings.Contains(strings.ToLower(m.ID), "embed") {
+			continue
+		}
+		rec, exists := records[m.ID]
+		status := "untested"
+		var lat int64
+		var lastErr string
+		if exists {
+			status = rec.Status
+			lat = rec.LatencyMs
+			lastErr = rec.LastError
+		}
+		disp := m.Name
+		if disp == "" {
+			disp = m.ID
+		}
+		inPer1M := m.Pricing.InputPer1K * 1000
+		priceInfo := "Free Starter Credits"
+		if inPer1M > 0 {
+			priceInfo = fmt.Sprintf("$%.2f / 1M tokens (Free tier eligible)", inPer1M)
+		}
+		desc := m.Description
+		if len(m.Capabilities) > 0 && desc != "" {
+			desc = desc + " · [" + strings.Join(m.Capabilities, ", ") + "]"
+		}
+		out = append(out, ModelInfo{
+			Provider:    "codecraft",
+			ID:          m.ID,
+			DisplayName: disp,
+			Description: desc,
+			ContextLen:  m.ContextWindow,
+			IsFree:      true,
+			PriceInfo:   priceInfo,
+			SortPrice:   inPer1M,
+			Status:      status,
+			LatencyMs:   lat,
+			LastError:   lastErr,
+		})
+	}
+
+	// Sort: Working first -> Untested before Failed -> Lowest token cost first
+	sort.Slice(out, func(i, j int) bool {
+		if statusRank(out[i].Status) != statusRank(out[j].Status) {
+			return statusRank(out[i].Status) < statusRank(out[j].Status)
+		}
+		if out[i].SortPrice != out[j].SortPrice {
+			return out[i].SortPrice < out[j].SortPrice
+		}
+		return out[i].ID < out[j].ID
+	})
+	return out, nil
+}
+
+func statusRank(s string) int {
+	switch s {
+	case "working":
+		return 0
+	case "untested":
+		return 1
+	default:
+		return 2
+	}
+}
+
+func extractAPIError(raw []byte) string {
+	var eWrap struct {
+		Error   any    `json:"error"`
+		Message string `json:"message"`
+	}
+	if json.Unmarshal(raw, &eWrap) == nil {
+		switch v := eWrap.Error.(type) {
+		case string:
+			if v != "" {
+				return v
+			}
+		case map[string]any:
+			if msg, ok := v["message"].(string); ok && msg != "" {
+				return msg
+			}
+		}
+		if eWrap.Message != "" {
+			return eWrap.Message
+		}
+	}
+	s := strings.TrimSpace(string(raw))
+	if len(s) > 220 {
+		s = s[:220] + "…"
+	}
+	return s
 }
 
 func (a *App) listSessions(w http.ResponseWriter, r *http.Request) {
@@ -507,6 +871,7 @@ func (a *App) sendMessage(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		SessionID string `json:"session_id"`
 		Message   string `json:"message"`
+		Provider  string `json:"provider"`
 		Model     string `json:"model"`
 	}
 	if json.NewDecoder(http.MaxBytesReader(w, r.Body, 64*1024)).Decode(&body) != nil || strings.TrimSpace(body.Message) == "" || len(body.Message) > 30000 {
@@ -518,14 +883,29 @@ func (a *App) sendMessage(w http.ResponseWriter, r *http.Request) {
 		jsonOut(w, 404, map[string]string{"error": "session not found"})
 		return
 	}
-	key := a.geminiKey()
-	if key == "" {
-		jsonOut(w, 503, map[string]string{"error": "Please save your Gemini API key in Settings first."})
-		return
+
+	provider := body.Provider
+	chosenModel := strings.TrimSpace(body.Model)
+	if strings.Contains(chosenModel, "::") {
+		parts := strings.SplitN(chosenModel, "::", 2)
+		provider = parts[0]
+		chosenModel = parts[1]
 	}
-	chosenModel := strings.TrimPrefix(strings.TrimSpace(body.Model), "models/")
+	if provider == "" {
+		provider = a.activeProvider()
+	}
+	provider = normalizeProvider(provider)
 	if chosenModel == "" {
 		chosenModel = a.activeModel()
+	}
+	if provider == "gemini" {
+		chosenModel = strings.TrimPrefix(chosenModel, "models/")
+	}
+
+	key := a.providerKey(provider)
+	if key == "" {
+		jsonOut(w, 503, map[string]string{"error": "Please save your " + providerLabel(provider) + " API key in Settings first."})
+		return
 	}
 
 	_, err := a.db.Exec(`INSERT INTO messages(session_id,role,content) VALUES(?,?,?)`, body.SessionID, "user", body.Message)
@@ -533,18 +913,18 @@ func (a *App) sendMessage(w http.ResponseWriter, r *http.Request) {
 		jsonOut(w, 500, map[string]string{"error": "database error"})
 		return
 	}
+
 	start := time.Now()
-	answer, err := callGemini(key, body.Message, chosenModel, 0)
+	answer, err := a.callProviderModel(provider, key, body.Message, chosenModel)
 	elapsed := time.Since(start).Milliseconds()
 	if err != nil {
-		a.saveTestRecord(chosenModel, ModelTestRecord{Status: "failed", LatencyMs: elapsed, LastError: err.Error()})
-		jsonOut(w, 502, map[string]string{"error": fmt.Sprintf("Model '%s' failed: %s (Tip: Go to 'Models & providers' or 'Settings' and click models to see which ones work with your API key)", chosenModel, err.Error())})
+		a.saveTestRecord(provider, chosenModel, ModelTestRecord{Status: "failed", LatencyMs: elapsed, LastError: err.Error()})
+		jsonOut(w, 502, map[string]string{"error": fmt.Sprintf("[%s · %s] %s", providerLabel(provider), chosenModel, err.Error())})
 		return
 	}
 
-	// Mark model as working and active
-	a.saveTestRecord(chosenModel, ModelTestRecord{Status: "working", LatencyMs: elapsed})
-	_ = a.setSetting("gemini_active_model", chosenModel)
+	a.saveTestRecord(provider, chosenModel, ModelTestRecord{Status: "working", LatencyMs: elapsed})
+	a.setActiveSelection(provider, chosenModel)
 
 	_, err = a.db.Exec(`INSERT INTO messages(session_id,role,content) VALUES(?,?,?)`, body.SessionID, "assistant", answer)
 	if err != nil {
@@ -562,10 +942,26 @@ func (a *App) sendMessage(w http.ResponseWriter, r *http.Request) {
 	} else {
 		_, _ = a.db.Exec(`UPDATE sessions SET updated_at=CURRENT_TIMESTAMP WHERE id=?`, body.SessionID)
 	}
-	jsonOut(w, 200, map[string]any{"reply": answer, "latency_ms": elapsed, "model": chosenModel})
+	jsonOut(w, 200, map[string]any{
+		"reply":      answer,
+		"latency_ms": elapsed,
+		"provider":   provider,
+		"model":      chosenModel,
+	})
 }
 
-func callGemini(key, prompt, model string, maxTokens int) (string, error) {
+func (a *App) callProviderModel(provider, key, prompt, model string) (string, error) {
+	switch normalizeProvider(provider) {
+	case "openrouter":
+		return callOpenAICompatible("https://openrouter.ai/api/v1/chat/completions", key, prompt, model, "OpenRouter")
+	case "codecraft":
+		return callOpenAICompatible("https://codecraftapi.com/v1/chat/completions", key, prompt, model, "CodeCraft")
+	default:
+		return callGemini(key, prompt, model)
+	}
+}
+
+func callGemini(key, prompt, model string) (string, error) {
 	model = strings.TrimPrefix(strings.TrimSpace(model), "models/")
 	if model == "" {
 		model = "gemini-2.0-flash"
@@ -579,9 +975,6 @@ func callGemini(key, prompt, model string, maxTokens int) (string, error) {
 				},
 			},
 		},
-	}
-	if maxTokens > 0 {
-		payload["generationConfig"] = map[string]any{"maxOutputTokens": maxTokens}
 	}
 	data, _ := json.Marshal(payload)
 	req, e := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(data))
@@ -608,7 +1001,7 @@ func callGemini(key, prompt, model string, maxTokens int) (string, error) {
 		if json.Unmarshal(raw, &gErr) == nil && gErr.Error.Message != "" {
 			return "", fmt.Errorf("HTTP %d (%s): %s", resp.StatusCode, gErr.Error.Status, gErr.Error.Message)
 		}
-		return "", fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
+		return "", fmt.Errorf("HTTP %d: %s", resp.StatusCode, extractAPIError(raw))
 	}
 	var parsed struct {
 		Candidates []struct {
@@ -623,9 +1016,85 @@ func callGemini(key, prompt, model string, maxTokens int) (string, error) {
 		return "", e
 	}
 	if len(parsed.Candidates) == 0 || len(parsed.Candidates[0].Content.Parts) == 0 {
-		return "", errors.New("empty response from model")
+		return "", errors.New("empty response from Gemini model")
 	}
-	return parsed.Candidates[0].Content.Parts[0].Text, nil
+	var sb strings.Builder
+	for _, p := range parsed.Candidates[0].Content.Parts {
+		if p.Text != "" {
+			sb.WriteString(p.Text)
+		}
+	}
+	if sb.Len() == 0 {
+		return "", errors.New("empty text response from Gemini model")
+	}
+	return sb.String(), nil
+}
+
+func callOpenAICompatible(endpoint, key, prompt, model, label string) (string, error) {
+	payload := map[string]any{
+		"model": model,
+		"messages": []any{
+			map[string]string{
+				"role":    "user",
+				"content": prompt,
+			},
+		},
+	}
+	data, _ := json.Marshal(payload)
+	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(data))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Authorization", "Bearer "+key)
+	req.Header.Set("HTTP-Referer", "https://github.com/sahand363/sahand-cortext")
+	req.Header.Set("X-Title", "Sahand-CorText")
+	req.Header.Set("User-Agent", "Sahand-CorText/0.3.0")
+
+	client := &http.Client{Timeout: 90 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("%s HTTP %d: %s", label, resp.StatusCode, extractAPIError(raw))
+	}
+
+	var parsed struct {
+		Error   any `json:"error"`
+		Choices []struct {
+			Message struct {
+				Content          string `json:"content"`
+				Reasoning        string `json:"reasoning"`
+				ReasoningContent string `json:"reasoning_content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return "", fmt.Errorf("invalid JSON response from %s", label)
+	}
+	if parsed.Error != nil {
+		return "", fmt.Errorf("%s error: %s", label, extractAPIError(raw))
+	}
+	if len(parsed.Choices) == 0 {
+		return "", fmt.Errorf("no choices returned by %s", label)
+	}
+	msg := parsed.Choices[0].Message
+	out := strings.TrimSpace(msg.Content)
+	if out == "" {
+		out = strings.TrimSpace(msg.ReasoningContent)
+	}
+	if out == "" {
+		out = strings.TrimSpace(msg.Reasoning)
+	}
+	if out == "" {
+		return "", fmt.Errorf("empty content returned by %s model %s", label, model)
+	}
+	return out, nil
 }
 
 func main() {
@@ -659,7 +1128,8 @@ func main() {
 	mux.HandleFunc("/api/login", app.login)
 	mux.HandleFunc("/api/logout", app.auth(app.logout))
 	mux.HandleFunc("/api/status", app.auth(app.status))
-	mux.HandleFunc("/api/setup/gemini", app.auth(app.saveGeminiKey))
+	mux.HandleFunc("/api/setup/gemini", app.auth(app.saveProviderKey))
+	mux.HandleFunc("/api/setup/provider", app.auth(app.saveProviderKey))
 	mux.HandleFunc("/api/models", app.auth(app.handleModels))
 	mux.HandleFunc("/api/models/test", app.auth(app.handleTestModel))
 	mux.HandleFunc("/api/sessions", app.auth(func(w http.ResponseWriter, r *http.Request) {
