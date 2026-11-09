@@ -43,41 +43,88 @@
   </aside>
 
   <main class="main">
-    <header class="topbar"><div class="top-left"><button id="mobile-menu" class="icon-btn mobile-menu">☰</button><div class="breadcrumb"><span>Workspace</span><i>/</i><b id="breadcrumb-page">Chat</b></div></div><div class="top-right"><div class="server-state"><span class="live-dot"></span><span>System operational</span></div><div class="top-divider"></div><div class="provider-chip"><span class="gemini-glyph">✳</span> GEMINI <span class="chip-state" id="header-provider-state">SETUP</span></div></div></header>
+    <header class="topbar">
+      <div class="top-left"><button id="mobile-menu" class="icon-btn mobile-menu">☰</button><div class="breadcrumb"><span>Workspace</span><i>/</i><b id="breadcrumb-page">Chat</b></div></div>
+      <div class="top-right">
+        <div class="server-state"><span class="live-dot"></span><span>System operational</span></div>
+        <div class="top-divider"></div>
+        <div class="provider-chip"><span class="gemini-glyph">✳</span> <span id="header-provider-name">AI HUB</span> <span class="chip-state" id="header-provider-state">SETUP</span></div>
+      </div>
+    </header>
+
     <div class="content">
       <section id="page-chat" class="page chat-page">
         <div id="setup-banner" class="setup-banner hidden">
-          <div class="setup-icon">✳</div><div class="setup-copy"><b>Connect your first intelligence</b><span>Add a Gemini API key and click a model to verify it works.</span></div><button class="btn btn-primary btn-small" id="setup-open">Set up Gemini <span>↗</span></button>
+          <div class="setup-icon">✳</div>
+          <div class="setup-copy"><b>Connect your AI providers</b><span>Add your Gemini, OpenRouter, or CodeCraft API keys and click any model to verify it works.</span></div>
+          <button class="btn btn-primary btn-small" id="setup-open">Configure Providers <span>↗</span></button>
         </div>
         <div id="chat-empty" class="chat-empty">
           <div class="hero-mark"><span>c.</span><i></i></div>
           <div class="eyebrow">THINK WITHOUT LIMITS</div>
           <h1>A space for<br><em>what’s next.</em></h1>
-          <p>Your models. Your context. One beautifully focused workspace.</p>
+          <p>Gemini, OpenRouter & CodeCraft API. One private workspace.</p>
           <div class="hero-actions"><button class="btn btn-primary" id="hero-start">Start a conversation <span>↗</span></button><button class="btn btn-quiet" data-goto="models">Explore & test models <span>→</span></button></div>
-          <div class="capability-row"><span><i>✳</i> Gemini connected</span><span><i>◷</i> Persistent sessions</span><span><i>⌘</i> Live model verification</span></div>
+          <div class="capability-row"><span><i>✳</i> Google Gemini</span><span><i>⇄</i> OpenRouter (Free Models)</span><span><i>⚡</i> CodeCraft API</span></div>
         </div>
         <div id="chat-active" class="chat-active hidden">
           <div class="conversation-head"><div><div class="eyebrow">PRIVATE CONVERSATION</div><h2 id="conversation-title">New conversation</h2></div><div class="conversation-tools"><span class="secure-label"><i></i> PRIVATE</span><button class="icon-btn" id="clear-view" title="New conversation">＋</button></div></div>
           <div class="messages" id="messages"></div>
-          <div class="composer-area"><div class="composer-context"><span><i class="live-dot"></i> <b>Gemini</b> · <span id="active-model-label">gemini-2.0-flash</span></span><span>Responses are routed through your hub</span></div>
-            <form id="chat-form" class="composer"><textarea id="message-input" rows="1" placeholder="Ask anything. Start with an idea…" required></textarea><div class="composer-bottom"><div class="composer-left"><div class="model-picker"><span class="gemini-glyph">✳</span><select id="model">
-              <option value="gemini-2.0-flash">gemini-2.0-flash</option>
-            </select><span class="select-arrow">⌄</span></div><button type="button" class="btn-link" data-goto="models" title="Check which models work">Test models ↗</button><span class="composer-hint">↵ to send · Shift + ↵ for new line</span></div><button class="send-button" aria-label="Send message">↑</button></div></form><div class="composer-disclaimer">Sahand-CorText can make mistakes. Verify important information.</div></div>
+          <div class="composer-area">
+            <div class="composer-context"><span><i class="live-dot"></i> <b id="active-provider-label">Gemini</b> · <span id="active-model-label">gemini-2.0-flash</span></span><span>Responses are routed through your hub</span></div>
+            <form id="chat-form" class="composer">
+              <textarea id="message-input" rows="1" placeholder="Ask anything. Start with an idea…" required></textarea>
+              <div class="composer-bottom">
+                <div class="composer-left">
+                  <div class="model-picker"><span class="gemini-glyph">✳</span><select id="model"><option value="gemini::gemini-2.0-flash">gemini-2.0-flash</option></select><span class="select-arrow">⌄</span></div>
+                  <button type="button" class="btn-link" data-goto="models" title="Check which models work">Test models ↗</button>
+                  <span class="composer-hint">↵ to send · Shift + ↵ for new line</span>
+                </div>
+                <button class="send-button" aria-label="Send message">↑</button>
+              </div>
+            </form>
+            <div class="composer-disclaimer">Sahand-CorText can make mistakes. Verify important information.</div>
+          </div>
         </div>
       </section>
 
       <section id="page-models" class="page module-page hidden">
-        <div class="page-heading"><div><div class="eyebrow">THE INTELLIGENCE LAYER</div><h1>Models & providers</h1><p>Inspect every model returned by your API key and click any model to test if it responds.</p></div><div class="heading-actions"><button class="btn btn-quiet btn-small" id="refresh-models-page">↻ Refresh list</button><button class="btn btn-primary btn-small" id="test-all-models-page">⚡ Test all models</button></div></div>
-        <div class="provider-feature">
-          <div class="provider-main"><div class="provider-logo gemini-logo">✳</div><div><div class="provider-overline">ACTIVE PROVIDER</div><h3>Google Gemini API</h3><p>Click any model card below to test live generation and set it as your active chat model.</p></div></div>
-          <span class="status-pill" id="models-gemini-status">Needs setup</span>
-          <div id="models-page-summary" class="models-summary">Load your API key in Settings to fetch all available model versions from Google.</div>
-          <div id="models-page-grid" class="api-models-grid"></div>
-          <div class="provider-footer"><span>API key stored securely on this server</span><button class="text-action" data-goto="settings">Manage API key in Settings →</button></div>
+        <div class="page-heading">
+          <div><div class="eyebrow">THE INTELLIGENCE LAYER</div><h1>Models & providers</h1><p>Switch between Gemini, OpenRouter, and CodeCraft API to inspect and test every model on your plan.</p></div>
+          <div class="heading-actions">
+            <button class="btn btn-quiet btn-small" id="refresh-models-page">↻ Refresh list</button>
+            <button class="btn btn-primary btn-small" id="test-all-models-page">⚡ Test shown models</button>
+          </div>
         </div>
-        <div class="section-title"><div><h2>Provider ecosystem</h2><p>Designed to grow with your workflow.</p></div><span class="muted-label">ROADMAP</span></div>
-        <div class="provider-grid"><article class="provider-tile"><b class="provider-letter openai">O</b><div><h3>OpenAI</h3><p>GPT models and tools</p></div><span class="soon-pill">PLANNED</span></article><article class="provider-tile"><b class="provider-letter anthropic">A</b><div><h3>Anthropic</h3><p>Claude model family</p></div><span class="soon-pill">PLANNED</span></article><article class="provider-tile"><b class="provider-letter deepseek">D</b><div><h3>DeepSeek</h3><p>Reasoning and coding</p></div><span class="soon-pill">PLANNED</span></article><article class="provider-tile"><b class="provider-letter custom">＋</b><div><h3>Custom provider</h3><p>OpenAI-compatible APIs</p></div><span class="soon-pill">PLANNED</span></article></div>
+
+        <div class="provider-switcher" id="models-provider-tabs">
+          <button type="button" class="provider-tab active" data-provider="gemini"><span>✳</span> Google Gemini <i class="p-dot" id="dot-models-gemini"></i></button>
+          <button type="button" class="provider-tab" data-provider="openrouter"><span>⇄</span> OpenRouter <i class="p-dot" id="dot-models-openrouter"></i></button>
+          <button type="button" class="provider-tab" data-provider="codecraft"><span>⚡</span> CodeCraft API <i class="p-dot" id="dot-models-codecraft"></i></button>
+        </div>
+
+        <div class="provider-feature">
+          <div class="provider-main">
+            <div class="provider-logo gemini-logo" id="models-feature-logo">✳</div>
+            <div>
+              <div class="provider-overline">SELECTED PROVIDER</div>
+              <h3 id="models-feature-title">Google Gemini API</h3>
+              <p id="models-feature-desc">Click any model card below to test live generation and set it as your active chat model.</p>
+            </div>
+          </div>
+          <span class="status-pill" id="models-provider-status">Needs setup</span>
+
+          <div class="filter-bar">
+            <div id="models-page-summary" class="models-summary">Select a provider or add its API key in Settings.</div>
+            <label class="free-filter-wrap" id="models-free-filter-wrap">
+              <input type="checkbox" id="models-free-only">
+              <span>Show free models only (<code>:free</code>)</span>
+            </label>
+          </div>
+
+          <div id="models-page-grid" class="api-models-grid"></div>
+          <div class="provider-footer"><span>API keys are stored securely on this server</span><button class="text-action" data-goto="settings">Manage API keys in Settings →</button></div>
+        </div>
       </section>
 
       <section id="page-orchestration" class="page module-page hidden"><div class="page-heading"><div><div class="eyebrow">MULTI-AGENT WORKSPACE</div><h1>AI orchestration</h1><p>Let specialized models work together on a shared task.</p></div><span class="status-pill planned">IN DEVELOPMENT</span></div><div class="orchestrator-canvas"><div class="orchestrator-center"><div class="orchestrator-node lead">✳<b>Coordinator</b><small>Lead intelligence</small></div><div class="orbit-nodes"><div class="orchestrator-node">G<b>Research</b><small>Information</small></div><div class="orchestrator-node">C<b>Builder</b><small>Code & logic</small></div><div class="orchestrator-node">V<b>Reviewer</b><small>Quality check</small></div></div></div><div class="canvas-caption">A shared context · Multiple perspectives · One coordinated result</div></div><div class="info-note">The orchestration interface is designed now. Agent routing, shared task state and model-to-model handoff will be added in a later release.</div></section>
@@ -88,42 +135,74 @@
 
       <section id="page-usage" class="page module-page hidden"><div class="page-heading"><div><div class="eyebrow">OBSERVABILITY</div><h1>Usage & analytics</h1><p>Understand model activity, response times and token usage.</p></div><span class="status-pill planned">IN DEVELOPMENT</span></div><div class="metric-grid"><div class="metric-card"><span>Tokens used</span><b>—</b><small>Waiting for telemetry module</small></div><div class="metric-card"><span>Requests</span><b>—</b><small>Waiting for telemetry module</small></div><div class="metric-card"><span>Average latency</span><b>—</b><small>Response timing will appear here</small></div></div><div class="chart-placeholder"><div class="chart-bars"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div><span>ACTIVITY VISUALIZATION · COMING SOON</span></div></section>
 
-      <section id="page-settings" class="page module-page hidden"><div class="page-heading"><div><div class="eyebrow">YOUR HUB, YOUR RULES</div><h1>Settings</h1><p>Manage connections, discover API models, and test which ones respond.</p></div></div>
-        <div class="settings-layout"><div class="settings-nav"><button class="settings-tab active" data-tab="provider-settings">AI providers</button><button class="settings-tab" data-tab="general-settings">General</button><button class="settings-tab" data-tab="security-settings">Security</button></div>
+      <section id="page-settings" class="page module-page hidden">
+        <div class="page-heading"><div><div class="eyebrow">YOUR HUB, YOUR RULES</div><h1>Settings</h1><p>Configure Google Gemini, OpenRouter, and CodeCraft API keys and test which models respond.</p></div></div>
+        <div class="settings-layout">
+          <div class="settings-nav">
+            <button class="settings-tab active" data-tab="provider-settings">AI providers</button>
+            <button class="settings-tab" data-tab="general-settings">General</button>
+            <button class="settings-tab" data-tab="security-settings">Security</button>
+          </div>
           <div class="settings-content">
             <div id="provider-settings" class="settings-panel">
-              <div class="settings-section-head"><div><h2>Gemini API connection</h2><p>Save your key to load all model versions offered by Google. Click any model below to test if it works.</p></div><span class="status-pill" id="settings-provider-state">Not connected</span></div>
+              <div class="provider-switcher" id="settings-provider-tabs">
+                <button type="button" class="provider-tab active" data-provider="gemini"><span>✳</span> Google Gemini <i class="p-dot" id="dot-settings-gemini"></i></button>
+                <button type="button" class="provider-tab" data-provider="openrouter"><span>⇄</span> OpenRouter <i class="p-dot" id="dot-settings-openrouter"></i></button>
+                <button type="button" class="provider-tab" data-provider="codecraft"><span>⚡</span> CodeCraft API <i class="p-dot" id="dot-settings-codecraft"></i></button>
+              </div>
+
+              <div class="settings-section-head">
+                <div>
+                  <h2 id="settings-provider-title">Google Gemini Connection</h2>
+                  <p id="settings-provider-desc">Save your Google AI Studio key to fetch all Gemini models and test which ones respond.</p>
+                </div>
+                <span class="status-pill" id="settings-provider-state">Not connected</span>
+              </div>
+
               <form id="api-key-form" class="api-key-box">
-                <label for="api-key">Google AI Studio API key</label>
-                <div class="key-input-wrap"><input id="api-key" type="password" placeholder="Paste your Gemini API key (AIzaSy...)" autocomplete="off"><button type="button" id="toggle-key" class="key-toggle">Show</button></div>
+                <label for="api-key" id="api-key-label">Google AI Studio API Key</label>
+                <div class="key-input-wrap">
+                  <input id="api-key" type="password" placeholder="Paste your Gemini API key (AIzaSy...)" autocomplete="off">
+                  <button type="button" id="toggle-key" class="key-toggle">Show</button>
+                </div>
                 <div class="key-actions">
                   <button type="submit" class="btn btn-primary btn-small" id="save-key-btn">Save Key & Load Models <span>↗</span></button>
-                  <button type="button" class="btn btn-quiet btn-small" id="reload-models-btn">↻ Reload API Models</button>
-                  <button type="button" class="btn btn-quiet btn-small" id="test-all-models-btn">⚡ Test All Models</button>
+                  <button type="button" class="btn btn-quiet btn-small" id="reload-models-btn">↻ Reload Models</button>
+                  <button type="button" class="btn btn-quiet btn-small" id="test-all-models-btn">⚡ Test Shown Models</button>
                   <button type="button" class="btn btn-quiet btn-small" data-goto="chat">Go to Chat <span>→</span></button>
                 </div>
-                <div id="key-feedback" class="key-feedback">Enter your API key and click "Save Key & Load Models". This window will stay open so you can test every model.</div>
+                <div id="key-feedback" class="key-feedback">Select a provider tab above, paste its API key, and click "Save Key & Load Models". This page stays open so you can click and test every model.</div>
               </form>
 
               <div class="models-explorer">
                 <div class="models-explorer-head">
-                  <div>
-                    <h3>Available Models from Your API Key</h3>
-                    <p id="settings-models-summary">Click any model card below to test whether Google allows generation on that version with your key.</p>
+                  <div class="filter-bar">
+                    <div>
+                      <h3 id="settings-explorer-title">Available Models</h3>
+                      <p id="settings-models-summary">Click any model card below to test whether it works on your current plan.</p>
+                    </div>
+                    <label class="free-filter-wrap" id="settings-free-filter-wrap">
+                      <input type="checkbox" id="settings-free-only">
+                      <span>Show free models only (<code>:free</code>)</span>
+                    </label>
                   </div>
                 </div>
                 <div id="settings-models-grid" class="api-models-grid"></div>
               </div>
 
-              <div class="help-row"><span>Need an API key?</span><a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener">Open Google AI Studio ↗</a></div>
+              <div class="help-row">
+                <span id="provider-help-text">Need an API key for this provider?</span>
+                <a id="provider-help-link" href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener">Open Google AI Studio ↗</a>
+              </div>
             </div>
-            <div id="general-settings" class="settings-panel hidden"><div class="settings-section-head"><div><h2>Workspace preferences</h2><p>Personalize how your workspace behaves.</p></div></div><div class="setting-row"><div><b>Topic memory</b><small>Recall relevant information between sessions.</small></div><span class="status-pill planned">COMING SOON</span></div><div class="setting-row"><div><b>Automatic model selection</b><small>Let a coordinator choose a model for each task.</small></div><span class="status-pill planned">COMING SOON</span></div><div class="setting-row"><div><b>Interface scale</b><small>Optimized 130% readable typography and layout.</small></div><span class="status-pill connected">130% Comfort</span></div></div>
+
+            <div id="general-settings" class="settings-panel hidden"><div class="settings-section-head"><div><h2>Workspace preferences</h2><p>Personalize how your workspace behaves.</p></div></div><div class="setting-row"><div><b>Multi-provider gateway</b><small>Gemini, OpenRouter, and CodeCraft API unified in one hub.</small></div><span class="status-pill connected">Active</span></div><div class="setting-row"><div><b>Topic memory</b><small>Recall relevant information between sessions.</small></div><span class="status-pill planned">COMING SOON</span></div><div class="setting-row"><div><b>Interface scale</b><small>Optimized 130% readable typography and layout.</small></div><span class="status-pill connected">130% Comfort</span></div></div>
             <div id="security-settings" class="settings-panel hidden"><div class="settings-section-head"><div><h2>Security & access</h2><p>Controls for your private, single-user installation.</p></div></div><div class="setting-row"><div><b>Single-user authentication</b><small>Login protected with a bcrypt password hash and persistent SQLite session.</small></div><span class="status-pill connected">Enabled</span></div><div class="setting-row"><div><b>Server-side provider keys</b><small>API credentials are never stored in browser storage.</small></div><span class="status-pill connected">Enabled</span></div><div class="setting-row"><div><b>Change login credentials</b><small>Use the SSH control center: <code>sudo cortext</code></small></div><span class="status-pill">SSH menu</span></div></div>
           </div>
         </div>
       </section>
     </div>
-    <footer><span>SAHAND-CORTEXT</span><i>·</i> PRIVATE INTELLIGENCE WORKSPACE <b>v0.2.2</b></footer>
+    <footer><span>SAHAND-CORTEXT</span><i>·</i> PRIVATE MULTI-PROVIDER AI WORKSPACE <b>v0.3.0</b></footer>
   </main>
 </div>
 <div id="toast" class="toast"></div>
