@@ -4,6 +4,7 @@ APP=sahand-cortext
 ENV_FILE=/etc/sahand-cortext.env
 SERVICE=/etc/systemd/system/sahand-cortext.service
 BIN=/usr/local/bin/sahand-cortext
+DIR=/opt/sahand-cortext
 DATA=/var/lib/sahand-cortext
 CADDY=/etc/caddy/Caddyfile
 G='\033[0;32m'; C='\033[0;36m'; Y='\033[1;33m'; R='\033[0;31m'; N='\033[0m'
@@ -90,15 +91,16 @@ ssl_setup(){
 }
 
 uninstall_app(){
-  echo -e "${R}This removes the application, service, and local database.${N}"
+  echo -e "${R}This will completely remove Sahand-CorText and its service.${N}"
   read -rp "Type REMOVE to confirm: " confirm </dev/tty
   [[ "$confirm" == REMOVE ]] || { echo "Cancelled."; pause; return; }
   systemctl disable --now "$APP" 2>/dev/null || true
   rm -f "$SERVICE" "$BIN" /usr/local/bin/cortext "$ENV_FILE"
+  rm -rf "$DIR" /root/.cache/go-build /root/go /tmp/go.tgz
   systemctl daemon-reload
-  read -rp "Also remove database at $DATA? [y/N]: " db </dev/tty
+  read -rp "Also delete database and conversation history at $DATA? [y/N]: " db </dev/tty
   [[ "$db" =~ ^[Yy]$ ]] && rm -rf "$DATA"
-  echo -e "${G}Sahand-CorText uninstalled.${N}"
+  echo -e "${G}Sahand-CorText and all build remnants uninstalled cleanly.${N}"
   exit 0
 }
 
