@@ -1,12 +1,10 @@
 package main
 
 import (
-	"bytes"
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -19,6 +17,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sahand363/sahand-cortext/internal/chat"
+	"github.com/sahand363/sahand-cortext/internal/provider"
 	"golang.org/x/crypto/bcrypt"
 	_ "modernc.org/sqlite"
 )
@@ -27,6 +27,7 @@ type App struct {
 	db       *sql.DB
 	mu       sync.RWMutex
 	sessions map[string]time.Time
+	router   *provider.Router
 }
 
 type Session struct {
@@ -84,39 +85,33 @@ func jsonOut(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-func normalizeProvider(p string) string {
-	switch strings.ToLower(strings.TrimSpace(p)) {
-	case "openrouter":
-		return "openrouter"
-	case "codecraft":
-		return "codecraft"
-	default:
-		return "gemini"
-	}
-}
-
-func providerLabel(p string) string {
-	switch normalizeProvider(p) {
-	case "openrouter":
-		return "OpenRouter"
-	case "codecraft":
-		return "CodeCraft API"
-	default:
-		return "Google Gemini"
-	}
-}
-
 func (a *App) initDB() error {
-	_, err := a.db.Exec(`
-	CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY,title TEXT NOT NULL DEFAULT 'New conversation',pinned INTEGER NOT NULL DEFAULT 0,created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP);
-	CREATE TABLE IF NOT EXISTS messages(id INTEGER PRIMARY KEY AUTOINCREMENT,session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,role TEXT NOT NULL,content TEXT NOT NULL,created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP);
-	CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);
-	CREATE TABLE IF NOT EXISTS auth_sessions(token TEXT PRIMARY KEY,expires_at DATETIME NOT NULL);
-	PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;`)
-	if err != nil {
-		return err
+	queries := []string{
+		`CREATE TABLE IF NOT EXISTS sessions(
+			id TEXT PRIMARY KEY,
+			title TEXT NOT NULL DEFAULT 'New conversation',
+			pinned INTEGER NOT NULL DEFAULT 0,
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+		);`,
+		`CREATE TABLE IF NOT EXISTS messages(
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+			role TEXT NOT NULL,
+			content TEXT NOT NULL,
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+		);`,
+		`CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);`,
+		`CREATE TABLE IF NOT EXISTS auth_sessions(token TEXT PRIMARY KEY, expires_at DATETIME NOT NULL);`,
+		`PRAGMA journal_mode=WAL;`,
+		`PRAGMA foreign_keys=ON;`,
+		`PRAGMA busy_timeout=10000;`,
 	}
-	// Seamless migration for existing databases created prior to v0.3.1
+	for _, q := range queries {
+		if _, err := a.db.Exec(q); err != nil {
+			return err
+		}
+	}
 	_, _ = a.db.Exec(`ALTER TABLE sessions ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;`)
 	return nil
 }
@@ -132,12 +127,12 @@ func (a *App) setSetting(key, value string) error {
 	return err
 }
 
-func (a *App) providerKey(provider string) string {
-	p := normalizeProvider(provider)
-	if v := a.setting(p + "_api_key"); v != "" {
+func (a *App) providerKey(p string) string {
+	norm := provider.NormalizeProvider(p)
+	if v := a.setting(norm + "_api_key"); v != "" {
 		return v
 	}
-	switch p {
+	switch norm {
 	case "openrouter":
 		return os.Getenv("OPENROUTER_API_KEY")
 	case "codecraft":
@@ -147,30 +142,30 @@ func (a *App) providerKey(provider string) string {
 	}
 }
 
-func (a *App) loadTestRecords(provider string) map[string]ModelTestRecord {
-	p := normalizeProvider(provider)
+func (a *App) loadTestRecords(p string) map[string]ModelTestRecord {
+	norm := provider.NormalizeProvider(p)
 	out := map[string]ModelTestRecord{}
-	raw := a.setting(p + "_model_tests")
+	raw := a.setting(norm + "_model_tests")
 	if raw != "" {
 		_ = json.Unmarshal([]byte(raw), &out)
 	}
 	return out
 }
 
-func (a *App) saveTestRecord(provider, model string, rec ModelTestRecord) {
-	p := normalizeProvider(provider)
+func (a *App) saveTestRecord(p, model string, rec ModelTestRecord) {
+	norm := provider.NormalizeProvider(p)
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	records := a.loadTestRecords(p)
+	records := a.loadTestRecords(norm)
 	records[model] = rec
 	if data, err := json.Marshal(records); err == nil {
-		_ = a.setSetting(p+"_model_tests", string(data))
+		_ = a.setSetting(norm+"_model_tests", string(data))
 	}
 }
 
 func (a *App) activeProvider() string {
 	if p := a.setting("active_provider"); p != "" {
-		return normalizeProvider(p)
+		return provider.NormalizeProvider(p)
 	}
 	if a.providerKey("gemini") != "" {
 		return "gemini"
@@ -194,11 +189,11 @@ func (a *App) activeModel() string {
 	return "gemini-2.0-flash"
 }
 
-func (a *App) setActiveSelection(provider, model string) {
-	p := normalizeProvider(provider)
-	_ = a.setSetting("active_provider", p)
+func (a *App) setActiveSelection(p, model string) {
+	norm := provider.NormalizeProvider(p)
+	_ = a.setSetting("active_provider", norm)
 	_ = a.setSetting("active_model", model)
-	_ = a.setSetting(p+"_active_model", model)
+	_ = a.setSetting(norm+"_active_model", model)
 }
 
 func (a *App) authenticated(r *http.Request) bool {
@@ -263,7 +258,15 @@ func (a *App) login(w http.ResponseWriter, r *http.Request) {
 	a.sessions[token] = exp
 	a.mu.Unlock()
 	_, _ = a.db.Exec(`INSERT INTO auth_sessions(token,expires_at) VALUES(?,?)`, token, exp)
-	http.SetCookie(w, &http.Cookie{Name: "sahand_session", Value: token, Path: "/", HttpOnly: true, Secure: env("HUB_COOKIE_SECURE", "false") == "true", SameSite: http.SameSiteStrictMode, MaxAge: 7 * 86400})
+	http.SetCookie(w, &http.Cookie{
+		Name:     "sahand_session",
+		Value:    token,
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   env("HUB_COOKIE_SECURE", "false") == "true",
+		SameSite: http.SameSiteStrictMode,
+		MaxAge:   7 * 86400,
+	})
 	jsonOut(w, 200, map[string]bool{"ok": true})
 }
 
@@ -274,7 +277,15 @@ func (a *App) logout(w http.ResponseWriter, r *http.Request) {
 		a.mu.Unlock()
 		_, _ = a.db.Exec(`DELETE FROM auth_sessions WHERE token=?`, c.Value)
 	}
-	http.SetCookie(w, &http.Cookie{Name: "sahand_session", Value: "", Path: "/", HttpOnly: true, Secure: env("HUB_COOKIE_SECURE", "false") == "true", SameSite: http.SameSiteStrictMode, MaxAge: -1})
+	http.SetCookie(w, &http.Cookie{
+		Name:     "sahand_session",
+		Value:    "",
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   env("HUB_COOKIE_SECURE", "false") == "true",
+		SameSite: http.SameSiteStrictMode,
+		MaxAge:   -1,
+	})
 	jsonOut(w, 200, map[string]bool{"ok": true})
 }
 
@@ -284,7 +295,7 @@ func (a *App) status(w http.ResponseWriter, r *http.Request) {
 	cCfg := a.providerKey("codecraft") != ""
 	jsonOut(w, 200, map[string]any{
 		"status":                "online",
-		"version":               "0.3.1",
+		"version":               "0.3.5",
 		"gemini_configured":     gCfg,
 		"openrouter_configured": oCfg,
 		"codecraft_configured":  cCfg,
@@ -312,36 +323,36 @@ func (a *App) saveProviderKey(w http.ResponseWriter, r *http.Request) {
 		jsonOut(w, 400, map[string]string{"error": "Invalid request payload"})
 		return
 	}
-	provider := normalizeProvider(body.Provider)
+	norm := provider.NormalizeProvider(body.Provider)
 	key := strings.TrimSpace(body.APIKey)
 	if key == "" {
-		key = a.providerKey(provider)
+		key = a.providerKey(norm)
 	}
 	if len(key) < 10 {
-		jsonOut(w, 400, map[string]string{"error": "Please enter a valid API key for " + providerLabel(provider)})
+		jsonOut(w, 400, map[string]string{"error": "Please enter a valid API key for " + provider.ProviderLabel(norm)})
 		return
 	}
 
 	start := time.Now()
-	models, err := a.fetchProviderModels(provider, key)
+	models, err := a.fetchProviderModels(norm, key)
 	latency := time.Since(start).Milliseconds()
 	if err != nil {
 		jsonOut(w, 400, map[string]any{"error": err.Error()})
 		return
 	}
 
-	if err := a.setSetting(provider+"_api_key", key); err != nil {
+	if err := a.setSetting(norm+"_api_key", key); err != nil {
 		jsonOut(w, 500, map[string]string{"error": "Failed to store API key in database"})
 		return
 	}
 
-	if len(models) > 0 && (a.setting("active_model") == "" || a.activeProvider() == provider) {
-		a.setActiveSelection(provider, models[0].ID)
+	if len(models) > 0 && (a.setting("active_model") == "" || a.activeProvider() == norm) {
+		a.setActiveSelection(norm, models[0].ID)
 	}
 
 	jsonOut(w, 200, map[string]any{
 		"ok":              true,
-		"provider":        provider,
+		"provider":        norm,
 		"latency_ms":      latency,
 		"models":          models,
 		"active_provider": a.activeProvider(),
@@ -379,11 +390,11 @@ func (a *App) handleModels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	provider := normalizeProvider(q)
-	key := a.providerKey(provider)
+	norm := provider.NormalizeProvider(q)
+	key := a.providerKey(norm)
 	if key == "" {
 		jsonOut(w, 200, map[string]any{
-			"provider":        provider,
+			"provider":        norm,
 			"models":          []ModelInfo{},
 			"configured":      false,
 			"active_provider": a.activeProvider(),
@@ -391,10 +402,10 @@ func (a *App) handleModels(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	models, err := a.fetchProviderModels(provider, key)
+	models, err := a.fetchProviderModels(norm, key)
 	if err != nil {
 		jsonOut(w, 400, map[string]any{
-			"provider":        provider,
+			"provider":        norm,
 			"error":           err.Error(),
 			"models":          []ModelInfo{},
 			"configured":      true,
@@ -404,7 +415,7 @@ func (a *App) handleModels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonOut(w, 200, map[string]any{
-		"provider":        provider,
+		"provider":        norm,
 		"models":          models,
 		"configured":      true,
 		"active_provider": a.activeProvider(),
@@ -426,31 +437,31 @@ func (a *App) handleTestModel(w http.ResponseWriter, r *http.Request) {
 		jsonOut(w, 400, map[string]string{"error": "Model ID is required"})
 		return
 	}
-	provider := normalizeProvider(body.Provider)
+	norm := provider.NormalizeProvider(body.Provider)
 	model := strings.TrimSpace(body.Model)
-	if provider == "gemini" {
+	if norm == "gemini" {
 		model = strings.TrimPrefix(model, "models/")
 	}
 
-	key := a.providerKey(provider)
+	key := a.providerKey(norm)
 	if key == "" {
-		jsonOut(w, 400, map[string]string{"error": "Save your " + providerLabel(provider) + " API key first"})
+		jsonOut(w, 400, map[string]string{"error": "Save your " + provider.ProviderLabel(norm) + " API key first"})
 		return
 	}
 
-	start := time.Now()
-	reply, err := a.callProviderModel(provider, key, "Reply with the single word OK.", model)
-	latency := time.Since(start).Milliseconds()
-
+	testPrompt := []provider.Message{
+		{Role: "user", Content: "Reply with the single word OK."},
+	}
+	reply, latency, err := a.router.Call(r.Context(), norm, key, model, testPrompt, provider.CallOpts{MaxTokens: 16})
 	if err != nil {
-		a.saveTestRecord(provider, model, ModelTestRecord{
+		a.saveTestRecord(norm, model, ModelTestRecord{
 			Status:    "failed",
 			LatencyMs: latency,
 			LastError: err.Error(),
 		})
 		jsonOut(w, 200, map[string]any{
 			"ok":              false,
-			"provider":        provider,
+			"provider":        norm,
 			"model":           model,
 			"status":          "failed",
 			"latency_ms":      latency,
@@ -461,18 +472,18 @@ func (a *App) handleTestModel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	a.saveTestRecord(provider, model, ModelTestRecord{
+	a.saveTestRecord(norm, model, ModelTestRecord{
 		Status:    "working",
 		LatencyMs: latency,
 		LastError: "",
 	})
 	if body.SetActive {
-		a.setActiveSelection(provider, model)
+		a.setActiveSelection(norm, model)
 	}
 
 	jsonOut(w, 200, map[string]any{
 		"ok":              true,
-		"provider":        provider,
+		"provider":        norm,
 		"model":           model,
 		"status":          "working",
 		"latency_ms":      latency,
@@ -482,8 +493,9 @@ func (a *App) handleTestModel(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (a *App) fetchProviderModels(provider, key string) ([]ModelInfo, error) {
-	switch normalizeProvider(provider) {
+func (a *App) fetchProviderModels(p, key string) ([]ModelInfo, error) {
+	norm := provider.NormalizeProvider(p)
+	switch norm {
 	case "openrouter":
 		return a.fetchOpenRouterModels(key)
 	case "codecraft":
@@ -503,21 +515,13 @@ func (a *App) fetchGeminiModels(key string) ([]ModelInfo, error) {
 	client := &http.Client{Timeout: 20 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("Network error reaching Google API: %v", err)
+		return nil, fmt.Errorf("network error reaching Google Gemini API: %v", err)
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		var gErr struct {
-			Error struct {
-				Message string `json:"message"`
-			} `json:"error"`
-		}
-		if json.Unmarshal(raw, &gErr) == nil && gErr.Error.Message != "" {
-			return nil, fmt.Errorf("Google API HTTP %d: %s", resp.StatusCode, gErr.Error.Message)
-		}
-		return nil, fmt.Errorf("Google API HTTP %d", resp.StatusCode)
+		return nil, fmt.Errorf("Google Gemini API HTTP %d", resp.StatusCode)
 	}
 
 	var parsed struct {
@@ -587,30 +591,21 @@ func (a *App) fetchGeminiModels(key string) ([]ModelInfo, error) {
 }
 
 func (a *App) fetchOpenRouterModels(key string) ([]ModelInfo, error) {
-	authReq, _ := http.NewRequest(http.MethodGet, "https://openrouter.ai/api/v1/auth/key", nil)
-	authReq.Header.Set("Authorization", "Bearer "+key)
-	client := &http.Client{Timeout: 25 * time.Second}
-	if authResp, err := client.Do(authReq); err == nil {
-		defer authResp.Body.Close()
-		if authResp.StatusCode == 401 || authResp.StatusCode == 403 {
-			return nil, fmt.Errorf("OpenRouter rejected this API key (HTTP %d)", authResp.StatusCode)
-		}
-	}
-
 	req, err := http.NewRequest(http.MethodGet, "https://openrouter.ai/api/v1/models", nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+key)
+	client := &http.Client{Timeout: 25 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("Network error reaching OpenRouter: %v", err)
+		return nil, fmt.Errorf("network error reaching OpenRouter: %v", err)
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 5<<20))
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("OpenRouter HTTP %d: %s", resp.StatusCode, extractAPIError(raw))
+		return nil, fmt.Errorf("OpenRouter HTTP %d", resp.StatusCode)
 	}
 
 	var parsed struct {
@@ -693,17 +688,16 @@ func (a *App) fetchCodeCraftModels(key string) ([]ModelInfo, error) {
 	}
 	req.Header.Set("Authorization", "Bearer "+key)
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "Sahand-CorText/0.3.1")
 	client := &http.Client{Timeout: 25 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("Network error reaching CodeCraft API: %v", err)
+		return nil, fmt.Errorf("network error reaching CodeCraft API: %v", err)
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("CodeCraft API HTTP %d: %s", resp.StatusCode, extractAPIError(raw))
+		return nil, fmt.Errorf("CodeCraft API HTTP %d", resp.StatusCode)
 	}
 
 	var parsed struct {
@@ -721,7 +715,7 @@ func (a *App) fetchCodeCraftModels(key string) ([]ModelInfo, error) {
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(raw, &parsed); err != nil {
-		return nil, fmt.Errorf("Invalid JSON from CodeCraft /v1/models: %v", err)
+		return nil, err
 	}
 
 	records := a.loadTestRecords("codecraft")
@@ -748,15 +742,11 @@ func (a *App) fetchCodeCraftModels(key string) ([]ModelInfo, error) {
 		if inPer1M > 0 {
 			priceInfo = fmt.Sprintf("$%.2f / 1M tokens", inPer1M)
 		}
-		desc := m.Description
-		if len(m.Capabilities) > 0 && desc != "" {
-			desc = desc + " · [" + strings.Join(m.Capabilities, ", ") + "]"
-		}
 		out = append(out, ModelInfo{
 			Provider:    "codecraft",
 			ID:          m.ID,
 			DisplayName: disp,
-			Description: desc,
+			Description: m.Description,
 			ContextLen:  m.ContextWindow,
 			IsFree:      true,
 			PriceInfo:   priceInfo,
@@ -788,33 +778,6 @@ func statusRank(s string) int {
 	default:
 		return 2
 	}
-}
-
-func extractAPIError(raw []byte) string {
-	var eWrap struct {
-		Error   any    `json:"error"`
-		Message string `json:"message"`
-	}
-	if json.Unmarshal(raw, &eWrap) == nil {
-		switch v := eWrap.Error.(type) {
-		case string:
-			if v != "" {
-				return v
-			}
-		case map[string]any:
-			if msg, ok := v["message"].(string); ok && msg != "" {
-				return msg
-			}
-		}
-		if eWrap.Message != "" {
-			return eWrap.Message
-		}
-	}
-	s := strings.TrimSpace(string(raw))
-	if len(s) > 220 {
-		s = s[:220] + "…"
-	}
-	return s
 }
 
 func (a *App) listSessions(w http.ResponseWriter, r *http.Request) {
@@ -850,7 +813,6 @@ func (a *App) createSession(w http.ResponseWriter, r *http.Request) {
 	jsonOut(w, 201, Session{ID: id, Title: "New conversation", Pinned: false})
 }
 
-// PATCH /api/sessions - Rename session title and/or toggle pinned state
 func (a *App) updateSession(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		ID     string  `json:"id"`
@@ -865,16 +827,11 @@ func (a *App) updateSession(w http.ResponseWriter, r *http.Request) {
 
 	if body.Title != nil {
 		t := strings.TrimSpace(*body.Title)
-		if t == "" {
-			jsonOut(w, 400, map[string]string{"error": "Title cannot be empty"})
-			return
-		}
-		if len([]rune(t)) > 120 {
-			t = string([]rune(t)[:120])
-		}
-		if _, err := a.db.Exec(`UPDATE sessions SET title=? WHERE id=?`, t, id); err != nil {
-			jsonOut(w, 500, map[string]string{"error": "Failed to rename session"})
-			return
+		if t != "" {
+			if len([]rune(t)) > 120 {
+				t = string([]rune(t)[:120])
+			}
+			_, _ = a.db.Exec(`UPDATE sessions SET title=? WHERE id=?`, t, id)
 		}
 	}
 
@@ -883,10 +840,7 @@ func (a *App) updateSession(w http.ResponseWriter, r *http.Request) {
 		if *body.Pinned {
 			pinVal = 1
 		}
-		if _, err := a.db.Exec(`UPDATE sessions SET pinned=? WHERE id=?`, pinVal, id); err != nil {
-			jsonOut(w, 500, map[string]string{"error": "Failed to update pin state"})
-			return
-		}
+		_, _ = a.db.Exec(`UPDATE sessions SET pinned=? WHERE id=?`, pinVal, id)
 	}
 
 	var s Session
@@ -899,7 +853,6 @@ func (a *App) updateSession(w http.ResponseWriter, r *http.Request) {
 	jsonOut(w, 200, s)
 }
 
-// DELETE /api/sessions?id=... - Delete session and its messages
 func (a *App) deleteSession(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimSpace(r.URL.Query().Get("id"))
 	if id == "" {
@@ -923,7 +876,7 @@ func (a *App) deleteSession(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) getMessages(w http.ResponseWriter, r *http.Request) {
 	id := r.URL.Query().Get("session_id")
-	rows, e := a.db.Query(`SELECT id,role,content,created_at FROM messages WHERE session_id=? ORDER BY id`, id)
+	rows, e := a.db.Query(`SELECT id,role,content,created_at FROM messages WHERE session_id=? ORDER BY id ASC`, id)
 	if e != nil {
 		jsonOut(w, 500, map[string]string{"error": "database error"})
 		return
@@ -939,6 +892,7 @@ func (a *App) getMessages(w http.ResponseWriter, r *http.Request) {
 	jsonOut(w, 200, out)
 }
 
+// sendMessage now dispatches the full multi-turn conversational history for the session
 func (a *App) sendMessage(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		SessionID string `json:"session_id"`
@@ -956,53 +910,90 @@ func (a *App) sendMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	provider := body.Provider
+	normProvider := body.Provider
 	chosenModel := strings.TrimSpace(body.Model)
 	if strings.Contains(chosenModel, "::") {
 		parts := strings.SplitN(chosenModel, "::", 2)
-		provider = parts[0]
+		normProvider = parts[0]
 		chosenModel = parts[1]
 	}
-	if provider == "" {
-		provider = a.activeProvider()
+	if normProvider == "" {
+		normProvider = a.activeProvider()
 	}
-	provider = normalizeProvider(provider)
+	normProvider = provider.NormalizeProvider(normProvider)
 	if chosenModel == "" {
 		chosenModel = a.activeModel()
 	}
-	if provider == "gemini" {
+	if normProvider == "gemini" {
 		chosenModel = strings.TrimPrefix(chosenModel, "models/")
 	}
 
-	key := a.providerKey(provider)
+	key := a.providerKey(normProvider)
 	if key == "" {
-		jsonOut(w, 503, map[string]string{"error": "Please save your " + providerLabel(provider) + " API key in Settings first."})
+		jsonOut(w, 503, map[string]string{"error": "Please save your " + provider.ProviderLabel(normProvider) + " API key in Settings first."})
 		return
 	}
 
+	// 1. Record incoming user turn in SQLite
 	_, err := a.db.Exec(`INSERT INTO messages(session_id,role,content) VALUES(?,?,?)`, body.SessionID, "user", body.Message)
 	if err != nil {
 		jsonOut(w, 500, map[string]string{"error": "database error"})
 		return
 	}
 
-	start := time.Now()
-	answer, err := a.callProviderModel(provider, key, body.Message, chosenModel)
-	elapsed := time.Since(start).Milliseconds()
+	// 2. Load conversation history strictly for this session
+	rows, err := a.db.Query(`SELECT role, content FROM messages WHERE session_id=? ORDER BY id ASC`, body.SessionID)
 	if err != nil {
-		a.saveTestRecord(provider, chosenModel, ModelTestRecord{Status: "failed", LatencyMs: elapsed, LastError: err.Error()})
-		jsonOut(w, 502, map[string]string{"error": fmt.Sprintf("[%s · %s] %s", providerLabel(provider), chosenModel, err.Error())})
+		jsonOut(w, 500, map[string]string{"error": "database error"})
+		return
+	}
+	defer rows.Close()
+
+	var history []provider.Message
+	for rows.Next() {
+		var role, content string
+		if rows.Scan(&role, &content) == nil {
+			history = append(history, provider.Message{Role: role, Content: content})
+		}
+	}
+
+	// 3. Apply safe context window truncation
+	maxMsgs := 20
+	if v := os.Getenv("HUB_MAX_CHAT_HISTORY_MESSAGES"); v != "" {
+		if n, e := strconv.Atoi(v); e == nil && n > 0 {
+			maxMsgs = n
+		}
+	}
+	maxChars := 32000
+	if v := os.Getenv("HUB_MAX_CHAT_HISTORY_CHARS"); v != "" {
+		if n, e := strconv.Atoi(v); e == nil && n > 0 {
+			maxChars = n
+		}
+	}
+	promptMessages := chat.TruncateHistory(history, chat.HistoryConfig{
+		MaxMessages: maxMsgs,
+		MaxChars:    maxChars,
+	})
+
+	// 4. Dispatch structured history to the selected provider
+	answer, elapsed, err := a.router.Call(r.Context(), normProvider, key, chosenModel, promptMessages, provider.CallOpts{})
+	if err != nil {
+		a.saveTestRecord(normProvider, chosenModel, ModelTestRecord{Status: "failed", LatencyMs: elapsed, LastError: err.Error()})
+		jsonOut(w, 502, map[string]string{"error": fmt.Sprintf("[%s · %s] %s", provider.ProviderLabel(normProvider), chosenModel, err.Error())})
 		return
 	}
 
-	a.saveTestRecord(provider, chosenModel, ModelTestRecord{Status: "working", LatencyMs: elapsed})
-	a.setActiveSelection(provider, chosenModel)
+	a.saveTestRecord(normProvider, chosenModel, ModelTestRecord{Status: "working", LatencyMs: elapsed})
+	a.setActiveSelection(normProvider, chosenModel)
 
+	// 5. Persist assistant reply in SQLite
 	_, err = a.db.Exec(`INSERT INTO messages(session_id,role,content) VALUES(?,?,?)`, body.SessionID, "assistant", answer)
 	if err != nil {
 		jsonOut(w, 500, map[string]string{"error": "database error"})
 		return
 	}
+
+	// 6. Update session metadata and title if first exchange
 	var count int
 	_ = a.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE session_id=?`, body.SessionID).Scan(&count)
 	if count <= 2 && (currentTitle == "" || currentTitle == "New conversation") {
@@ -1014,159 +1005,13 @@ func (a *App) sendMessage(w http.ResponseWriter, r *http.Request) {
 	} else {
 		_, _ = a.db.Exec(`UPDATE sessions SET updated_at=CURRENT_TIMESTAMP WHERE id=?`, body.SessionID)
 	}
+
 	jsonOut(w, 200, map[string]any{
 		"reply":      answer,
 		"latency_ms": elapsed,
-		"provider":   provider,
+		"provider":   normProvider,
 		"model":      chosenModel,
 	})
-}
-
-func (a *App) callProviderModel(provider, key, prompt, model string) (string, error) {
-	switch normalizeProvider(provider) {
-	case "openrouter":
-		return callOpenAICompatible("https://openrouter.ai/api/v1/chat/completions", key, prompt, model, "OpenRouter")
-	case "codecraft":
-		return callOpenAICompatible("https://codecraftapi.com/v1/chat/completions", key, prompt, model, "CodeCraft")
-	default:
-		return callGemini(key, prompt, model)
-	}
-}
-
-func callGemini(key, prompt, model string) (string, error) {
-	model = strings.TrimPrefix(strings.TrimSpace(model), "models/")
-	if model == "" {
-		model = "gemini-2.0-flash"
-	}
-	endpoint := "https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent"
-	payload := map[string]any{
-		"contents": []any{
-			map[string]any{
-				"parts": []any{
-					map[string]string{"text": prompt},
-				},
-			},
-		},
-	}
-	data, _ := json.Marshal(payload)
-	req, e := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(data))
-	if e != nil {
-		return "", e
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-goog-api-key", key)
-	client := &http.Client{Timeout: 90 * time.Second}
-	resp, e := client.Do(req)
-	if e != nil {
-		return "", e
-	}
-	defer resp.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		var gErr struct {
-			Error struct {
-				Code    int    `json:"code"`
-				Message string `json:"message"`
-				Status  string `json:"status"`
-			} `json:"error"`
-		}
-		if json.Unmarshal(raw, &gErr) == nil && gErr.Error.Message != "" {
-			return "", fmt.Errorf("HTTP %d (%s): %s", resp.StatusCode, gErr.Error.Status, gErr.Error.Message)
-		}
-		return "", fmt.Errorf("HTTP %d: %s", resp.StatusCode, extractAPIError(raw))
-	}
-	var parsed struct {
-		Candidates []struct {
-			Content struct {
-				Parts []struct {
-					Text string `json:"text"`
-				} `json:"parts"`
-			} `json:"content"`
-		} `json:"candidates"`
-	}
-	if e = json.Unmarshal(raw, &parsed); e != nil {
-		return "", e
-	}
-	if len(parsed.Candidates) == 0 || len(parsed.Candidates[0].Content.Parts) == 0 {
-		return "", errors.New("empty response from Gemini model")
-	}
-	var sb strings.Builder
-	for _, p := range parsed.Candidates[0].Content.Parts {
-		if p.Text != "" {
-			sb.WriteString(p.Text)
-		}
-	}
-	if sb.Len() == 0 {
-		return "", errors.New("empty text response from Gemini model")
-	}
-	return sb.String(), nil
-}
-
-func callOpenAICompatible(endpoint, key, prompt, model, label string) (string, error) {
-	payload := map[string]any{
-		"model": model,
-		"messages": []any{
-			map[string]string{
-				"role":    "user",
-				"content": prompt,
-			},
-		},
-	}
-	data, _ := json.Marshal(payload)
-	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(data))
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Authorization", "Bearer "+key)
-	req.Header.Set("HTTP-Referer", "https://github.com/sahand363/sahand-cortext")
-	req.Header.Set("X-Title", "Sahand-CorText")
-	req.Header.Set("User-Agent", "Sahand-CorText/0.3.1")
-
-	client := &http.Client{Timeout: 90 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("%s HTTP %d: %s", label, resp.StatusCode, extractAPIError(raw))
-	}
-
-	var parsed struct {
-		Error   any `json:"error"`
-		Choices []struct {
-			Message struct {
-				Content          string `json:"content"`
-				Reasoning        string `json:"reasoning"`
-				ReasoningContent string `json:"reasoning_content"`
-			} `json:"message"`
-		} `json:"choices"`
-	}
-	if err := json.Unmarshal(raw, &parsed); err != nil {
-		return "", fmt.Errorf("invalid JSON response from %s", label)
-	}
-	if parsed.Error != nil {
-		return "", fmt.Errorf("%s error: %s", label, extractAPIError(raw))
-	}
-	if len(parsed.Choices) == 0 {
-		return "", fmt.Errorf("no choices returned by %s", label)
-	}
-	msg := parsed.Choices[0].Message
-	out := strings.TrimSpace(msg.Content)
-	if out == "" {
-		out = strings.TrimSpace(msg.ReasoningContent)
-	}
-	if out == "" {
-		out = strings.TrimSpace(msg.Reasoning)
-	}
-	if out == "" {
-		return "", fmt.Errorf("empty content returned by %s model %s", label, model)
-	}
-	return out, nil
 }
 
 func main() {
@@ -1192,10 +1037,16 @@ func main() {
 	}
 	defer db.Close()
 	db.SetMaxOpenConns(1)
-	app := &App{db: db, sessions: map[string]time.Time{}}
+
+	app := &App{
+		db:       db,
+		sessions: map[string]time.Time{},
+		router:   provider.NewRouter(),
+	}
 	if e = app.initDB(); e != nil {
 		log.Fatal(e)
 	}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/login", app.login)
 	mux.HandleFunc("/api/logout", app.auth(app.logout))
@@ -1227,10 +1078,15 @@ func main() {
 			http.Error(w, "method not allowed", 405)
 		}
 	}))
+
 	webDir := env("HUB_WEB_DIR", "./web/dist")
 	mux.Handle("/", http.FileServer(http.Dir(webDir)))
-	server := &http.Server{Addr: env("HUB_ADDR", "0.0.0.0:8787"), Handler: securityHeaders(mux), ReadHeaderTimeout: 10 * time.Second}
-	log.Printf("Sahand-CorText listening on %s", server.Addr)
+	server := &http.Server{
+		Addr:              env("HUB_ADDR", "0.0.0.0:8787"),
+		Handler:           securityHeaders(mux),
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	log.Printf("Sahand-CorText v0.3.5 listening on %s", server.Addr)
 	log.Fatal(server.ListenAndServe())
 }
 
