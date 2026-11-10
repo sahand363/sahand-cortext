@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"sync"
 	"time"
 )
@@ -34,14 +35,14 @@ func (h *executionHelperImpl) IsCancelled() bool {
 	case <-h.ctx.Done():
 		return true
 	default:
-		return false
+		return h.storage.IsJobCancelled(context.Background(), h.jobID)
 	}
 }
 func (h *executionHelperImpl) RecordProgress(phase, message string, payload string) {
 	_ = h.storage.RecordEvent(context.Background(), h.jobID, EventStepProgress, phase, h.workerID, message, payload)
 }
 
-// DefaultJobProcessor processes task baseline for Phase 2
+// DefaultJobProcessor processes task baseline when no AI collaboration processor is attached
 type DefaultJobProcessor struct{}
 
 func (p *DefaultJobProcessor) ProcessJob(ctx context.Context, job *Job, h ExecutionHelper) (string, error) {
@@ -61,6 +62,7 @@ type WorkerPool struct {
 	workerCount   int
 	leaseDuration time.Duration
 	renewInterval time.Duration
+	retryBackoff  time.Duration
 	stopCh        chan struct{}
 	wg            sync.WaitGroup
 	running       bool
@@ -80,11 +82,12 @@ func NewWorkerPool(storage *Storage, processor JobProcessor, count int) *WorkerP
 		workerCount:   count,
 		leaseDuration: 60 * time.Second,
 		renewInterval: 15 * time.Second,
+		retryBackoff:  2 * time.Second,
 		stopCh:        make(chan struct{}),
 	}
 }
 
-// SetProcessor allows attaching a custom job engine (e.g. multi-model coordinator in Phase 3)
+// SetProcessor allows attaching a custom job engine
 func (p *WorkerPool) SetProcessor(proc JobProcessor) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -142,7 +145,6 @@ func (p *WorkerPool) workerLoop(rootCtx context.Context, workerID string) {
 			continue
 		}
 		if job == nil {
-			// Fast responsive idle poll when queue is empty
 			select {
 			case <-time.After(50 * time.Millisecond):
 			case <-rootCtx.Done():
@@ -187,7 +189,7 @@ func (p *WorkerPool) executeWithProtection(rootCtx context.Context, workerID str
 		}
 	}()
 
-	// Panic shield protects the main Go server
+	// Panic shield protects the main Go server from crashing on unexpected runtime panics
 	defer func() {
 		if r := recover(); r != nil {
 			errStr := fmt.Sprintf("panic recovered in worker: %v", r)
@@ -196,7 +198,7 @@ func (p *WorkerPool) executeWithProtection(rootCtx context.Context, workerID str
 		}
 	}()
 
-	_ = p.storage.RecordEvent(jobCtx, job.ID, EventJobStarted, "running", workerID, "Execution started", "{}")
+	_ = p.storage.RecordEvent(jobCtx, job.ID, EventJobStarted, string(job.CurrentStage), workerID, "Worker execution started", "{}")
 
 	result, err := p.processor.ProcessJob(jobCtx, job, helper)
 
@@ -206,8 +208,12 @@ func (p *WorkerPool) executeWithProtection(rootCtx context.Context, workerID str
 	}
 
 	if err != nil {
-		isRetryable := !errors.Is(err, context.Canceled)
-		_, _ = p.storage.FailOrScheduleRetry(context.Background(), job.ID, workerID, err.Error(), isRetryable, 5*time.Second)
+		isRetryable := IsRetryableProviderError(err)
+		backoff := time.Duration(math.Pow(2, float64(job.RetryCount))) * p.retryBackoff
+		if backoff <= 0 {
+			backoff = 2 * time.Second
+		}
+		_, _ = p.storage.FailOrScheduleRetry(context.Background(), job.ID, workerID, err.Error(), isRetryable, backoff)
 		return
 	}
 
