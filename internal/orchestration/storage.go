@@ -114,7 +114,6 @@ func (s *Storage) InitSchema() error {
 		}
 	}
 
-	// Backward-compatible column migration for databases created in Phase 2 / 3.1
 	_, _ = s.db.Exec(`ALTER TABLE orchestration_jobs ADD COLUMN current_stage TEXT NOT NULL DEFAULT 'queued';`)
 	return nil
 }
@@ -364,7 +363,6 @@ func (s *Storage) IsJobCancelled(ctx context.Context, jobID string) bool {
 }
 
 // ClaimNextJob atomically claims an available queued or expired job.
-// Completed, failed, or cancelled jobs are never claimed.
 func (s *Storage) ClaimNextJob(ctx context.Context, workerID string, leaseDuration time.Duration) (*Job, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -381,7 +379,6 @@ func (s *Storage) ClaimNextJob(ctx context.Context, workerID string, leaseDurati
 
 	now := time.Now().UTC()
 
-	// Select 1 eligible job using parameterized 'now' for sub-second precision
 	err = tx.QueryRowContext(ctx, `
 		SELECT id, status, coalesce(claimed_by, '')
 		FROM orchestration_jobs
@@ -420,7 +417,6 @@ func (s *Storage) ClaimNextJob(ctx context.Context, workerID string, leaseDurati
 		return nil, false, nil
 	}
 
-	// Update worker lease table
 	_, _ = tx.ExecContext(ctx, `
 		INSERT INTO orchestration_worker_leases (worker_id, last_heartbeat, active_job_id, status)
 		VALUES (?, ?, ?, 'active')
@@ -430,7 +426,6 @@ func (s *Storage) ClaimNextJob(ctx context.Context, workerID string, leaseDurati
 			status = 'active'`,
 		workerID, now, jobID)
 
-	// Record audit events
 	if isRecovery {
 		_, _ = tx.ExecContext(ctx, `
 			INSERT INTO orchestration_events (job_id, event_type, phase, worker_id, message, created_at)
@@ -629,6 +624,39 @@ func (s *Storage) FailOrScheduleRetry(ctx context.Context, jobID, workerID, errM
 	return false, tx.Commit()
 }
 
+// RetryJob resets a failed, cancelled, or waiting job back to queued so it resumes from its saved messages
+func (s *Storage) RetryJob(ctx context.Context, jobID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := time.Now().UTC()
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE orchestration_jobs
+		SET status = 'queued',
+		    current_stage = 'queued',
+		    retry_count = 0,
+		    error_message = NULL,
+		    claimed_by = NULL,
+		    lease_expires_at = NULL,
+		    completed_at = NULL,
+		    updated_at = ?
+		WHERE id = ? AND status IN ('failed', 'cancelled', 'waiting')`,
+		now, jobID)
+	if err != nil {
+		return err
+	}
+	if rows, _ := res.RowsAffected(); rows == 0 {
+		return ErrJobNotFound
+	}
+
+	_, _ = s.db.ExecContext(ctx, `
+		INSERT INTO orchestration_events (job_id, event_type, phase, message, created_at)
+		VALUES (?, ?, 'queued', 'Job manually re-queued for retry/resume from last saved state', ?)`,
+		jobID, string(EventRetryScheduled), now)
+
+	return nil
+}
+
 // CancelJob marks a job cancelled and informs workers
 func (s *Storage) CancelJob(ctx context.Context, jobID string) error {
 	s.mu.Lock()
@@ -648,7 +676,6 @@ func (s *Storage) CancelJob(ctx context.Context, jobID string) error {
 		return err
 	}
 	if rows, _ := res.RowsAffected(); rows == 0 {
-		// Check if already cancelled
 		var curStatus string
 		if e := s.db.QueryRowContext(ctx, `SELECT status FROM orchestration_jobs WHERE id = ?`, jobID).Scan(&curStatus); e == nil && curStatus == string(StatusCancelled) {
 			return nil
