@@ -180,6 +180,29 @@ func (a *App) saveTestRecord(p, model string, rec ModelTestRecord) {
 	}
 }
 
+// verifiedWorkingParticipants returns all models previously verified as working across all configured providers
+func (a *App) verifiedWorkingParticipants() []orchestration.Participant {
+	var out []orchestration.Participant
+	for _, p := range []string{"gemini", "openrouter", "codecraft"} {
+		if a.providerKey(p) == "" {
+			continue
+		}
+		records := a.loadTestRecords(p)
+		for modelID, rec := range records {
+			if rec.Status == "working" {
+				out = append(out, orchestration.Participant{
+					Provider: p,
+					Model:    modelID,
+				})
+			}
+		}
+	}
+	if ap, am := a.activeProvider(), a.activeModel(); ap != "" && am != "" && a.providerKey(ap) != "" {
+		out = append([]orchestration.Participant{{Provider: ap, Model: am}}, out...)
+	}
+	return out
+}
+
 func (a *App) activeProvider() string {
 	if p := a.setting("active_provider"); p != "" {
 		return provider.NormalizeProvider(p)
@@ -312,7 +335,7 @@ func (a *App) status(w http.ResponseWriter, r *http.Request) {
 	cCfg := a.providerKey("codecraft") != ""
 	jsonOut(w, 200, map[string]any{
 		"status":                "online",
-		"version":               "0.4.2",
+		"version":               "0.4.4",
 		"gemini_configured":     gCfg,
 		"openrouter_configured": oCfg,
 		"codecraft_configured":  cCfg,
@@ -950,14 +973,12 @@ func (a *App) sendMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 1. Persist user turn
 	_, err := a.db.Exec(`INSERT INTO messages(session_id,role,content) VALUES(?,?,?)`, body.SessionID, "user", body.Message)
 	if err != nil {
 		jsonOut(w, 500, map[string]string{"error": "database error"})
 		return
 	}
 
-	// 2. Fetch entire history for session and apply safe context truncation
 	rows, err := a.db.Query(`SELECT role, content FROM messages WHERE session_id=? ORDER BY id ASC`, body.SessionID)
 	if err != nil {
 		jsonOut(w, 500, map[string]string{"error": "database error"})
@@ -974,7 +995,6 @@ func (a *App) sendMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	promptMessages := chat.TruncateHistory(history, chat.DefaultConfig())
 
-	// 3. Dispatch structured history to provider
 	answer, elapsed, err := a.router.Call(r.Context(), normProvider, key, chosenModel, promptMessages, provider.CallOpts{})
 	if err != nil {
 		a.saveTestRecord(normProvider, chosenModel, ModelTestRecord{Status: "failed", LatencyMs: elapsed, LastError: err.Error()})
@@ -985,14 +1005,12 @@ func (a *App) sendMessage(w http.ResponseWriter, r *http.Request) {
 	a.saveTestRecord(normProvider, chosenModel, ModelTestRecord{Status: "working", LatencyMs: elapsed})
 	a.setActiveSelection(normProvider, chosenModel)
 
-	// 4. Persist assistant reply
 	_, err = a.db.Exec(`INSERT INTO messages(session_id,role,content) VALUES(?,?,?)`, body.SessionID, "assistant", answer)
 	if err != nil {
 		jsonOut(w, 500, map[string]string{"error": "database error"})
 		return
 	}
 
-	// 5. Update session title
 	var count int
 	_ = a.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE session_id=?`, body.SessionID).Scan(&count)
 	if count <= 2 && (currentTitle == "" || currentTitle == "New conversation") {
@@ -1020,11 +1038,14 @@ func (a *App) orchCreateJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Task         string                      `json:"task"`
-		MaxRounds    int                         `json:"max_rounds"`
-		MaxCalls     int                         `json:"max_calls"`
-		Participants []orchestration.Participant `json:"participants"`
-		Metadata     map[string]any              `json:"metadata"`
+		Task                string                      `json:"task"`
+		MaxRounds           int                         `json:"max_rounds"`
+		MaxCalls            int                         `json:"max_calls"`
+		AutoRetry           *bool                       `json:"auto_retry"`
+		SwitchParticipant   *bool                       `json:"switch_participant"`
+		AllowGlobalFallback *bool                       `json:"allow_global_fallback"`
+		Participants        []orchestration.Participant `json:"participants"`
+		Metadata            map[string]any              `json:"metadata"`
 	}
 	if json.NewDecoder(http.MaxBytesReader(w, r.Body, 64*1024)).Decode(&req) != nil || strings.TrimSpace(req.Task) == "" {
 		jsonOut(w, 400, map[string]string{"error": "Valid task description is required"})
@@ -1041,6 +1062,16 @@ func (a *App) orchCreateJob(w http.ResponseWriter, r *http.Request) {
 	if req.Metadata == nil {
 		req.Metadata = map[string]any{}
 	}
+	if req.AutoRetry != nil {
+		req.Metadata["auto_retry"] = *req.AutoRetry
+	}
+	if req.SwitchParticipant != nil {
+		req.Metadata["switch_participant"] = *req.SwitchParticipant
+	}
+	if req.AllowGlobalFallback != nil {
+		req.Metadata["allow_global_fallback"] = *req.AllowGlobalFallback
+	}
+
 	if len(req.Participants) > 0 {
 		for i := range req.Participants {
 			p := strings.TrimSpace(req.Participants[i].Provider)
@@ -1113,6 +1144,7 @@ func (a *App) orchGetJob(w http.ResponseWriter, r *http.Request) {
 	jobID = strings.TrimSuffix(jobID, "/participants")
 	jobID = strings.TrimSuffix(jobID, "/details")
 	jobID = strings.TrimSuffix(jobID, "/cancel")
+	jobID = strings.TrimSuffix(jobID, "/retry")
 
 	if jobID == "" {
 		jsonOut(w, 400, map[string]string{"error": "Job ID is required"})
@@ -1175,6 +1207,23 @@ func (a *App) orchGetJob(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		jsonOut(w, 200, map[string]any{"id": jobID, "status": "cancelled", "cancelled": true})
+		return
+	}
+
+	if strings.HasSuffix(r.URL.Path, "/retry") {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", 405)
+			return
+		}
+		if err := a.orchStorage.RetryJob(r.Context(), jobID); err != nil {
+			if errors.Is(err, orchestration.ErrJobNotFound) {
+				jsonOut(w, 404, map[string]string{"error": "Job not found or already running"})
+				return
+			}
+			jsonOut(w, 500, map[string]string{"error": "Retry failed: " + err.Error()})
+			return
+		}
+		jsonOut(w, 200, map[string]any{"id": jobID, "status": "queued", "retried": true})
 		return
 	}
 
@@ -1249,6 +1298,8 @@ func main() {
 		func() (string, string) { return app.activeProvider(), app.activeModel() },
 		orchestration.DefaultCollaborationConfig(),
 	)
+	collabEngine.SetFallbackCandidatesProvider(app.verifiedWorkingParticipants)
+
 	orchPool := orchestration.NewWorkerPool(orchStorage, collabEngine, envInt("ORCHESTRATION_WORKERS", 2))
 	app.orchEngine = collabEngine
 	app.orchPool = orchPool
@@ -1257,7 +1308,6 @@ func main() {
 		log.Fatal(e)
 	}
 
-	// Start worker pool with root context
 	workerCtx, workerCancel := context.WithCancel(context.Background())
 	orchPool.Start(workerCtx)
 
@@ -1270,7 +1320,6 @@ func main() {
 	mux.HandleFunc("/api/models", app.auth(app.handleModels))
 	mux.HandleFunc("/api/models/test", app.auth(app.handleTestModel))
 
-	// Sessions & Ordinary Chat
 	mux.HandleFunc("/api/sessions", app.auth(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
@@ -1295,7 +1344,6 @@ func main() {
 		}
 	}))
 
-	// Orchestration REST Endpoints
 	mux.HandleFunc("/api/orchestration/jobs", app.auth(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
 			app.orchListJobs(w, r)
@@ -1316,7 +1364,6 @@ func main() {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
-	// Graceful Shutdown handling
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 	go func() {
@@ -1330,7 +1377,7 @@ func main() {
 		_ = server.Shutdown(shutdownCtx)
 	}()
 
-	log.Printf("Sahand-CorText v0.4.2 listening on %s", server.Addr)
+	log.Printf("Sahand-CorText v0.4.4 listening on %s", server.Addr)
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}
