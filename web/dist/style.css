@@ -1010,3 +1010,81 @@ footer b{margin-left:auto;font-weight:500;letter-spacing:1px}
 @media(max-width:560px){
   .orch-stats-bar{grid-template-columns:1fr}
 }
+
+
+/* Project Files Explorer & ZIP Packaging Bar */
+.orch-files-count{
+  display:inline-block;
+  margin-left:10px;
+  font-size:11px;
+  font-weight:700;
+  letter-spacing:.8px;
+  background:#23331e;
+  border:1px solid #4d6b3c;
+  color:var(--lime);
+  padding:3px 8px;
+  border-radius:5px;
+  vertical-align:middle;
+}
+.orch-files-explorer{
+  margin-bottom:16px;
+  padding:12px 14px;
+  background:#0f141d;
+  border:1px solid #283548;
+  border-radius:10px;
+}
+.orch-files-label{
+  font-size:10.5px;
+  font-weight:700;
+  letter-spacing:1.2px;
+  color:#8996ab;
+  margin-bottom:9px;
+}
+.orch-files-tabs{
+  display:flex;
+  gap:8px;
+  flex-wrap:wrap;
+}
+.orch-file-tab{
+  display:inline-flex;
+  align-items:center;
+  border:1px solid #2e3b4e;
+  background:#161e2b;
+  border-radius:8px;
+  overflow:hidden;
+  transition:.15s;
+}
+.orch-file-tab.active{
+  border-color:var(--lime);
+  background:#1d291d;
+  box-shadow:0 0 12px #c3f47a22;
+}
+.orch-file-select{
+  border:0;
+  background:transparent;
+  color:#dce5f2;
+  padding:7px 11px;
+  font-size:13px;
+  display:inline-flex;
+  align-items:center;
+  gap:8px;
+}
+.orch-file-tab.active .orch-file-select b{
+  color:var(--lime);
+}
+.orch-file-select small{
+  font-size:11px;
+  color:#7f8da3;
+}
+.orch-file-dl{
+  border:0;
+  border-left:1px solid #2b3749;
+  background:#121822;
+  color:#9fb0c7;
+  padding:7px 10px;
+  font-size:12.5px;
+}
+.orch-file-dl:hover{
+  background:var(--lime);
+  color:#11170b;
+}
