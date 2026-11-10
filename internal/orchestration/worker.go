@@ -49,7 +49,7 @@ func (p *DefaultJobProcessor) ProcessJob(ctx context.Context, job *Job, h Execut
 	select {
 	case <-ctx.Done():
 		return "", ctx.Err()
-	case <-time.After(50 * time.Millisecond):
+	case <-time.After(10 * time.Millisecond):
 	}
 	return fmt.Sprintf("Orchestration infrastructure processed task: %s", job.Task), nil
 }
@@ -138,13 +138,13 @@ func (p *WorkerPool) workerLoop(rootCtx context.Context, workerID string) {
 
 		job, _, err := p.storage.ClaimNextJob(rootCtx, workerID, p.leaseDuration)
 		if err != nil {
-			time.Sleep(500 * time.Millisecond)
+			time.Sleep(50 * time.Millisecond)
 			continue
 		}
 		if job == nil {
-			// Idle backoff when queue is empty
+			// Fast responsive idle poll when queue is empty
 			select {
-			case <-time.After(800 * time.Millisecond):
+			case <-time.After(50 * time.Millisecond):
 			case <-rootCtx.Done():
 				return
 			case <-p.stopCh:
