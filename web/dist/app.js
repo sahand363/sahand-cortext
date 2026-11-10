@@ -2,8 +2,8 @@ const $ = id => document.getElementById(id);
 let currentSession = null, toastTimer, deleteConfirmTimer;
 let sessionsCache = [];
 
-let selectedProvider = "gemini"; // currently viewed tab in Settings / Models
-let activeProvider = "gemini";   // active provider used for Ordinary Chat
+let selectedProvider = "gemini";
+let activeProvider = "gemini";
 let activeModel = "gemini-2.0-flash";
 let freeOnlyOpenRouter = true;
 let deleteArmed = false;
@@ -16,7 +16,7 @@ let orchParticipantsDraft = [
 let orchJobsCache = [];
 let activeOrchJobId = localStorage.getItem("cortext_active_orch_job") || null;
 let orchPollTimer = null;
-let orchActiveSubView = "messages"; // "messages" or "events"
+let orchActiveSubView = "messages";
 let orchSubmitting = false;
 
 const providerCatalog = {
@@ -964,7 +964,6 @@ function renderOrchParticipantsBuilder() {
     const row = document.createElement("div");
     row.className = "orch-participant-card";
 
-    // Order badge & Role selector
     const topBar = document.createElement("div");
     topBar.className = "orch-part-top";
 
@@ -1039,7 +1038,6 @@ function renderOrchParticipantsBuilder() {
 
     topBar.append(stepBadge, roleSelect, orderBtns);
 
-    // Provider & Model selectors
     const gridRow = document.createElement("div");
     gridRow.className = "orch-part-grid";
 
@@ -1149,7 +1147,6 @@ $("orch-refresh-btn").onclick = async () => {
   toast("Orchestration state refreshed");
 };
 
-// Switch between Collaboration Transcript and Live Progress Timeline
 document.querySelectorAll(".orch-view-tab").forEach(btn => {
   btn.onclick = () => {
     orchActiveSubView = btn.dataset.orchview;
@@ -1205,6 +1202,9 @@ $("orch-create-form").addEventListener("submit", async e => {
 
   const maxRounds = parseInt($("orch-max-rounds").value, 10) || 5;
   const maxCalls = parseInt($("orch-max-calls").value, 10) || 12;
+  const autoRetry = $("orch-opt-autoretry") ? $("orch-opt-autoretry").checked : true;
+  const switchParticipant = $("orch-opt-switch") ? $("orch-opt-switch").checked : true;
+  const allowGlobalFallback = $("orch-opt-global-fallback") ? $("orch-opt-global-fallback").checked : true;
 
   orchSubmitting = true;
   const submitBtn = $("orch-submit-btn");
@@ -1218,6 +1218,9 @@ $("orch-create-form").addEventListener("submit", async e => {
         task,
         max_rounds: maxRounds,
         max_calls: maxCalls,
+        auto_retry: autoRetry,
+        switch_participant: switchParticipant,
+        allow_global_fallback: allowGlobalFallback,
         participants: orchParticipantsDraft.map((p, idx) => ({
           role: p.role,
           name: p.role === "coordinator" ? "Coordinator / Architect" : "Worker / Developer",
@@ -1327,14 +1330,12 @@ async function fetchAndRenderOrchJob(jobId) {
     const details = await api(`/api/orchestration/jobs/${encodeURIComponent(jobId)}/details`);
     renderOrchJobDetails(details);
 
-    // Update cached job status in sidebar list
     const idx = orchJobsCache.findIndex(x => x.id === jobId);
     if (idx !== -1) {
       orchJobsCache[idx] = { ...orchJobsCache[idx], ...details };
       renderOrchJobsList();
     }
 
-    // Keep polling while job is active
     if (details.status === "queued" || details.status === "running" || details.status === "waiting") {
       orchPollTimer = setTimeout(() => fetchAndRenderOrchJob(jobId), 1500);
     }
@@ -1357,15 +1358,23 @@ function renderOrchJobDetails(d) {
   $("orch-detail-task").textContent = d.task || "";
   $("orch-detail-sub").textContent = `Job ID: ${d.id} · Created ${formatShortTimestamp(d.created_at)}${d.retry_count ? ` · Retries: ${d.retry_count}/${d.max_retries}` : ""}`;
 
-  // Show/hide Cancel button based on active state
   const isActive = status === "queued" || status === "running" || status === "waiting";
+  const canRetry = status === "failed" || status === "cancelled" || status === "waiting";
+
   const cancelBtn = $("orch-cancel-btn");
   cancelBtn.classList.toggle("hidden", !isActive);
   cancelBtn.disabled = false;
   cancelBtn.textContent = "⏹ Stop Task";
   cancelBtn.onclick = () => cancelActiveOrchJob(d.id);
 
-  // Active model indicator banner
+  const retryBtn = $("orch-retry-btn");
+  if (retryBtn) {
+    retryBtn.classList.toggle("hidden", !canRetry);
+    retryBtn.disabled = false;
+    retryBtn.textContent = "↻ Retry / Resume Task";
+    retryBtn.onclick = () => retryOrchJob(d.id);
+  }
+
   const activeBanner = $("orch-active-banner");
   const participants = d.participants || [];
   const coordPart = participants.find(p => p.role === "coordinator") || participants[0];
@@ -1396,7 +1405,6 @@ function renderOrchJobDetails(d) {
     activeBanner.classList.add("hidden");
   }
 
-  // Error Banner
   const errEl = $("orch-detail-error");
   if (d.error_message && (status === "failed" || status === "waiting")) {
     errEl.textContent = `Error: ${d.error_message}`;
@@ -1405,7 +1413,6 @@ function renderOrchJobDetails(d) {
     errEl.classList.add("hidden");
   }
 
-  // Participant Roster Pills
   const rosterEl = $("orch-detail-roster");
   rosterEl.innerHTML = "";
   participants.forEach((p, i) => {
@@ -1418,7 +1425,6 @@ function renderOrchJobDetails(d) {
     rosterEl.appendChild(pill);
   });
 
-  // Final Result Card
   const finalCard = $("orch-final-card");
   if (status === "completed" && d.execution_result) {
     finalCard.classList.remove("hidden");
@@ -1430,7 +1436,6 @@ function renderOrchJobDetails(d) {
     finalCard.classList.add("hidden");
   }
 
-  // Render Collaboration Messages Transcript
   const messages = d.messages || [];
   $("orch-msg-count").textContent = String(messages.length);
   const msgContainer = $("orch-messages-view");
@@ -1485,7 +1490,6 @@ function renderOrchJobDetails(d) {
     });
   }
 
-  // Render Persisted Event Timeline
   const events = d.events || [];
   $("orch-evt-count").textContent = String(events.length);
   const evtContainer = $("orch-events-view");
@@ -1522,6 +1526,26 @@ function renderOrchJobDetails(d) {
   });
 }
 
+async function retryOrchJob(jobId) {
+  const btn = $("orch-retry-btn");
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = "Resuming…";
+  }
+  try {
+    await api(`/api/orchestration/jobs/${encodeURIComponent(jobId)}/retry`, { method: "POST" });
+    toast("↻ Task re-queued! Resuming from last saved step…");
+    await loadOrchJobsList();
+    await fetchAndRenderOrchJob(jobId);
+  } catch (err) {
+    toast("Retry failed: " + err.message);
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = "↻ Retry / Resume Task";
+    }
+  }
+}
+
 async function cancelActiveOrchJob(jobId) {
   const btn = $("orch-cancel-btn");
   btn.disabled = true;
@@ -1551,9 +1575,10 @@ function formatEventTypeLabel(evtType, phase) {
     review_decision: "Coordinator Review Decision",
     revision_requested: "Revision Requested",
     revision_completed: "Worker Revision Completed",
+    participant_fallback: "Automatic Model Failover",
     model_invoked: "Model Request Sent",
     model_responded: "Model Response Received",
-    retry_scheduled: "Transient Retry Scheduled",
+    retry_scheduled: "Retry / Resume Scheduled",
     worker_recovery: "Recovered by Worker",
     task_completed: "Collaboration Completed",
     job_completed: "Job Marked Complete",
