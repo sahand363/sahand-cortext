@@ -657,6 +657,114 @@ func (s *Storage) RetryJob(ctx context.Context, jobID string) error {
 	return nil
 }
 
+// IterateJob appends a human-in-the-loop revision request to an existing job, expands its round/call budgets,
+// and re-queues it so the AI team modifies the existing deliverable without losing prior work.
+func (s *Storage) IterateJob(ctx context.Context, jobID, instructions string, extraRounds, extraCalls int) (*Job, error) {
+	instructions = strings.TrimSpace(instructions)
+	if instructions == "" {
+		return nil, errors.New("revision instructions cannot be empty")
+	}
+	if extraRounds <= 0 {
+		extraRounds = 3
+	}
+	if extraCalls <= 0 {
+		extraCalls = 8
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	var status string
+	var curRound, maxRounds, totalCalls, maxCalls int
+	err = tx.QueryRowContext(ctx, `
+		SELECT status, current_round, max_rounds, total_calls, max_calls
+		FROM orchestration_jobs
+		WHERE id = ?`, jobID).Scan(&status, &curRound, &maxRounds, &totalCalls, &maxCalls)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrJobNotFound
+		}
+		return nil, err
+	}
+	if status == string(StatusRunning) || status == string(StatusQueued) {
+		return nil, errors.New("job is already running or queued; stop it first or wait for the current turn to finish")
+	}
+
+	nextRound := curRound + 1
+	if nextRound < 1 {
+		nextRound = 1
+	}
+	newTurnIndex := totalCalls + 1
+
+	newMaxRounds := maxRounds
+	if nextRound+extraRounds-1 > newMaxRounds {
+		newMaxRounds = nextRound + extraRounds - 1
+	}
+	newMaxCalls := maxCalls
+	if newTurnIndex+extraCalls > newMaxCalls {
+		newMaxCalls = newTurnIndex + extraCalls
+	}
+
+	now := time.Now().UTC()
+
+	// 1. Insert the user's revision instructions into the collaboration transcript
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO orchestration_messages
+		(job_id, round, turn_index, sender_role, sender_name, provider, model, action, content, completion_summary, raw_response, latency_ms, created_at)
+		VALUES (?, ?, ?, ?, 'Workspace Owner (User)', 'user', 'human-feedback', ?, ?, '', '', 0, ?)`,
+		jobID, nextRound, newTurnIndex, RoleUser, string(ActionRevise), instructions, now)
+	if err != nil {
+		return nil, err
+	}
+
+	// 2. Re-queue the job with expanded limits
+	_, err = tx.ExecContext(ctx, `
+		UPDATE orchestration_jobs
+		SET status = 'queued',
+		    current_stage = 'queued',
+		    current_round = ?,
+		    max_rounds = ?,
+		    total_calls = ?,
+		    max_calls = ?,
+		    retry_count = 0,
+		    error_message = NULL,
+		    claimed_by = NULL,
+		    lease_expires_at = NULL,
+		    completed_at = NULL,
+		    updated_at = ?
+		WHERE id = ?`,
+		nextRound, newMaxRounds, newTurnIndex, newMaxCalls, now, jobID)
+	if err != nil {
+		return nil, err
+	}
+
+	// 3. Record durable audit event
+	shortPreview := instructions
+	if len([]rune(shortPreview)) > 120 {
+		shortPreview = string([]rune(shortPreview)[:120]) + "…"
+	}
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO orchestration_events (job_id, event_type, phase, message, created_at)
+		VALUES (?, ?, 'queued', ?, ?)`,
+		jobID, string(EventUserRevision),
+		fmt.Sprintf("User requested revision for Round %d: %s", nextRound, shortPreview), now)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+
+	return s.GetJob(ctx, jobID)
+}
+
 // CancelJob marks a job cancelled and informs workers
 func (s *Storage) CancelJob(ctx context.Context, jobID string) error {
 	s.mu.Lock()
