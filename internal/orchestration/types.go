@@ -52,6 +52,7 @@ const (
 	EventRevisionRequested   EventType = "revision_requested"
 	EventRevisionCompleted   EventType = "revision_completed"
 	EventParticipantFallback EventType = "participant_fallback"
+	EventUserRevision        EventType = "user_revision_requested"
 	EventTaskCompleted       EventType = "task_completed"
 	EventTaskFailed          EventType = "task_failed"
 	EventTaskCancelled       EventType = "task_cancelled"
@@ -61,6 +62,7 @@ const (
 const (
 	RoleCoordinator = "coordinator"
 	RoleWorker      = "worker"
+	RoleUser        = "user"
 )
 
 // CollaborationAction represents a validated model decision
