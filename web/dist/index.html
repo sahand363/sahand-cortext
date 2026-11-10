@@ -162,7 +162,6 @@
         </div>
 
         <div class="orch-workspace-grid">
-          <!-- Left Column: Builder or Active Job Inspector -->
           <div class="orch-main-col">
             <!-- 1. New Collaboration Builder Card -->
             <div id="orch-builder-panel" class="orch-panel">
@@ -195,6 +194,32 @@
                   </label>
                 </div>
 
+                <!-- Optional Resilience & Failover Controls -->
+                <div class="orch-options-box">
+                  <div class="orch-options-title">RESILIENCE & AUTOMATIC FAILOVER OPTIONS</div>
+                  <label class="orch-check-row">
+                    <input type="checkbox" id="orch-opt-autoretry" checked>
+                    <div>
+                      <b>Auto-retry failed model calls</b>
+                      <small>Automatically retry when a provider returns a truncated response, timeout, or rate-limit error.</small>
+                    </div>
+                  </label>
+                  <label class="orch-check-row">
+                    <input type="checkbox" id="orch-opt-switch" checked>
+                    <div>
+                      <b>Switch to next configured participant if a worker/model fails</b>
+                      <small>If a participant fails to respond, automatically hand the turn to the next participant in your team roster.</small>
+                    </div>
+                  </label>
+                  <label class="orch-check-row">
+                    <input type="checkbox" id="orch-opt-global-fallback" checked>
+                    <div>
+                      <b>Fallback to any other verified working model if all assigned participants fail</b>
+                      <small>If all selected team models fail, automatically try other models you have verified as working on this server.</small>
+                    </div>
+                  </label>
+                </div>
+
                 <div class="orch-task-box">
                   <label for="orch-task-input">Collaboration Task / Objective</label>
                   <textarea id="orch-task-input" dir="auto" rows="4" placeholder="Describe the task, architecture, code, or analysis you want the Coordinator and Worker models to collaborate on… / هدف یا تسک مورد نظر را بنویسید…" required></textarea>
@@ -223,6 +248,7 @@
                   <div class="orch-detail-sub" id="orch-detail-sub">Job ID: —</div>
                 </div>
                 <div class="orch-monitor-actions">
+                  <button type="button" class="btn btn-primary btn-small hidden" id="orch-retry-btn">↻ Retry / Resume Task</button>
                   <button type="button" class="tool-btn danger hidden" id="orch-cancel-btn">⏹ Stop Task</button>
                   <button type="button" class="tool-btn" id="orch-back-builder-btn">＋ New Task</button>
                 </div>
@@ -352,7 +378,7 @@
         </div>
       </section>
     </div>
-    <footer><span>SAHAND-CORTEXT</span><i>·</i> PRIVATE MULTI-PROVIDER AI WORKSPACE <b>v0.4.3</b></footer>
+    <footer><span>SAHAND-CORTEXT</span><i>·</i> PRIVATE MULTI-PROVIDER AI WORKSPACE <b>v0.4.4</b></footer>
   </main>
 </div>
 <div id="toast" class="toast"></div>
