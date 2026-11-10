@@ -23,13 +23,16 @@ jobs:
           bash -n install.sh
           bash -n scripts/cortext-menu.sh
 
-      - name: Run automated tests with race detector
+      - name: Download Go dependencies and generate checksums
         run: |
-          go test -v -race ./...
+          go mod tidy
+
+      - name: Run automated tests
+        run: |
+          go test -v ./...
 
       - name: Build server binary
         run: |
-          go mod tidy
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o dist/sahand-cortext ./cmd/server
 
       - name: Publish pre-built release
