@@ -1088,3 +1088,61 @@ footer b{margin-left:auto;font-weight:500;letter-spacing:1px}
   background:var(--lime);
   color:#11170b;
 }
+
+/* Human-in-the-Loop Interactive Revision Composer */
+.orch-revision-card{
+  border:1px solid #3d5232;
+  background:linear-gradient(135deg,#151f19,#111722);
+  border-radius:12px;
+  padding:20px 22px;
+  margin-top:16px;
+}
+.orch-revision-head h3{
+  font:600 18px var(--font-display);
+  margin:4px 0 6px;
+  color:#eff7e6;
+}
+.orch-revision-head p{
+  font-size:13.5px;
+  color:#93a296;
+  margin:0 0 14px;
+}
+.orch-revision-form textarea{
+  width:100%;
+  resize:vertical;
+  min-height:85px;
+  background:#0c1118;
+  border:1px solid #354632;
+  border-radius:9px;
+  padding:13px 15px;
+  color:#f0f4fa;
+  font-family:var(--font-sans);
+  font-size:15.5px;
+  line-height:1.75;
+  unicode-bidi:plaintext;
+  text-align:start;
+  outline:none;
+}
+.orch-revision-form textarea:focus{
+  border-color:var(--lime);
+}
+.orch-revision-actions{
+  display:flex;
+  justify-content:space-between;
+  align-items:center;
+  gap:12px;
+  flex-wrap:wrap;
+  margin-top:12px;
+}
+.orch-msg-card.role-user{
+  border-left:3px solid #f7b955;
+  background:#191b24;
+}
+.orch-role-tag.user{
+  background:#382b15;
+  color:#ffd485;
+}
+.evt-user_revision_requested .orch-event-dot{
+  background:#f7b955;
+  box-shadow:0 0 8px #f7b955;
+}
