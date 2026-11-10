@@ -2,7 +2,7 @@ package orchestration
 
 import "time"
 
-// JobStatus represents the state of an orchestration job
+// JobStatus represents the lifecycle state of an orchestration job
 type JobStatus string
 
 const (
@@ -14,23 +14,46 @@ const (
 	StatusCancelled JobStatus = "cancelled"
 )
 
+// WorkflowStage tracks the exact step inside the collaboration state machine
+type WorkflowStage string
+
+const (
+	StageQueued    WorkflowStage = "queued"
+	StagePlanning  WorkflowStage = "planning"
+	StageWorking   WorkflowStage = "working"
+	StageReviewing WorkflowStage = "reviewing"
+	StageCompleted WorkflowStage = "completed"
+	StageFailed    WorkflowStage = "failed"
+	StageCancelled WorkflowStage = "cancelled"
+)
+
 // EventType represents the durable event category in the audit trail
 type EventType string
 
 const (
-	EventJobCreated     EventType = "job_created"
-	EventJobClaimed     EventType = "job_claimed"
-	EventJobStarted     EventType = "job_started"
-	EventJobWaiting     EventType = "job_waiting"
-	EventRetryScheduled EventType = "retry_scheduled"
-	EventJobFailed      EventType = "job_failed"
-	EventJobCompleted   EventType = "job_completed"
-	EventJobCancelled   EventType = "job_cancelled"
-	EventWorkerRecovery EventType = "worker_recovery"
-	EventStepProgress   EventType = "step_progress"
-	EventModelInvoked   EventType = "model_invoked"
-	EventModelResponded EventType = "model_responded"
-	EventReviewDecision EventType = "review_decision"
+	EventJobCreated         EventType = "job_created"
+	EventJobClaimed         EventType = "job_claimed"
+	EventJobStarted         EventType = "job_started"
+	EventJobWaiting         EventType = "job_waiting"
+	EventRetryScheduled     EventType = "retry_scheduled"
+	EventJobFailed          EventType = "job_failed"
+	EventJobCompleted       EventType = "job_completed"
+	EventJobCancelled       EventType = "job_cancelled"
+	EventWorkerRecovery     EventType = "worker_recovery"
+	EventStepProgress       EventType = "step_progress"
+	EventModelInvoked       EventType = "model_invoked"
+	EventModelResponded     EventType = "model_responded"
+	EventReviewDecision     EventType = "review_decision"
+	EventCoordinatorStarted EventType = "coordinator_started"
+	EventPlanGenerated      EventType = "plan_generated"
+	EventWorkerStarted      EventType = "worker_started"
+	EventWorkerResponded    EventType = "worker_response_received"
+	EventReviewStarted      EventType = "review_started"
+	EventRevisionRequested  EventType = "revision_requested"
+	EventRevisionCompleted  EventType = "revision_completed"
+	EventTaskCompleted      EventType = "task_completed"
+	EventTaskFailed         EventType = "task_failed"
+	EventTaskCancelled      EventType = "task_cancelled"
 )
 
 // Participant Roles
@@ -48,33 +71,42 @@ const (
 	ActionComplete CollaborationAction = "complete"
 )
 
-// Job represents an orchestration workflow execution unit
+// Job represents a persistent orchestration workflow execution unit
 type Job struct {
-	ID              string     `json:"id"`
-	Task            string     `json:"task"`
-	Status          JobStatus  `json:"status"`
-	MaxRounds       int        `json:"max_rounds"`
-	MaxCalls        int        `json:"max_calls"`
-	CurrentRound    int        `json:"current_round"`
-	TotalCalls      int        `json:"total_calls"`
-	RetryCount      int        `json:"retry_count"`
-	MaxRetries      int        `json:"max_retries"`
-	ClaimedBy       string     `json:"claimed_by,omitempty"`
-	LeaseExpiresAt  *time.Time `json:"lease_expires_at,omitempty"`
-	Metadata        string     `json:"metadata"`
-	ExecutionResult string     `json:"execution_result,omitempty"`
-	ErrorMessage    string     `json:"error_message,omitempty"`
-	CreatedAt       time.Time  `json:"created_at"`
-	UpdatedAt       time.Time  `json:"updated_at"`
-	StartedAt       *time.Time `json:"started_at,omitempty"`
-	CompletedAt     *time.Time `json:"completed_at,omitempty"`
+	ID              string        `json:"id"`
+	Task            string        `json:"task"`
+	Status          JobStatus     `json:"status"`
+	CurrentStage    WorkflowStage `json:"current_stage"`
+	MaxRounds       int           `json:"max_rounds"`
+	MaxCalls        int           `json:"max_calls"`
+	CurrentRound    int           `json:"current_round"`
+	TotalCalls      int           `json:"total_calls"`
+	RetryCount      int           `json:"retry_count"`
+	MaxRetries      int           `json:"max_retries"`
+	ClaimedBy       string        `json:"claimed_by,omitempty"`
+	LeaseExpiresAt  *time.Time    `json:"lease_expires_at,omitempty"`
+	Metadata        string        `json:"metadata"`
+	ExecutionResult string        `json:"execution_result,omitempty"`
+	ErrorMessage    string        `json:"error_message,omitempty"`
+	CreatedAt       time.Time     `json:"created_at"`
+	UpdatedAt       time.Time     `json:"updated_at"`
+	StartedAt       *time.Time    `json:"started_at,omitempty"`
+	CompletedAt     *time.Time    `json:"completed_at,omitempty"`
+}
+
+// JobDetails bundles the job, participants, messages, and events for inspection
+type JobDetails struct {
+	*Job
+	Participants []Participant          `json:"participants"`
+	Messages     []CollaborationMessage `json:"messages"`
+	Events       []Event                `json:"events"`
 }
 
 // Participant represents an AI model assigned to a specific collaboration role
 type Participant struct {
 	ID           int64     `json:"id"`
 	JobID        string    `json:"job_id"`
-	Role         string    `json:"role"` // "coordinator", "worker", or future roles
+	Role         string    `json:"role"` // "coordinator", "worker", or additional roles
 	Name         string    `json:"name"`
 	Provider     string    `json:"provider"`
 	Model        string    `json:"model"`
