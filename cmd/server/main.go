@@ -1145,6 +1145,7 @@ func (a *App) orchGetJob(w http.ResponseWriter, r *http.Request) {
 	jobID = strings.TrimSuffix(jobID, "/details")
 	jobID = strings.TrimSuffix(jobID, "/cancel")
 	jobID = strings.TrimSuffix(jobID, "/retry")
+	jobID = strings.TrimSuffix(jobID, "/iterate")
 
 	if jobID == "" {
 		jsonOut(w, 400, map[string]string{"error": "Job ID is required"})
@@ -1224,6 +1225,33 @@ func (a *App) orchGetJob(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		jsonOut(w, 200, map[string]any{"id": jobID, "status": "queued", "retried": true})
+		return
+	}
+
+	if strings.HasSuffix(r.URL.Path, "/iterate") {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", 405)
+			return
+		}
+		var body struct {
+			Instruction string `json:"instruction"`
+			ExtraRounds int    `json:"extra_rounds"`
+			ExtraCalls  int    `json:"extra_calls"`
+		}
+		if json.NewDecoder(http.MaxBytesReader(w, r.Body, 32*1024)).Decode(&body) != nil || strings.TrimSpace(body.Instruction) == "" {
+			jsonOut(w, 400, map[string]string{"error": "Please enter your revision instructions"})
+			return
+		}
+		updatedJob, err := a.orchStorage.IterateJob(r.Context(), jobID, body.Instruction, body.ExtraRounds, body.ExtraCalls)
+		if err != nil {
+			if errors.Is(err, orchestration.ErrJobNotFound) {
+				jsonOut(w, 404, map[string]string{"error": "Job not found"})
+				return
+			}
+			jsonOut(w, 400, map[string]string{"error": err.Error()})
+			return
+		}
+		jsonOut(w, 200, updatedJob)
 		return
 	}
 
