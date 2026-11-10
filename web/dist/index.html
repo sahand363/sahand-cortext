@@ -308,6 +308,37 @@
                   </div>
                 </div>
 
+                <!-- On-Demand Independent Second-Opinion AI Auditor Bar -->
+                <div id="orch-audit-toolbar" class="orch-audit-toolbar">
+                  <div class="orch-audit-info">
+                    <b>🔍 Independent Second-Opinion Audit</b>
+                    <span>Have another AI model inspect all generated project files for runtime bugs, missing timezones, or broken logic.</span>
+                  </div>
+                  <div class="orch-audit-controls">
+                    <select id="orch-auditor-select" class="orch-auditor-select"></select>
+                    <button type="button" class="btn btn-quiet btn-small" id="orch-run-audit-btn">🔍 Audit Project Now</button>
+                  </div>
+                </div>
+
+                <!-- Latest Independent Audit Report Result Banner -->
+                <div id="orch-audit-report" class="orch-audit-report hidden">
+                  <div class="orch-audit-report-head">
+                    <div>
+                      <span id="orch-audit-verdict-badge" class="orch-status-badge">AUDIT VERDICT</span>
+                      <b id="orch-audit-model-title">Auditor Model</b>
+                    </div>
+                    <div class="orch-audit-report-actions">
+                      <button type="button" class="btn btn-primary btn-small hidden" id="orch-apply-audit-btn">✓ Apply Auditor's Corrected Files</button>
+                      <button type="button" class="tool-btn small" id="orch-send-audit-worker-btn">↻ Send Findings to Worker Team</button>
+                    </div>
+                  </div>
+                  <div id="orch-audit-summary" class="orch-audit-summary" dir="auto"></div>
+                  <details class="orch-audit-details">
+                    <summary>View full auditor output & corrected code</summary>
+                    <div id="orch-audit-body" class="orch-audit-body" dir="auto"></div>
+                  </details>
+                </div>
+
                 <!-- Interactive Multi-File Explorer Tabs -->
                 <div id="orch-files-explorer" class="orch-files-explorer hidden">
                   <div class="orch-files-label">GENERATED PROJECT FILES (CLICK TO VIEW OR DOWNLOAD):</div>
@@ -442,7 +473,7 @@
         </div>
       </section>
     </div>
-    <footer><span>SAHAND-CORTEXT</span><i>·</i> PRIVATE MULTI-PROVIDER AI WORKSPACE <b>v0.4.7</b></footer>
+    <footer><span>SAHAND-CORTEXT</span><i>·</i> PRIVATE MULTI-PROVIDER AI WORKSPACE <b>v0.4.8</b></footer>
   </main>
 </div>
 <div id="toast" class="toast"></div>
