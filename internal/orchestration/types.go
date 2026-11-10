@@ -28,6 +28,24 @@ const (
 	EventJobCancelled   EventType = "job_cancelled"
 	EventWorkerRecovery EventType = "worker_recovery"
 	EventStepProgress   EventType = "step_progress"
+	EventModelInvoked   EventType = "model_invoked"
+	EventModelResponded EventType = "model_responded"
+	EventReviewDecision EventType = "review_decision"
+)
+
+// Participant Roles
+const (
+	RoleCoordinator = "coordinator"
+	RoleWorker      = "worker"
+)
+
+// CollaborationAction represents a validated model decision
+type CollaborationAction string
+
+const (
+	ActionContinue CollaborationAction = "continue"
+	ActionRevise   CollaborationAction = "revise"
+	ActionComplete CollaborationAction = "complete"
 )
 
 // Job represents an orchestration workflow execution unit
@@ -50,6 +68,51 @@ type Job struct {
 	UpdatedAt       time.Time  `json:"updated_at"`
 	StartedAt       *time.Time `json:"started_at,omitempty"`
 	CompletedAt     *time.Time `json:"completed_at,omitempty"`
+}
+
+// Participant represents an AI model assigned to a specific collaboration role
+type Participant struct {
+	ID           int64     `json:"id"`
+	JobID        string    `json:"job_id"`
+	Role         string    `json:"role"` // "coordinator", "worker", or future roles
+	Name         string    `json:"name"`
+	Provider     string    `json:"provider"`
+	Model        string    `json:"model"`
+	SystemPrompt string    `json:"system_prompt,omitempty"`
+	SortOrder    int       `json:"sort_order"`
+	CreatedAt    time.Time `json:"created_at"`
+}
+
+// CollaborationMessage stores a single turn in the AI-to-AI collaboration transcript
+type CollaborationMessage struct {
+	ID                int64               `json:"id"`
+	JobID             string              `json:"job_id"`
+	Round             int                 `json:"round"`
+	TurnIndex         int                 `json:"turn_index"`
+	SenderRole        string              `json:"sender_role"`
+	SenderName        string              `json:"sender_name"`
+	Provider          string              `json:"provider"`
+	Model             string              `json:"model"`
+	Action            CollaborationAction `json:"action"`
+	Content           string              `json:"content"`
+	CompletionSummary string              `json:"completion_summary,omitempty"`
+	RawResponse       string              `json:"raw_response,omitempty"`
+	LatencyMs         int64               `json:"latency_ms"`
+	CreatedAt         time.Time           `json:"created_at"`
+}
+
+// StructuredModelResponse is the expected structured output format from models
+type StructuredModelResponse struct {
+	Action            CollaborationAction `json:"action"`
+	Message           string              `json:"message"`
+	CompletionSummary string              `json:"completion_summary"`
+}
+
+// JobMetadata represents optional configuration stored in Job.Metadata
+type JobMetadata struct {
+	Participants   []Participant `json:"participants,omitempty"`
+	TimeoutSeconds int           `json:"timeout_seconds,omitempty"`
+	MaxContextChar int           `json:"max_context_chars,omitempty"`
 }
 
 // Event represents an immutable timestamped execution step
