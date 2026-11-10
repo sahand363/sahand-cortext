@@ -21,6 +21,7 @@ const (
 	StageQueued    WorkflowStage = "queued"
 	StagePlanning  WorkflowStage = "planning"
 	StageWorking   WorkflowStage = "working"
+	StageAuditing  WorkflowStage = "auditing"
 	StageReviewing WorkflowStage = "reviewing"
 	StageCompleted WorkflowStage = "completed"
 	StageFailed    WorkflowStage = "failed"
@@ -113,7 +114,7 @@ type JobDetails struct {
 type Participant struct {
 	ID           int64     `json:"id"`
 	JobID        string    `json:"job_id"`
-	Role         string    `json:"role"` // "coordinator", "worker", "auditor", or additional roles
+	Role         string    `json:"role"` // "coordinator", "worker", "auditor"
 	Name         string    `json:"name"`
 	Provider     string    `json:"provider"`
 	Model        string    `json:"model"`
