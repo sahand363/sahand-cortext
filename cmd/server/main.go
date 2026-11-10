@@ -312,7 +312,7 @@ func (a *App) status(w http.ResponseWriter, r *http.Request) {
 	cCfg := a.providerKey("codecraft") != ""
 	jsonOut(w, 200, map[string]any{
 		"status":                "online",
-		"version":               "0.4.1",
+		"version":               "0.4.2",
 		"gemini_configured":     gCfg,
 		"openrouter_configured": oCfg,
 		"codecraft_configured":  cCfg,
@@ -1031,17 +1031,36 @@ func (a *App) orchCreateJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if req.MaxRounds > 20 {
+		req.MaxRounds = 20
+	}
+	if req.MaxCalls > 50 {
+		req.MaxCalls = 50
+	}
+
 	if req.Metadata == nil {
 		req.Metadata = map[string]any{}
 	}
 	if len(req.Participants) > 0 {
 		for i := range req.Participants {
-			req.Participants[i].Provider = provider.NormalizeProvider(req.Participants[i].Provider)
-			req.Participants[i].Model = strings.TrimSpace(req.Participants[i].Model)
-			if req.Participants[i].Model == "" {
+			p := strings.TrimSpace(req.Participants[i].Provider)
+			m := strings.TrimSpace(req.Participants[i].Model)
+			if strings.Contains(m, "::") {
+				parts := strings.SplitN(m, "::", 2)
+				p = parts[0]
+				m = parts[1]
+			}
+			normProv := provider.NormalizeProvider(p)
+			if m == "" {
 				jsonOut(w, 400, map[string]string{"error": "Participant model ID cannot be empty"})
 				return
 			}
+			if a.providerKey(normProv) == "" {
+				jsonOut(w, 400, map[string]string{"error": "Provider " + provider.ProviderLabel(normProv) + " does not have a configured API key"})
+				return
+			}
+			req.Participants[i].Provider = normProv
+			req.Participants[i].Model = m
 		}
 		req.Metadata["participants"] = req.Participants
 	}
@@ -1091,6 +1110,8 @@ func (a *App) orchGetJob(w http.ResponseWriter, r *http.Request) {
 	jobID := strings.TrimPrefix(r.URL.Path, "/api/orchestration/jobs/")
 	jobID = strings.TrimSuffix(jobID, "/events")
 	jobID = strings.TrimSuffix(jobID, "/messages")
+	jobID = strings.TrimSuffix(jobID, "/participants")
+	jobID = strings.TrimSuffix(jobID, "/details")
 	jobID = strings.TrimSuffix(jobID, "/cancel")
 
 	if jobID == "" {
@@ -1126,6 +1147,20 @@ func (a *App) orchGetJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if strings.HasSuffix(r.URL.Path, "/participants") {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", 405)
+			return
+		}
+		parts, err := a.orchStorage.GetParticipants(r.Context(), jobID)
+		if err != nil {
+			jsonOut(w, 500, map[string]string{"error": "Failed retrieving participants: " + err.Error()})
+			return
+		}
+		jsonOut(w, 200, parts)
+		return
+	}
+
 	if strings.HasSuffix(r.URL.Path, "/cancel") {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", 405)
@@ -1145,6 +1180,20 @@ func (a *App) orchGetJob(w http.ResponseWriter, r *http.Request) {
 
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", 405)
+		return
+	}
+
+	if strings.HasSuffix(r.URL.Path, "/details") || r.URL.Query().Get("include") == "all" {
+		details, err := a.orchStorage.GetJobDetails(r.Context(), jobID)
+		if err != nil {
+			if errors.Is(err, orchestration.ErrJobNotFound) {
+				jsonOut(w, 404, map[string]string{"error": "Job not found"})
+				return
+			}
+			jsonOut(w, 500, map[string]string{"error": "Error retrieving job details: " + err.Error()})
+			return
+		}
+		jsonOut(w, 200, details)
 		return
 	}
 
@@ -1281,7 +1330,7 @@ func main() {
 		_ = server.Shutdown(shutdownCtx)
 	}()
 
-	log.Printf("Sahand-CorText v0.4.1 listening on %s", server.Addr)
+	log.Printf("Sahand-CorText v0.4.2 listening on %s", server.Addr)
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}
