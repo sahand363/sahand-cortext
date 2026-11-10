@@ -95,6 +95,126 @@ function toast(msg) {
   toastTimer = setTimeout(() => t.classList.remove("show"), 3400);
 }
 
+// Universal Copy Helper: works on both HTTP (IP address) and HTTPS
+async function copyTextToClipboard(text) {
+  if (!text) return false;
+  if (navigator.clipboard && window.isSecureContext) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {}
+  }
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.setAttribute("readonly", "");
+  ta.style.position = "fixed";
+  ta.style.top = "-9999px";
+  ta.style.left = "-9999px";
+  document.body.appendChild(ta);
+  ta.focus();
+  ta.select();
+  ta.setSelectionRange(0, text.length);
+  let ok = false;
+  try {
+    ok = document.execCommand("copy");
+  } catch {}
+  document.body.removeChild(ta);
+  return ok;
+}
+
+// Smart Code & File Extractor for Downloads and Live HTML Previews
+function extractDeliverableArtifact(rawText, jobId) {
+  if (!rawText) return { content: "", ext: "txt", mime: "text/plain", isHtml: false, filename: `${jobId || "result"}.txt` };
+
+  // Strip trailing Coordinator Completion Summary when extracting code file
+  let cleaned = rawText;
+  const sumIdx = cleaned.indexOf("\n---\n### Coordinator Completion Summary");
+  if (sumIdx !== -1) {
+    cleaned = cleaned.slice(0, sumIdx).trim();
+  }
+
+  let code = cleaned;
+  let lang = "";
+
+  // If the deliverable contains a markdown code block ```lang ... ```, extract the largest code block
+  const fenceRegex = /```([a-zA-Z0-9_-]*)\s*\n([\s\S]*?)```/g;
+  let match;
+  let bestBlock = "";
+  let bestLang = "";
+  while ((match = fenceRegex.exec(cleaned)) !== null) {
+    if (match[2].length > bestBlock.length) {
+      bestLang = (match[1] || "").toLowerCase();
+      bestBlock = match[2].trim();
+    }
+  }
+  if (bestBlock.length > 40) {
+    code = bestBlock;
+    lang = bestLang;
+  }
+
+  const lower = code.trim().toLowerCase();
+  let ext = "txt";
+  let mime = "text/plain;charset=utf-8";
+  let isHtml = false;
+
+  if (lang === "html" || lower.startsWith("<!doctype html") || lower.startsWith("<html") || (lower.includes("<html") && lower.includes("</html>"))) {
+    ext = "html";
+    mime = "text/html;charset=utf-8";
+    isHtml = true;
+    // If raw text had prose before <!DOCTYPE html>, trim to the HTML document
+    if (!bestBlock) {
+      const docStart = code.search(/<!doctype html|<html/i);
+      const docEnd = code.search(/<\/html>/i);
+      if (docStart !== -1 && docEnd !== -1) {
+        code = code.slice(docStart, docEnd + 7);
+      }
+    }
+  } else if (lang === "json" || (lower.startsWith("{") && lower.endsWith("}"))) {
+    ext = "json";
+    mime = "application/json;charset=utf-8";
+  } else if (lang === "js" || lang === "javascript") {
+    ext = "js";
+    mime = "text/javascript;charset=utf-8";
+  } else if (lang === "ts" || lang === "typescript") {
+    ext = "ts";
+  } else if (lang === "py" || lang === "python") {
+    ext = "py";
+  } else if (lang === "go" || lang === "golang" || lower.startsWith("package ")) {
+    ext = "go";
+  } else if (lang === "css") {
+    ext = "css";
+    mime = "text/css;charset=utf-8";
+  } else if (lang === "sh" || lang === "bash" || lower.startsWith("#!/")) {
+    ext = "sh";
+  } else if (lang === "md" || lang === "markdown" || cleaned.includes("### ")) {
+    ext = "md";
+    mime = "text/markdown;charset=utf-8";
+  }
+
+  const shortId = (jobId || "deliverable").replace(/[^a-zA-Z0-9_-]/g, "");
+  return {
+    content: ext === "md" || ext === "txt" ? rawText : code,
+    ext,
+    mime,
+    isHtml,
+    filename: `${shortId}.${ext}`
+  };
+}
+
+function downloadArtifactFile(rawText, jobId) {
+  const art = extractDeliverableArtifact(rawText, jobId);
+  const blob = new Blob([art.content], { type: art.mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = art.filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1500);
+  toast(`⬇ Downloaded ${art.filename}`);
+}
+
 function showLogin() {
   $("login-screen").classList.remove("hidden");
   $("app").classList.add("hidden");
@@ -1282,7 +1402,7 @@ function renderOrchJobsList() {
     badge.textContent = (j.status || "queued").toUpperCase();
 
     const meta = document.createElement("small");
-    meta.textContent = `R${j.current_round || 0}/${j.max_rounds || 5} · ${j.total_calls || 0} calls`;
+    meta.textContent = `R${j.current_round || 0}/${j.max_rounds || 5} · ${j.total_calls || 0} msgs`;
     top.append(badge, meta);
 
     const title = document.createElement("b");
@@ -1310,6 +1430,7 @@ async function openOrchJobMonitor(jobId) {
   localStorage.setItem("cortext_active_orch_job", jobId);
   $("orch-builder-panel").classList.add("hidden");
   $("orch-monitor-panel").classList.remove("hidden");
+  if ($("orch-preview-wrap")) $("orch-preview-wrap").classList.add("hidden");
   highlightActiveOrchJobCard();
 
   await fetchAndRenderOrchJob(jobId);
@@ -1347,6 +1468,8 @@ async function fetchAndRenderOrchJob(jobId) {
 function renderOrchJobDetails(d) {
   const status = (d.status || "queued").toLowerCase();
   const stage = (d.current_stage || status).toLowerCase();
+  const messages = d.messages || [];
+  const events = d.events || [];
 
   const statusEl = $("orch-detail-status");
   statusEl.className = `orch-status-badge status-${status}`;
@@ -1354,9 +1477,27 @@ function renderOrchJobDetails(d) {
 
   $("orch-detail-stage").textContent = `STAGE: ${stage.toUpperCase()}`;
   $("orch-detail-rounds").textContent = `Round ${d.current_round || 0} / ${d.max_rounds || 5}`;
-  $("orch-detail-calls").textContent = `Calls ${d.total_calls || 0} / ${d.max_calls || 12}`;
+  $("orch-detail-calls").textContent = `Messages ${messages.length} / ${d.max_calls || 12}`;
   $("orch-detail-task").textContent = d.task || "";
   $("orch-detail-sub").textContent = `Job ID: ${d.id} · Created ${formatShortTimestamp(d.created_at)}${d.retry_count ? ` · Retries: ${d.retry_count}/${d.max_retries}` : ""}`;
+
+  // Calculate Collaboration Exchange Stats
+  const coordMsgs = messages.filter(m => m.sender_role === "coordinator").length;
+  const workerMsgs = messages.filter(m => m.sender_role === "worker").length;
+  const revisionsReq = messages.filter(m => m.sender_role === "coordinator" && m.action === "revise").length;
+  const failoversCount = events.filter(e => e.event_type === "participant_fallback" || e.event_type === "retry_scheduled").length;
+  const totalLatencyMs = messages.reduce((sum, m) => sum + (m.latency_ms || 0), 0);
+
+  if ($("orch-stat-msgs")) {
+    $("orch-stat-msgs").textContent = String(messages.length);
+    $("orch-stat-msgs-sub").textContent = `${coordMsgs} Coordinator · ${workerMsgs} Worker`;
+    $("orch-stat-revisions").textContent = String(revisionsReq);
+    $("orch-stat-revisions-sub").textContent = `Rounds active: ${d.current_round || 0} of ${d.max_rounds || 5}`;
+    $("orch-stat-failovers").textContent = String(failoversCount);
+    $("orch-stat-failovers-sub").textContent = failoversCount > 0 ? "Automatic model switches" : "No model failures";
+    $("orch-stat-latency").textContent = `${(totalLatencyMs / 1000).toFixed(1)} s`;
+    $("orch-stat-latency-sub").textContent = `${totalLatencyMs.toLocaleString()} ms total API time`;
+  }
 
   const isActive = status === "queued" || status === "running" || status === "waiting";
   const canRetry = status === "failed" || status === "cancelled" || status === "waiting";
@@ -1421,22 +1562,60 @@ function renderOrchJobDetails(d) {
     pill.className = `orch-roster-pill${isWorkingNow ? " working-now" : ""}`;
     const roleLabel = p.role === "coordinator" ? "Coordinator / Architect" : "Worker / Developer";
     const provName = providerCatalog[p.provider]?.name || p.provider;
-    pill.innerHTML = `<span class="roster-role">#${i + 1} ${roleLabel}</span><b>${provName} · ${p.model}</b>`;
+    const sentCount = messages.filter(m => m.provider === p.provider && m.model === p.model && m.sender_role === p.role).length;
+    pill.innerHTML = `<span class="roster-role">#${i + 1} ${roleLabel} · ${sentCount} msg${sentCount === 1 ? "" : "s"}</span><b>${provName} · ${p.model}</b>`;
     rosterEl.appendChild(pill);
   });
 
+  // Final Result Card + Copy + Download + Live HTML Preview
   const finalCard = $("orch-final-card");
   if (status === "completed" && d.execution_result) {
     finalCard.classList.remove("hidden");
     $("orch-final-body").textContent = d.execution_result;
-    $("orch-copy-result-btn").onclick = () => {
-      navigator.clipboard.writeText(d.execution_result).then(() => toast("✓ Final result copied to clipboard"));
-    };
+
+    const art = extractDeliverableArtifact(d.execution_result, d.id);
+    const dlBtn = $("orch-download-result-btn");
+    if (dlBtn) {
+      dlBtn.textContent = `⬇ Download .${art.ext}`;
+      dlBtn.onclick = () => downloadArtifactFile(d.execution_result, d.id);
+    }
+
+    const copyBtn = $("orch-copy-result-btn");
+    if (copyBtn) {
+      copyBtn.onclick = async () => {
+        const ok = await copyTextToClipboard(art.content || d.execution_result);
+        toast(ok ? "✓ Copied to clipboard!" : "Could not copy automatically");
+      };
+    }
+
+    const prevBtn = $("orch-preview-toggle-btn");
+    const prevWrap = $("orch-preview-wrap");
+    const prevFrame = $("orch-preview-frame");
+    if (prevBtn && prevWrap && prevFrame) {
+      prevBtn.classList.toggle("hidden", !art.isHtml);
+      prevBtn.onclick = () => {
+        const isHidden = prevWrap.classList.contains("hidden");
+        if (isHidden) {
+          prevFrame.srcdoc = art.content;
+          prevWrap.classList.remove("hidden");
+          prevBtn.textContent = "👁 Hide HTML Preview";
+        } else {
+          prevWrap.classList.add("hidden");
+          prevBtn.textContent = "👁 Live HTML Preview";
+        }
+      };
+      if ($("orch-preview-close-btn")) {
+        $("orch-preview-close-btn").onclick = () => {
+          prevWrap.classList.add("hidden");
+          prevBtn.textContent = "👁 Live HTML Preview";
+        };
+      }
+    }
   } else {
     finalCard.classList.add("hidden");
   }
 
-  const messages = d.messages || [];
+  // Render Collaboration Messages Transcript
   $("orch-msg-count").textContent = String(messages.length);
   const msgContainer = $("orch-messages-view");
   msgContainer.innerHTML = "";
@@ -1449,7 +1628,7 @@ function renderOrchJobDetails(d) {
       : "No model responses were recorded for this task.";
     msgContainer.appendChild(emptyMsg);
   } else {
-    messages.forEach(m => {
+    messages.forEach((m, idx) => {
       const card = document.createElement("article");
       card.className = `orch-msg-card role-${m.sender_role}`;
 
@@ -1460,12 +1639,28 @@ function renderOrchJobDetails(d) {
       left.className = "orch-msg-sender";
       const roleTitle = m.sender_role === "coordinator" ? "COORDINATOR / ARCHITECT" : "WORKER / DEVELOPER";
       const provShort = providerCatalog[m.provider]?.short || (m.provider || "").toUpperCase();
-      left.innerHTML = `<span class="orch-role-tag ${m.sender_role}">${roleTitle}</span> <b>${provShort} · ${m.model}</b>`;
+      left.innerHTML = `<span class="orch-role-tag ${m.sender_role}">#${idx + 1} · ${roleTitle}</span> <b>${provShort} · ${m.model}</b>`;
 
       const right = document.createElement("div");
       right.className = "orch-msg-meta";
       right.innerHTML = `<span>Round ${m.round}</span> · <span class="action-tag action-${m.action}">Action: ${(m.action || "continue").toUpperCase()}</span> · <span>${m.latency_ms || 0} ms</span>`;
 
+      const copyTurnBtn = document.createElement("button");
+      copyTurnBtn.type = "button";
+      copyTurnBtn.className = "mini-turn-btn";
+      copyTurnBtn.textContent = "📋 Copy";
+      copyTurnBtn.onclick = async () => {
+        const ok = await copyTextToClipboard(m.content);
+        toast(ok ? `✓ Turn #${idx + 1} copied` : "Copy failed");
+      };
+
+      const dlTurnBtn = document.createElement("button");
+      dlTurnBtn.type = "button";
+      dlTurnBtn.className = "mini-turn-btn";
+      dlTurnBtn.textContent = "⬇ Save";
+      dlTurnBtn.onclick = () => downloadArtifactFile(m.content, `${d.id}-turn-${idx + 1}`);
+
+      right.append(copyTurnBtn, dlTurnBtn);
       head.append(left, right);
 
       const body = document.createElement("div");
@@ -1490,7 +1685,7 @@ function renderOrchJobDetails(d) {
     });
   }
 
-  const events = d.events || [];
+  // Render Persisted Event Timeline
   $("orch-evt-count").textContent = String(events.length);
   const evtContainer = $("orch-events-view");
   evtContainer.innerHTML = "";
