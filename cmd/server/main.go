@@ -34,6 +34,7 @@ type App struct {
 	sessions    map[string]time.Time
 	router      *provider.Router
 	orchStorage *orchestration.Storage
+	orchEngine  *orchestration.CollaborationEngine
 	orchPool    *orchestration.WorkerPool
 }
 
@@ -311,7 +312,7 @@ func (a *App) status(w http.ResponseWriter, r *http.Request) {
 	cCfg := a.providerKey("codecraft") != ""
 	jsonOut(w, 200, map[string]any{
 		"status":                "online",
-		"version":               "0.4.0",
+		"version":               "0.4.1",
 		"gemini_configured":     gCfg,
 		"openrouter_configured": oCfg,
 		"codecraft_configured":  cCfg,
@@ -1019,14 +1020,30 @@ func (a *App) orchCreateJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Task      string         `json:"task"`
-		MaxRounds int            `json:"max_rounds"`
-		MaxCalls  int            `json:"max_calls"`
-		Metadata  map[string]any `json:"metadata"`
+		Task         string                      `json:"task"`
+		MaxRounds    int                         `json:"max_rounds"`
+		MaxCalls     int                         `json:"max_calls"`
+		Participants []orchestration.Participant `json:"participants"`
+		Metadata     map[string]any              `json:"metadata"`
 	}
 	if json.NewDecoder(http.MaxBytesReader(w, r.Body, 64*1024)).Decode(&req) != nil || strings.TrimSpace(req.Task) == "" {
 		jsonOut(w, 400, map[string]string{"error": "Valid task description is required"})
 		return
+	}
+
+	if req.Metadata == nil {
+		req.Metadata = map[string]any{}
+	}
+	if len(req.Participants) > 0 {
+		for i := range req.Participants {
+			req.Participants[i].Provider = provider.NormalizeProvider(req.Participants[i].Provider)
+			req.Participants[i].Model = strings.TrimSpace(req.Participants[i].Model)
+			if req.Participants[i].Model == "" {
+				jsonOut(w, 400, map[string]string{"error": "Participant model ID cannot be empty"})
+				return
+			}
+		}
+		req.Metadata["participants"] = req.Participants
 	}
 
 	metaBytes, _ := json.Marshal(req.Metadata)
@@ -1034,6 +1051,10 @@ func (a *App) orchCreateJob(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		jsonOut(w, 500, map[string]string{"error": "Failed creating job: " + err.Error()})
 		return
+	}
+
+	if len(req.Participants) > 0 {
+		_ = a.orchStorage.SaveParticipants(r.Context(), job.ID, req.Participants)
 	}
 
 	jsonOut(w, 201, job)
@@ -1069,6 +1090,7 @@ func (a *App) orchListJobs(w http.ResponseWriter, r *http.Request) {
 func (a *App) orchGetJob(w http.ResponseWriter, r *http.Request) {
 	jobID := strings.TrimPrefix(r.URL.Path, "/api/orchestration/jobs/")
 	jobID = strings.TrimSuffix(jobID, "/events")
+	jobID = strings.TrimSuffix(jobID, "/messages")
 	jobID = strings.TrimSuffix(jobID, "/cancel")
 
 	if jobID == "" {
@@ -1087,6 +1109,20 @@ func (a *App) orchGetJob(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		jsonOut(w, 200, events)
+		return
+	}
+
+	if strings.HasSuffix(r.URL.Path, "/messages") {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", 405)
+			return
+		}
+		msgs, err := a.orchStorage.GetCollaborationMessages(r.Context(), jobID)
+		if err != nil {
+			jsonOut(w, 500, map[string]string{"error": "Failed retrieving collaboration messages: " + err.Error()})
+			return
+		}
+		jsonOut(w, 200, msgs)
 		return
 	}
 
@@ -1147,16 +1183,27 @@ func main() {
 	defer db.Close()
 	db.SetMaxOpenConns(1)
 
+	router := provider.NewRouter()
 	orchStorage := orchestration.NewStorage(db)
-	orchPool := orchestration.NewWorkerPool(orchStorage, nil, envInt("ORCHESTRATION_WORKERS", 2))
 
 	app := &App{
 		db:          db,
 		sessions:    map[string]time.Time{},
-		router:      provider.NewRouter(),
+		router:      router,
 		orchStorage: orchStorage,
-		orchPool:    orchPool,
 	}
+
+	collabEngine := orchestration.NewCollaborationEngine(
+		orchStorage,
+		router,
+		app.providerKey,
+		func() (string, string) { return app.activeProvider(), app.activeModel() },
+		orchestration.DefaultCollaborationConfig(),
+	)
+	orchPool := orchestration.NewWorkerPool(orchStorage, collabEngine, envInt("ORCHESTRATION_WORKERS", 2))
+	app.orchEngine = collabEngine
+	app.orchPool = orchPool
+
 	if e = app.initDB(); e != nil {
 		log.Fatal(e)
 	}
@@ -1234,7 +1281,7 @@ func main() {
 		_ = server.Shutdown(shutdownCtx)
 	}()
 
-	log.Printf("Sahand-CorText v0.4.0 listening on %s", server.Addr)
+	log.Printf("Sahand-CorText v0.4.1 listening on %s", server.Addr)
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}
