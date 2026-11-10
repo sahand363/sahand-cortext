@@ -100,13 +100,13 @@ func TestLeaseExpirationAndRecovery(t *testing.T) {
 	ctx := context.Background()
 	job, _ := s.CreateJob(ctx, "Expiring Task", 5, 12, "{}")
 
-	// Worker 1 claims with expired 1 millisecond lease
-	claimed, _, err := s.ClaimNextJob(ctx, "worker-crashed", 1*time.Millisecond)
+	// Worker 1 claims with expired 10 millisecond lease
+	claimed, _, err := s.ClaimNextJob(ctx, "worker-crashed", 10*time.Millisecond)
 	if err != nil || claimed == nil {
 		t.Fatalf("claim failed: %v", err)
 	}
 
-	time.Sleep(10 * time.Millisecond) // Ensure lease expired
+	time.Sleep(25 * time.Millisecond) // Ensure lease expired
 
 	// Worker 2 attempts claim; must recover the abandoned job
 	recovered, isRec, err := s.ClaimNextJob(ctx, "worker-alive", 60*time.Second)
