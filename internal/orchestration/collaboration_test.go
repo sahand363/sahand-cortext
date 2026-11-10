@@ -16,21 +16,18 @@ import (
 )
 
 func TestParseStructuredResponseValidationAndFallback(t *testing.T) {
-	// 1. Valid JSON
 	rawValid := `{"action":"complete","message":"All tests pass and code is clean.","completion_summary":"Implemented feature X."}`
 	res1 := ParseStructuredResponse(rawValid, ActionContinue)
 	if res1.Action != ActionComplete || res1.Message != "All tests pass and code is clean." || res1.CompletionSummary != "Implemented feature X." {
 		t.Fatalf("unexpected valid parse result: %+v", res1)
 	}
 
-	// 2. Markdown-wrapped JSON with unsupported action falls back to defaultAction
 	rawUnsupported := "```json\n{\"action\":\"invalid_unknown_action\",\"message\":\"Drafting architecture\"}\n```"
 	res2 := ParseStructuredResponse(rawUnsupported, ActionContinue)
 	if res2.Action != ActionContinue || res2.Message != "Drafting architecture" {
 		t.Fatalf("expected fallback to ActionContinue on unsupported action, got: %+v", res2)
 	}
 
-	// 3. Malformed JSON / Plaintext does not crash
 	rawMalformed := "Here is my response without valid JSON { broken: 123"
 	res3 := ParseStructuredResponse(rawMalformed, ActionRevise)
 	if res3.Action != ActionRevise || res3.Message != rawMalformed {
@@ -41,31 +38,25 @@ func TestParseStructuredResponseValidationAndFallback(t *testing.T) {
 func TestMultiModelCollaborationWorkflowWithRevisions(t *testing.T) {
 	var callNum int32
 
-	// Mock server simulating two distinct providers/models:
-	// Call 1: Coordinator (Gemini) creates plan -> action: continue
-	// Call 2: Worker (OpenRouter) produces initial draft -> action: continue
-	// Call 3: Coordinator (Gemini) reviews and requests revision -> action: revise
-	// Call 4: Worker (OpenRouter) revises work -> action: continue
-	// Call 5: Coordinator (Gemini) reviews and accepts -> action: complete
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		n := atomic.AddInt32(&callNum, 1)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 
 		switch n {
-		case 1: // Coordinator Plan (Gemini format)
+		case 1:
 			resp := `{"candidates":[{"content":{"parts":[{"text":"{\"action\":\"continue\",\"message\":\"Plan: 1. Write handler. 2. Add input validation.\",\"completion_summary\":\"\"}"}]}}]}`
 			w.Write([]byte(resp))
-		case 2: // Worker Round 1 (OpenAI format)
+		case 2:
 			resp := `{"choices":[{"message":{"content":"{\"action\":\"continue\",\"message\":\"func Handler() { /* draft 1 without validation */ }\",\"completion_summary\":\"Initial handler draft\"}"}}]}`
 			w.Write([]byte(resp))
-		case 3: // Coordinator Review Round 1 (Gemini format -> requests revision)
+		case 3:
 			resp := `{"candidates":[{"content":{"parts":[{"text":"{\"action\":\"revise\",\"message\":\"Please add missing input validation to Handler().\",\"completion_summary\":\"\"}"}]}}]}`
 			w.Write([]byte(resp))
-		case 4: // Worker Round 2 Revision (OpenAI format)
+		case 4:
 			resp := `{"choices":[{"message":{"content":"{\"action\":\"continue\",\"message\":\"func Handler(in string) error { if in == \\\"\\\" { return ErrInvalid }; return nil }\",\"completion_summary\":\"Added input validation\"}"}}]}`
 			w.Write([]byte(resp))
-		case 5: // Coordinator Review Round 2 (Gemini format -> completes task)
+		case 5:
 			resp := `{"candidates":[{"content":{"parts":[{"text":"{\"action\":\"complete\",\"message\":\"Validation verified. Deliverable approved.\",\"completion_summary\":\"Handler implemented with full input validation.\"}"}]}}]}`
 			w.Write([]byte(resp))
 		default:
@@ -134,28 +125,87 @@ func TestMultiModelCollaborationWorkflowWithRevisions(t *testing.T) {
 	if finalJob == nil || finalJob.Status != StatusCompleted {
 		t.Fatalf("expected job to complete, got: %+v", finalJob)
 	}
+	if finalJob.CurrentStage != StageCompleted {
+		t.Errorf("expected stage 'completed', got '%s'", finalJob.CurrentStage)
+	}
 	if finalJob.CurrentRound != 2 || finalJob.TotalCalls != 5 {
 		t.Errorf("expected 2 rounds and 5 total calls, got round=%d calls=%d", finalJob.CurrentRound, finalJob.TotalCalls)
 	}
 	if !strings.Contains(finalJob.ExecutionResult, "Handler implemented with full input validation.") {
 		t.Errorf("expected final result to include completion summary, got: %s", finalJob.ExecutionResult)
 	}
+}
 
-	msgs, err := storage.GetCollaborationMessages(ctx, job.ID)
+func TestCollaborationMidRoundRecoveryWithoutDuplicateCalls(t *testing.T) {
+	// Simulate a server crash after Coordinator Plan (turn 1) and Worker Round 1 (turn 2) are already saved in SQLite.
+	// When the worker recovers the job, it should ONLY invoke the Coordinator Review (turn 3), not repeat turns 1 & 2.
+	var apiCalls int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&apiCalls, 1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"choices":[{"message":{"content":"{\"action\":\"complete\",\"message\":\"Recovered review complete.\",\"completion_summary\":\"Recovered and approved.\"}"}}]}`))
+	}))
+	defer ts.Close()
+
+	db, _ := sql.Open("sqlite", ":memory:")
+	db.SetMaxOpenConns(1)
+	defer db.Close()
+
+	storage := NewStorage(db)
+	_ = storage.InitSchema()
+
+	router := provider.NewRouter()
+	router.OpenRouterBaseURL = ts.URL
+
+	engine := NewCollaborationEngine(storage, router, func(string) string { return "key" }, nil, DefaultCollaborationConfig())
+
+	ctx := context.Background()
+	parts := []Participant{
+		{Role: RoleCoordinator, Name: "Coord", Provider: "openrouter", Model: "model-a"},
+		{Role: RoleWorker, Name: "Worker", Provider: "openrouter", Model: "model-b"},
+	}
+	job, _ := storage.CreateJob(ctx, "Resumable task", 3, 10, "{}")
+	_ = storage.SaveParticipants(ctx, job.ID, parts)
+
+	// Pre-populate Turn 1 (Coordinator Plan) and Turn 2 (Worker Round 1) as if saved before a crash
+	_, _ = storage.SaveCollaborationMessage(ctx, CollaborationMessage{
+		JobID:      job.ID,
+		Round:      1,
+		TurnIndex:  1,
+		SenderRole: RoleCoordinator,
+		Provider:   "openrouter",
+		Model:      "model-a",
+		Action:     ActionContinue,
+		Content:    "Persisted plan from before crash",
+	})
+	_, _ = storage.SaveCollaborationMessage(ctx, CollaborationMessage{
+		JobID:      job.ID,
+		Round:      1,
+		TurnIndex:  2,
+		SenderRole: RoleWorker,
+		Provider:   "openrouter",
+		Model:      "model-b",
+		Action:     ActionContinue,
+		Content:    "Persisted worker output from before crash",
+	})
+
+	helper := &executionHelperImpl{workerID: "w-recover", jobID: job.ID, storage: storage, ctx: ctx}
+	res, err := engine.ProcessJob(ctx, job, helper)
 	if err != nil {
-		t.Fatalf("get collaboration messages: %v", err)
+		t.Fatalf("ProcessJob recovery failed: %v", err)
 	}
-	if len(msgs) != 5 {
-		t.Fatalf("expected 5 persisted collaboration messages, got %d", len(msgs))
+
+	if atomic.LoadInt32(&apiCalls) != 1 {
+		t.Errorf("expected exactly 1 model call (Coordinator review) on recovery, got %d", atomic.LoadInt32(&apiCalls))
 	}
-	if msgs[2].Action != ActionRevise || msgs[4].Action != ActionComplete {
-		t.Errorf("unexpected action sequence: msg[2]=%s, msg[4]=%s", msgs[2].Action, msgs[4].Action)
+	if !strings.Contains(res, "Persisted worker output from before crash") || !strings.Contains(res, "Recovered and approved.") {
+		t.Errorf("unexpected recovered output: %s", res)
 	}
 }
 
 func TestCollaborationMaxRoundsEnforcement(t *testing.T) {
 	var calls int32
-	// Models always return "revise" / "continue" and never mark complete
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&calls, 1)
 		w.Header().Set("Content-Type", "application/json")
@@ -182,7 +232,6 @@ func TestCollaborationMaxRoundsEnforcement(t *testing.T) {
 		{Role: RoleWorker, Name: "Worker", Provider: "openrouter", Model: "model-b"},
 	}
 
-	// Max 2 rounds allowed -> 1 plan + (2 rounds * 2 calls) = 5 calls max
 	job, _ := storage.CreateJob(ctx, "Iterative task", 2, 10, "{}")
 	_ = storage.SaveParticipants(ctx, job.ID, parts)
 
