@@ -34,6 +34,44 @@ func DefaultCollaborationConfig() CollaborationConfig {
 	}
 }
 
+// IsRetryableProviderError classifies whether an error should trigger a background job retry
+// (e.g., HTTP 429, 5xx, timeouts, network drops) vs fail permanently (e.g., HTTP 401/403/404, missing API key).
+func IsRetryableProviderError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, ErrJobCancelled) {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "missing api key") ||
+		strings.Contains(msg, "http 400") ||
+		strings.Contains(msg, "http 401") ||
+		strings.Contains(msg, "http 403") ||
+		strings.Contains(msg, "http 404") ||
+		strings.Contains(msg, "invalid api key") ||
+		strings.Contains(msg, "maximum model calls") {
+		return false
+	}
+	if strings.Contains(msg, "http 429") ||
+		strings.Contains(msg, "http 500") ||
+		strings.Contains(msg, "http 502") ||
+		strings.Contains(msg, "http 503") ||
+		strings.Contains(msg, "http 504") ||
+		strings.Contains(msg, "timeout") ||
+		strings.Contains(msg, "deadline exceeded") ||
+		strings.Contains(msg, "connection reset") ||
+		strings.Contains(msg, "temporary") ||
+		strings.Contains(msg, "eof") ||
+		strings.Contains(msg, "network error") {
+		return true
+	}
+	return false
+}
+
 // CollaborationEngine implements JobProcessor to run multi-model collaboration
 type CollaborationEngine struct {
 	storage         *Storage
@@ -71,8 +109,20 @@ func NewCollaborationEngine(
 	}
 }
 
-// ProcessJob implements the JobProcessor interface for WorkerPool
+func (e *CollaborationEngine) checkCancelled(ctx context.Context, jobID string, helper ExecutionHelper) bool {
+	if ctx.Err() != nil || helper.IsCancelled() {
+		return true
+	}
+	return e.storage.IsJobCancelled(context.Background(), jobID)
+}
+
+// ProcessJob implements the JobProcessor interface for WorkerPool.
+// It supports full turn-level state reconstruction so interrupted or retried jobs resume
+// from the exact round and step where they left off without repeating completed API calls.
 func (e *CollaborationEngine) ProcessJob(ctx context.Context, job *Job, helper ExecutionHelper) (string, error) {
+	if e.checkCancelled(ctx, job.ID, helper) {
+		return "", ErrJobCancelled
+	}
 	if e.router == nil {
 		return fmt.Sprintf("Orchestration infrastructure processed task: %s", job.Task), nil
 	}
@@ -134,35 +184,63 @@ func (e *CollaborationEngine) ProcessJob(ctx context.Context, job *Job, helper E
 		callTimeout = time.Duration(metaCfg.TimeoutSeconds) * time.Second
 	}
 
-	// Load any existing collaboration messages if this job was recovered after a restart
-	history, _ := e.storage.GetCollaborationMessages(ctx, job.ID)
+	// Reconstruct durable state from any previously saved messages in SQLite
+	history, err := e.storage.GetCollaborationMessages(ctx, job.ID)
+	if err != nil {
+		return "", fmt.Errorf("failed loading collaboration history: %w", err)
+	}
 	totalCalls := len(history)
 	turnIndex := totalCalls
 
 	var currentPlan string
 	var latestWorkerResult string
-	for _, m := range history {
-		if m.SenderRole == RoleCoordinator && m.Round == 1 && currentPlan == "" {
+
+	// Inspect history to determine what has already been completed
+	for i, m := range history {
+		if i == 0 && m.SenderRole == RoleCoordinator {
 			currentPlan = m.Content
+			if m.Action == ActionComplete {
+				finalOut := m.CompletionSummary
+				if strings.TrimSpace(finalOut) == "" {
+					finalOut = m.Content
+				}
+				return finalOut, nil
+			}
 		}
 		if m.SenderRole == RoleWorker {
 			latestWorkerResult = m.Content
+		}
+		if i > 0 && m.SenderRole == RoleCoordinator && m.Action == ActionComplete {
+			finalResult := latestWorkerResult
+			if strings.TrimSpace(m.CompletionSummary) != "" {
+				finalResult = fmt.Sprintf("%s\n\n---\n### Coordinator Completion Summary\n%s", latestWorkerResult, strings.TrimSpace(m.CompletionSummary))
+			}
+			return finalResult, nil
 		}
 	}
 
 	// Step 1: Coordinator creates the implementation plan (if not already present from recovery)
 	if currentPlan == "" {
-		if helper.IsCancelled() || ctx.Err() != nil {
+		if e.checkCancelled(ctx, job.ID, helper) {
 			return "", ErrJobCancelled
 		}
 		if totalCalls >= maxCalls {
 			return "", errors.New("maximum model calls reached before planning")
 		}
 
+		_ = e.storage.UpdateJobStage(ctx, job.ID, StagePlanning, 1, totalCalls)
+		_ = e.storage.RecordEvent(ctx, job.ID, EventCoordinatorStarted, string(StagePlanning), helper.WorkerID(),
+			fmt.Sprintf("Coordinator (%s/%s) started analyzing task and building plan", coordinator.Provider, coordinator.Model),
+			marshalPayload(map[string]any{"round": 1, "role": RoleCoordinator, "provider": coordinator.Provider, "model": coordinator.Model}))
+
 		planPrompt := BuildCoordinatorPlanContext(job.Task, coordinator, maxChars)
-		parsed, raw, latency, err := e.invokeParticipant(ctx, job.ID, 1, "planning", coordinator, planPrompt, callTimeout, helper)
+		parsed, raw, latency, err := e.invokeParticipant(ctx, job.ID, 1, string(StagePlanning), coordinator, planPrompt, callTimeout, helper)
 		if err != nil {
 			return "", fmt.Errorf("coordinator planning failed: %w", err)
+		}
+
+		if e.checkCancelled(ctx, job.ID, helper) {
+			return "", ErrJobCancelled
 		}
 
 		turnIndex++
@@ -183,10 +261,14 @@ func (e *CollaborationEngine) ProcessJob(ctx context.Context, job *Job, helper E
 			RawResponse:       raw,
 			LatencyMs:         latency,
 		})
-		if err == nil && savedMsg != nil {
-			history = append(history, *savedMsg)
+		if err != nil {
+			return "", err
 		}
-		_ = e.storage.UpdateJobProgress(ctx, job.ID, 1, totalCalls)
+		history = append(history, *savedMsg)
+
+		_ = e.storage.RecordEvent(ctx, job.ID, EventPlanGenerated, string(StagePlanning), helper.WorkerID(),
+			fmt.Sprintf("Coordinator generated implementation plan (%d ms)", latency),
+			marshalPayload(map[string]any{"round": 1, "action": parsed.Action, "latency_ms": latency}))
 
 		// If the Coordinator immediately marked the task complete during planning
 		if parsed.Action == ActionComplete {
@@ -194,61 +276,99 @@ func (e *CollaborationEngine) ProcessJob(ctx context.Context, job *Job, helper E
 			if strings.TrimSpace(finalOut) == "" {
 				finalOut = parsed.Message
 			}
+			_ = e.storage.UpdateJobStage(ctx, job.ID, StageCompleted, 1, totalCalls)
+			_ = e.storage.RecordEvent(ctx, job.ID, EventTaskCompleted, string(StageCompleted), helper.WorkerID(),
+				"Task completed during initial coordinator planning",
+				marshalPayload(map[string]any{"round": 1, "total_calls": totalCalls}))
 			return finalOut, nil
 		}
 	}
 
 	// Step 2: Multi-round collaboration loop (Worker executes -> Coordinator reviews)
-	startRound := 1
-	if len(history) > 1 {
-		lastRound := history[len(history)-1].Round
-		if lastRound > 1 {
-			startRound = lastRound
-		}
-	}
-
-	for round := startRound; round <= maxRounds; round++ {
-		if helper.IsCancelled() || ctx.Err() != nil {
+	for round := 1; round <= maxRounds; round++ {
+		if e.checkCancelled(ctx, job.ID, helper) {
 			return "", ErrJobCancelled
+		}
+
+		// Check if Worker and/or Coordinator Review already ran for this round prior to a restart
+		hasWorkerForRound := false
+		hasReviewForRound := false
+		for idx, m := range history {
+			if idx == 0 {
+				continue // skip initial plan
+			}
+			if m.Round == round && m.SenderRole == RoleWorker {
+				hasWorkerForRound = true
+				latestWorkerResult = m.Content
+			}
+			if m.Round == round && m.SenderRole == RoleCoordinator {
+				hasReviewForRound = true
+			}
+		}
+
+		// If both Worker and Coordinator Review were already persisted for this round, advance to next round
+		if hasWorkerForRound && hasReviewForRound {
+			continue
 		}
 
 		activeWorker := workers[(round-1)%len(workers)]
 
-		// Phase A: Worker performs work or revises based on Coordinator review
-		if totalCalls >= maxCalls {
-			return e.finalizeAtLimit(ctx, job.ID, round, totalCalls, "maximum model calls limit reached", latestWorkerResult, currentPlan, helper), nil
-		}
+		// Phase A: Worker performs work or revises based on Coordinator review (unless already persisted)
+		if !hasWorkerForRound {
+			if totalCalls >= maxCalls {
+				return e.finalizeAtLimit(ctx, job.ID, round, totalCalls, "maximum model calls limit reached", latestWorkerResult, currentPlan, helper), nil
+			}
 
-		workerCtx := BuildWorkerExecutionContext(job.Task, currentPlan, history, activeWorker, round, maxChars)
-		workerParsed, workerRaw, workerLat, err := e.invokeParticipant(ctx, job.ID, round, "working", activeWorker, workerCtx, callTimeout, helper)
-		if err != nil {
-			return "", fmt.Errorf("worker execution failed in round %d: %w", round, err)
-		}
+			_ = e.storage.UpdateJobStage(ctx, job.ID, StageWorking, round, totalCalls)
+			_ = e.storage.RecordEvent(ctx, job.ID, EventWorkerStarted, string(StageWorking), helper.WorkerID(),
+				fmt.Sprintf("Worker (%s/%s) started round %d execution", activeWorker.Provider, activeWorker.Model, round),
+				marshalPayload(map[string]any{"round": round, "role": RoleWorker, "provider": activeWorker.Provider, "model": activeWorker.Model}))
 
-		turnIndex++
-		totalCalls++
-		latestWorkerResult = workerParsed.Message
+			workerCtx := BuildWorkerExecutionContext(job.Task, currentPlan, history, activeWorker, round, maxChars)
+			workerParsed, workerRaw, workerLat, err := e.invokeParticipant(ctx, job.ID, round, string(StageWorking), activeWorker, workerCtx, callTimeout, helper)
+			if err != nil {
+				return "", fmt.Errorf("worker execution failed in round %d: %w", round, err)
+			}
 
-		savedWork, err := e.storage.SaveCollaborationMessage(ctx, CollaborationMessage{
-			JobID:             job.ID,
-			Round:             round,
-			TurnIndex:         turnIndex,
-			SenderRole:        RoleWorker,
-			SenderName:        activeWorker.Name,
-			Provider:          activeWorker.Provider,
-			Model:             activeWorker.Model,
-			Action:            workerParsed.Action,
-			Content:           workerParsed.Message,
-			CompletionSummary: workerParsed.CompletionSummary,
-			RawResponse:       workerRaw,
-			LatencyMs:         workerLat,
-		})
-		if err == nil && savedWork != nil {
+			if e.checkCancelled(ctx, job.ID, helper) {
+				return "", ErrJobCancelled
+			}
+
+			turnIndex++
+			totalCalls++
+			latestWorkerResult = workerParsed.Message
+
+			savedWork, err := e.storage.SaveCollaborationMessage(ctx, CollaborationMessage{
+				JobID:             job.ID,
+				Round:             round,
+				TurnIndex:         turnIndex,
+				SenderRole:        RoleWorker,
+				SenderName:        activeWorker.Name,
+				Provider:          activeWorker.Provider,
+				Model:             activeWorker.Model,
+				Action:            workerParsed.Action,
+				Content:           workerParsed.Message,
+				CompletionSummary: workerParsed.CompletionSummary,
+				RawResponse:       workerRaw,
+				LatencyMs:         workerLat,
+			})
+			if err != nil {
+				return "", err
+			}
 			history = append(history, *savedWork)
-		}
-		_ = e.storage.UpdateJobProgress(ctx, job.ID, round, totalCalls)
 
-		if helper.IsCancelled() || ctx.Err() != nil {
+			_ = e.storage.RecordEvent(ctx, job.ID, EventWorkerResponded, string(StageWorking), helper.WorkerID(),
+				fmt.Sprintf("Worker completed round %d deliverable (%d ms)", round, workerLat),
+				marshalPayload(map[string]any{"round": round, "latency_ms": workerLat, "action": workerParsed.Action}))
+
+			if round > 1 {
+				_ = e.storage.RecordEvent(ctx, job.ID, EventRevisionCompleted, string(StageWorking), helper.WorkerID(),
+					fmt.Sprintf("Worker completed requested revision for round %d", round),
+					marshalPayload(map[string]any{"round": round, "latency_ms": workerLat}))
+			}
+		}
+
+		if e.checkCancelled(ctx, job.ID, helper) {
 			return "", ErrJobCancelled
 		}
 
@@ -258,10 +378,19 @@ func (e *CollaborationEngine) ProcessJob(ctx context.Context, job *Job, helper E
 		}
 
 		// Phase B: Coordinator reviews the Worker's output
+		_ = e.storage.UpdateJobStage(ctx, job.ID, StageReviewing, round, totalCalls)
+		_ = e.storage.RecordEvent(ctx, job.ID, EventReviewStarted, string(StageReviewing), helper.WorkerID(),
+			fmt.Sprintf("Coordinator (%s/%s) started reviewing round %d output", coordinator.Provider, coordinator.Model, round),
+			marshalPayload(map[string]any{"round": round, "role": RoleCoordinator, "provider": coordinator.Provider, "model": coordinator.Model}))
+
 		reviewCtx := BuildCoordinatorReviewContext(job.Task, currentPlan, latestWorkerResult, history, coordinator, round, maxRounds, maxChars)
-		reviewParsed, reviewRaw, reviewLat, err := e.invokeParticipant(ctx, job.ID, round, "reviewing", coordinator, reviewCtx, callTimeout, helper)
+		reviewParsed, reviewRaw, reviewLat, err := e.invokeParticipant(ctx, job.ID, round, string(StageReviewing), coordinator, reviewCtx, callTimeout, helper)
 		if err != nil {
 			return "", fmt.Errorf("coordinator review failed in round %d: %w", round, err)
+		}
+
+		if e.checkCancelled(ctx, job.ID, helper) {
+			return "", ErrJobCancelled
 		}
 
 		turnIndex++
@@ -281,18 +410,19 @@ func (e *CollaborationEngine) ProcessJob(ctx context.Context, job *Job, helper E
 			RawResponse:       reviewRaw,
 			LatencyMs:         reviewLat,
 		})
-		if err == nil && savedReview != nil {
-			history = append(history, *savedReview)
+		if err != nil {
+			return "", err
 		}
-		_ = e.storage.UpdateJobProgress(ctx, job.ID, round, totalCalls)
+		history = append(history, *savedReview)
 
-		decisionPayload, _ := json.Marshal(map[string]any{
+		decisionPayload := marshalPayload(map[string]any{
 			"round":              round,
 			"action":             reviewParsed.Action,
 			"completion_summary": reviewParsed.CompletionSummary,
+			"latency_ms":         reviewLat,
 		})
-		_ = e.storage.RecordEvent(ctx, job.ID, EventReviewDecision, "reviewing", helper.WorkerID(),
-			fmt.Sprintf("Coordinator decision in round %d: %s", round, reviewParsed.Action), string(decisionPayload))
+		_ = e.storage.RecordEvent(ctx, job.ID, EventReviewDecision, string(StageReviewing), helper.WorkerID(),
+			fmt.Sprintf("Coordinator decision in round %d: %s", round, reviewParsed.Action), decisionPayload)
 
 		// Complete if Coordinator accepted the result
 		if reviewParsed.Action == ActionComplete {
@@ -300,10 +430,16 @@ func (e *CollaborationEngine) ProcessJob(ctx context.Context, job *Job, helper E
 			if strings.TrimSpace(reviewParsed.CompletionSummary) != "" {
 				finalResult = fmt.Sprintf("%s\n\n---\n### Coordinator Completion Summary\n%s", latestWorkerResult, strings.TrimSpace(reviewParsed.CompletionSummary))
 			}
+			_ = e.storage.UpdateJobStage(ctx, job.ID, StageCompleted, round, totalCalls)
+			_ = e.storage.RecordEvent(ctx, job.ID, EventTaskCompleted, string(StageCompleted), helper.WorkerID(),
+				fmt.Sprintf("Coordinator approved deliverable in round %d", round),
+				marshalPayload(map[string]any{"round": round, "total_calls": totalCalls}))
 			return finalResult, nil
 		}
 
-		// If Coordinator requested revisions or additional work, loop continues to next round
+		// Revision or continuation requested
+		_ = e.storage.RecordEvent(ctx, job.ID, EventRevisionRequested, string(StageReviewing), helper.WorkerID(),
+			fmt.Sprintf("Coordinator requested revision in round %d", round), decisionPayload)
 	}
 
 	// Reached maximum collaboration rounds
@@ -311,13 +447,14 @@ func (e *CollaborationEngine) ProcessJob(ctx context.Context, job *Job, helper E
 }
 
 func (e *CollaborationEngine) finalizeAtLimit(ctx context.Context, jobID string, round, totalCalls int, reason, latestWorkerResult, currentPlan string, helper ExecutionHelper) string {
-	payload, _ := json.Marshal(map[string]any{
+	payload := marshalPayload(map[string]any{
 		"reason":      reason,
 		"round":       round,
 		"total_calls": totalCalls,
 	})
-	_ = e.storage.RecordEvent(ctx, jobID, EventStepProgress, "complete", helper.WorkerID(),
-		fmt.Sprintf("Collaboration concluded (%s)", reason), string(payload))
+	_ = e.storage.UpdateJobStage(ctx, jobID, StageCompleted, round, totalCalls)
+	_ = e.storage.RecordEvent(ctx, jobID, EventTaskCompleted, string(StageCompleted), helper.WorkerID(),
+		fmt.Sprintf("Collaboration concluded (%s)", reason), payload)
 
 	if strings.TrimSpace(latestWorkerResult) != "" {
 		return latestWorkerResult
@@ -335,12 +472,16 @@ func (e *CollaborationEngine) invokeParticipant(
 	timeout time.Duration,
 	helper ExecutionHelper,
 ) (StructuredModelResponse, string, int64, error) {
+	if e.checkCancelled(ctx, jobID, helper) {
+		return StructuredModelResponse{}, "", 0, ErrJobCancelled
+	}
+
 	key := e.keyResolver(participant.Provider)
 	if strings.TrimSpace(key) == "" {
 		return StructuredModelResponse{}, "", 0, fmt.Errorf("missing API key for provider %s", participant.Provider)
 	}
 
-	invokePayload, _ := json.Marshal(map[string]any{
+	invokePayload := marshalPayload(map[string]any{
 		"round":    round,
 		"role":     participant.Role,
 		"name":     participant.Name,
@@ -348,23 +489,24 @@ func (e *CollaborationEngine) invokeParticipant(
 		"model":    participant.Model,
 	})
 	_ = e.storage.RecordEvent(ctx, jobID, EventModelInvoked, phase, helper.WorkerID(),
-		fmt.Sprintf("Invoking %s (%s/%s)", participant.Role, participant.Provider, participant.Model), string(invokePayload))
+		fmt.Sprintf("Invoking %s (%s/%s)", participant.Role, participant.Provider, participant.Model), invokePayload)
 
 	callCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
+	// External network call executes strictly outside any SQLite transaction
 	rawReply, latency, err := e.router.Call(callCtx, participant.Provider, key, participant.Model, messages, provider.CallOpts{})
 	if err != nil {
 		return StructuredModelResponse{}, "", latency, err
 	}
 
 	defaultAction := ActionContinue
-	if phase == "reviewing" {
+	if phase == string(StageReviewing) {
 		defaultAction = ActionRevise
 	}
 	parsed := ParseStructuredResponse(rawReply, defaultAction)
 
-	respPayload, _ := json.Marshal(map[string]any{
+	respPayload := marshalPayload(map[string]any{
 		"round":      round,
 		"role":       participant.Role,
 		"provider":   participant.Provider,
@@ -373,7 +515,7 @@ func (e *CollaborationEngine) invokeParticipant(
 		"latency_ms": latency,
 	})
 	_ = e.storage.RecordEvent(ctx, jobID, EventModelResponded, phase, helper.WorkerID(),
-		fmt.Sprintf("Received response from %s (%d ms, action=%s)", participant.Role, latency, parsed.Action), string(respPayload))
+		fmt.Sprintf("Received response from %s (%d ms, action=%s)", participant.Role, latency, parsed.Action), respPayload)
 
 	return parsed, rawReply, latency, nil
 }
@@ -410,6 +552,14 @@ func (e *CollaborationEngine) resolveParticipants(ctx context.Context, job *Job)
 	}
 
 	return parts, meta, nil
+}
+
+func marshalPayload(v any) string {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return "{}"
+	}
+	return string(b)
 }
 
 // BuildCoordinatorPlanContext constructs the bounded context for the Coordinator's initial plan
@@ -560,8 +710,6 @@ func truncateText(s string, maxChars int) string {
 }
 
 // ParseStructuredResponse safely parses and validates structured JSON from any model.
-// If the model returns markdown code fences, extra prose around JSON, an invalid action,
-// or plain text, it falls back gracefully without crashing.
 func ParseStructuredResponse(raw string, defaultAction CollaborationAction) StructuredModelResponse {
 	if defaultAction == "" {
 		defaultAction = ActionContinue
@@ -613,7 +761,6 @@ func ParseStructuredResponse(raw string, defaultAction CollaborationAction) Stru
 		}
 	}
 
-	// Safe fallback if model returned unstructured text
 	inferredAction := defaultAction
 	lower := strings.ToLower(trimmed)
 	if strings.Contains(lower, "decision: complete") || strings.Contains(lower, `"action": "complete"`) || strings.Contains(lower, `"action":"complete"`) {
@@ -653,7 +800,6 @@ func extractJSONCandidates(s string) []string {
 	var out []string
 	out = append(out, s)
 
-	// Check for ```json ... ``` blocks
 	if idx := strings.Index(s, "```"); idx != -1 {
 		rest := s[idx+3:]
 		if nl := strings.Index(rest, "\n"); nl != -1 {
@@ -664,7 +810,6 @@ func extractJSONCandidates(s string) []string {
 		}
 	}
 
-	// Extract outermost { ... } object
 	firstBrace := strings.Index(s, "{")
 	lastBrace := strings.LastIndex(s, "}")
 	if firstBrace != -1 && lastBrace > firstBrace {
