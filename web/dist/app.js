@@ -1758,6 +1758,7 @@ function renderOrchJobDetails(d) {
   const participants = d.participants || [];
   const coordPart = participants.find(p => p.role === "coordinator") || participants[0];
   const workerPart = participants.find(p => p.role === "worker") || participants[1] || coordPart;
+  const auditorPart = participants.find(p => p.role === "auditor") || coordPart;
 
   if (isActive) {
     activeBanner.classList.remove("hidden");
@@ -1772,10 +1773,13 @@ function renderOrchJobDetails(d) {
       $("orch-active-subline").textContent = "Analyzing task and preparing instructions for Worker.";
     } else if (stage === "working") {
       $("orch-active-headline").textContent = `Worker (${workerPart ? `${providerCatalog[workerPart.provider]?.name || workerPart.provider} · ${workerPart.model}` : "Developer"}) is executing round ${d.current_round || 1}…`;
-      $("orch-active-subline").textContent = "Producing deliverable based on Coordinator and User instructions.";
+      $("orch-active-subline").textContent = "Producing deliverable based on Coordinator, QA Auditor, and User instructions.";
+    } else if (stage === "auditing") {
+      $("orch-active-headline").textContent = `QA Auditor (${auditorPart ? `${providerCatalog[auditorPart.provider]?.name || auditorPart.provider} · ${auditorPart.model}` : "Auditor"}) is inspecting round ${d.current_round || 1}…`;
+      $("orch-active-subline").textContent = "Testing Worker deliverable for runtime bugs, missing files, and edge cases before Coordinator review.";
     } else if (stage === "reviewing") {
       $("orch-active-headline").textContent = `Coordinator (${coordPart ? `${providerCatalog[coordPart.provider]?.name || coordPart.provider} · ${coordPart.model}` : "Architect"}) is reviewing round ${d.current_round || 1}…`;
-      $("orch-active-subline").textContent = "Evaluating Worker deliverable for completeness and accuracy.";
+      $("orch-active-subline").textContent = "Evaluating Worker deliverable and QA Auditor report for final approval.";
     } else {
       $("orch-active-headline").textContent = "Collaboration in progress…";
       $("orch-active-subline").textContent = `Stage: ${stage}`;
@@ -1796,11 +1800,17 @@ function renderOrchJobDetails(d) {
   rosterEl.innerHTML = "";
   participants.forEach((p, i) => {
     const pill = document.createElement("div");
-    const isWorkingNow = isActive && ((stage === "planning" || stage === "reviewing") ? p.role === "coordinator" : (stage === "working" && p.role === "worker"));
+    const isWorkingNow = isActive && (
+      ((stage === "planning" || stage === "reviewing") && p.role === "coordinator") ||
+      (stage === "working" && p.role === "worker") ||
+      (stage === "auditing" && p.role === "auditor")
+    );
     pill.className = `orch-roster-pill${isWorkingNow ? " working-now" : ""}`;
-    const roleLabel = p.role === "coordinator" ? "Coordinator / Architect" : "Worker / Developer";
+    let roleLabel = "Worker / Developer";
+    if (p.role === "coordinator") roleLabel = "Coordinator / Architect";
+    if (p.role === "auditor") roleLabel = "Quality Assurance / Auditor";
     const provName = providerCatalog[p.provider]?.name || p.provider;
-    const modelMsgs = messages.filter(m => m.provider === p.provider && m.model === p.model).length;
+    const modelMsgs = messages.filter(m => m.provider === p.provider && m.model === p.model && m.sender_role === p.role).length;
     pill.innerHTML = `<span class="roster-role">#${i + 1} ${roleLabel} · ${modelMsgs} msg${modelMsgs === 1 ? "" : "s"}</span><b>${provName} · ${p.model}</b>`;
     rosterEl.appendChild(pill);
   });
