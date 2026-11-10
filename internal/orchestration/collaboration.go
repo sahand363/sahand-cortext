@@ -31,7 +31,7 @@ type CollaborationConfig struct {
 func DefaultCollaborationConfig() CollaborationConfig {
 	return CollaborationConfig{
 		DefaultMaxRounds: 5,
-		DefaultMaxCalls:  12,
+		DefaultMaxCalls:  15,
 		MaxContextChars:  28000,
 		CallTimeout:      90 * time.Second,
 	}
@@ -99,7 +99,7 @@ func NewCollaborationEngine(
 		cfg.DefaultMaxRounds = 5
 	}
 	if cfg.DefaultMaxCalls <= 0 {
-		cfg.DefaultMaxCalls = 12
+		cfg.DefaultMaxCalls = 15
 	}
 	if cfg.MaxContextChars <= 0 {
 		cfg.MaxContextChars = 28000
@@ -136,7 +136,8 @@ func boolOpt(ptr *bool, defaultVal bool) bool {
 }
 
 // ProcessJob implements the JobProcessor interface for WorkerPool.
-// It supports both crash recovery and interactive human-in-the-loop revisions.
+// Supports 2-Role (Coordinator + Worker) and 3-Role (Coordinator + Worker + QA/Auditor) pipelines,
+// crash recovery, and interactive human-in-the-loop revisions.
 func (e *CollaborationEngine) ProcessJob(ctx context.Context, job *Job, helper ExecutionHelper) (string, error) {
 	if e.checkCancelled(ctx, job.ID, helper) {
 		return "", ErrJobCancelled
@@ -157,10 +158,16 @@ func (e *CollaborationEngine) ProcessJob(ctx context.Context, job *Job, helper E
 
 	var coordinators []Participant
 	var workers []Participant
+	var auditors []Participant
+
 	for _, p := range participants {
-		if strings.ToLower(p.Role) == RoleCoordinator {
+		switch strings.ToLower(strings.TrimSpace(p.Role)) {
+		case RoleCoordinator:
 			coordinators = append(coordinators, p)
-		} else {
+		case RoleAuditor:
+			auditors = append(auditors, p)
+		default:
+			p.Role = RoleWorker
 			workers = append(workers, p)
 		}
 	}
@@ -178,7 +185,9 @@ func (e *CollaborationEngine) ProcessJob(ctx context.Context, job *Job, helper E
 		workers = append(workers, w)
 	}
 
-	for _, p := range append(append([]Participant{}, coordinators...), workers...) {
+	allCheck := append(append([]Participant{}, coordinators...), workers...)
+	allCheck = append(allCheck, auditors...)
+	for _, p := range allCheck {
 		if strings.TrimSpace(e.keyResolver(p.Provider)) == "" {
 			return "", fmt.Errorf("missing API key for participant %s (%s / %s)", p.Role, p.Provider, p.Model)
 		}
@@ -213,8 +222,8 @@ func (e *CollaborationEngine) ProcessJob(ctx context.Context, job *Job, helper E
 	var completedFinalResult string
 	isCurrentlyComplete := false
 
-	// Chronologically reconstruct state; if a User Revision message appears AFTER a previous completion,
-	// isCurrentlyComplete resets to false so the team executes the new user revision!
+	// Reconstruct state chronologically; if a User Revision message appears AFTER a previous completion,
+	// isCurrentlyComplete resets to false so the pipeline executes the new user revision.
 	for i, m := range history {
 		if i == 0 && m.SenderRole == RoleCoordinator {
 			currentPlan = m.Content
@@ -319,14 +328,21 @@ func (e *CollaborationEngine) ProcessJob(ctx context.Context, job *Job, helper E
 		}
 	}
 
-	// Step 2: Multi-round collaboration loop (Worker executes -> Coordinator reviews)
+	// Step 2: Multi-round collaboration loop:
+	// Phase A: Worker executes -> Phase B: QA/Auditor inspects (if configured) -> Phase C: Coordinator reviews
+	hasConfiguredAuditors := len(auditors) > 0
+
 	for round := 1; round <= maxRounds; round++ {
 		if e.checkCancelled(ctx, job.ID, helper) {
 			return "", ErrJobCancelled
 		}
 
 		hasWorkerForRound := false
+		hasAuditorForRound := false
 		hasReviewForRound := false
+		var latestAuditorReportForRound string
+		var latestAuditorActionForRound CollaborationAction
+
 		for idx, m := range history {
 			if idx == 0 {
 				continue
@@ -335,18 +351,26 @@ func (e *CollaborationEngine) ProcessJob(ctx context.Context, job *Job, helper E
 				hasWorkerForRound = true
 				latestWorkerResult = m.Content
 			}
+			if m.Round == round && m.SenderRole == RoleAuditor {
+				hasAuditorForRound = true
+				latestAuditorReportForRound = m.Content
+				if m.CompletionSummary != "" {
+					latestAuditorReportForRound = fmt.Sprintf("Summary: %s\n\nDetails:\n%s", m.CompletionSummary, m.Content)
+				}
+				latestAuditorActionForRound = m.Action
+			}
 			if m.Round == round && m.SenderRole == RoleCoordinator {
 				hasReviewForRound = true
 			}
 		}
 
-		if hasWorkerForRound && hasReviewForRound {
+		if hasWorkerForRound && (!hasConfiguredAuditors || hasAuditorForRound) && hasReviewForRound {
 			continue
 		}
 
 		primaryWorker := workers[(round-1)%len(workers)]
 
-		// Phase A: Worker performs work or revises (with automatic participant & global failover)
+		// Phase A: Worker performs work or revises
 		if !hasWorkerForRound {
 			if totalCalls >= maxCalls {
 				return e.finalizeAtLimit(ctx, job.ID, round, totalCalls, "maximum model calls limit reached", latestWorkerResult, currentPlan, helper), nil
@@ -407,11 +431,82 @@ func (e *CollaborationEngine) ProcessJob(ctx context.Context, job *Job, helper E
 			return "", ErrJobCancelled
 		}
 
-		if totalCalls >= maxCalls {
-			return e.finalizeAtLimit(ctx, job.ID, round, totalCalls, "maximum model calls limit reached after worker turn", latestWorkerResult, currentPlan, helper), nil
+		// Phase B: Quality Assurance / Auditor (Runs automatically when 3-role pipeline is configured)
+		if hasConfiguredAuditors && !hasAuditorForRound {
+			if totalCalls >= maxCalls {
+				return e.finalizeAtLimit(ctx, job.ID, round, totalCalls, "maximum model calls limit reached before QA audit", latestWorkerResult, currentPlan, helper), nil
+			}
+
+			primaryAuditor := auditors[(round-1)%len(auditors)]
+			_ = e.storage.UpdateJobStage(ctx, job.ID, StageAuditing, round, totalCalls)
+			_ = e.storage.RecordEvent(ctx, job.ID, EventAuditStarted, string(StageAuditing), helper.WorkerID(),
+				fmt.Sprintf("QA Auditor (%s/%s) started inspecting round %d deliverable", primaryAuditor.Provider, primaryAuditor.Model, round),
+				marshalPayload(map[string]any{"round": round, "role": RoleAuditor, "provider": primaryAuditor.Provider, "model": primaryAuditor.Model}))
+
+			auditorCandidates := e.buildCandidateRoster(primaryAuditor, auditors, participants, RoleAuditor, metaCfg)
+			auditParsed, auditRaw, auditLat, usedAuditor, err := e.invokeWithFailover(ctx, job.ID, round, string(StageAuditing), auditorCandidates, func(cand Participant) []provider.Message {
+				return BuildPipelineAuditorContext(job.Task, currentPlan, latestWorkerResult, history, cand, round, maxRounds, maxChars)
+			}, callTimeout, metaCfg, helper)
+			if err != nil {
+				return "", fmt.Errorf("QA auditor failed in round %d: %w", round, err)
+			}
+
+			if e.checkCancelled(ctx, job.ID, helper) {
+				return "", ErrJobCancelled
+			}
+
+			turnIndex++
+			totalCalls++
+			latestAuditorActionForRound = auditParsed.Action
+			latestAuditorReportForRound = auditParsed.Message
+			if strings.TrimSpace(auditParsed.CompletionSummary) != "" {
+				latestAuditorReportForRound = fmt.Sprintf("Summary: %s\n\nDetails:\n%s", auditParsed.CompletionSummary, auditParsed.Message)
+			}
+
+			savedAudit, err := e.storage.SaveCollaborationMessage(ctx, CollaborationMessage{
+				JobID:             job.ID,
+				Round:             round,
+				TurnIndex:         turnIndex,
+				SenderRole:        RoleAuditor,
+				SenderName:        usedAuditor.Name,
+				Provider:          usedAuditor.Provider,
+				Model:             usedAuditor.Model,
+				Action:            auditParsed.Action,
+				Content:           auditParsed.Message,
+				CompletionSummary: auditParsed.CompletionSummary,
+				RawResponse:       auditRaw,
+				LatencyMs:         auditLat,
+			})
+			if err != nil {
+				return "", err
+			}
+			history = append(history, *savedAudit)
+
+			verdict := "APPROVED"
+			if auditParsed.Action == ActionRevise {
+				verdict = "ISSUES FLAGGED"
+			}
+			_ = e.storage.RecordEvent(ctx, job.ID, EventAuditCompleted, string(StageAuditing), helper.WorkerID(),
+				fmt.Sprintf("QA Auditor (%s/%s) completed round %d inspection (%d ms, verdict=%s)", usedAuditor.Provider, usedAuditor.Model, round, auditLat, verdict),
+				marshalPayload(map[string]any{
+					"round":              round,
+					"action":             auditParsed.Action,
+					"completion_summary": auditParsed.CompletionSummary,
+					"latency_ms":         auditLat,
+					"provider":           usedAuditor.Provider,
+					"model":              usedAuditor.Model,
+				}))
 		}
 
-		// Phase B: Coordinator reviews the Worker's output (with automatic failover)
+		if e.checkCancelled(ctx, job.ID, helper) {
+			return "", ErrJobCancelled
+		}
+
+		if totalCalls >= maxCalls {
+			return e.finalizeAtLimit(ctx, job.ID, round, totalCalls, "maximum model calls limit reached before coordinator review", latestWorkerResult, currentPlan, helper), nil
+		}
+
+		// Phase C: Coordinator reviews the Worker's output (and the QA Auditor's report if present)
 		primaryCoord := coordinators[0]
 		_ = e.storage.UpdateJobStage(ctx, job.ID, StageReviewing, round, totalCalls)
 		_ = e.storage.RecordEvent(ctx, job.ID, EventReviewStarted, string(StageReviewing), helper.WorkerID(),
@@ -420,7 +515,7 @@ func (e *CollaborationEngine) ProcessJob(ctx context.Context, job *Job, helper E
 
 		coordCandidates := e.buildCandidateRoster(primaryCoord, coordinators, participants, RoleCoordinator, metaCfg)
 		reviewParsed, reviewRaw, reviewLat, usedCoord, err := e.invokeWithFailover(ctx, job.ID, round, string(StageReviewing), coordCandidates, func(cand Participant) []provider.Message {
-			return BuildCoordinatorReviewContext(job.Task, currentPlan, latestWorkerResult, history, cand, round, maxRounds, maxChars)
+			return BuildCoordinatorReviewContext(job.Task, currentPlan, latestWorkerResult, latestAuditorReportForRound, latestAuditorActionForRound, history, cand, round, maxRounds, maxChars)
 		}, callTimeout, metaCfg, helper)
 		if err != nil {
 			return "", fmt.Errorf("coordinator review failed in round %d: %w", round, err)
@@ -504,9 +599,12 @@ func (e *CollaborationEngine) buildCandidateRoster(
 		seen[key] = true
 		p.Role = targetRole
 		if p.Name == "" {
-			if targetRole == RoleCoordinator {
+			switch targetRole {
+			case RoleCoordinator:
 				p.Name = "Coordinator / Architect"
-			} else {
+			case RoleAuditor:
+				p.Name = "Quality Assurance / Auditor"
+			default:
 				p.Name = "Worker / Developer"
 			}
 		}
@@ -641,6 +739,8 @@ func (e *CollaborationEngine) invokeParticipant(
 	defaultAction := ActionContinue
 	if phase == string(StageReviewing) {
 		defaultAction = ActionRevise
+	} else if phase == string(StageAuditing) {
+		defaultAction = ActionComplete
 	}
 	parsed := ParseStructuredResponse(rawReply, defaultAction)
 
@@ -754,7 +854,7 @@ func BuildWorkerExecutionContext(task, plan string, history []CollaborationMessa
 	sysPrompt := baseSys + `
 
 Your responsibilities:
-1. Follow the Coordinator's implementation plan, review instructions, and any direct User Revision Requests carefully.
+1. Follow the Coordinator's implementation plan, QA Auditor findings, review instructions, and any direct User Revision Requests carefully.
 2. Produce complete, working, self-contained deliverables with zero placeholders or "// TODO" comments. Never omit unchanged files—always output the complete set of project files so the user's ZIP download has everything needed.
 3. MULTI-FILE PACKAGING RULE: Whenever your deliverable consists of one or more code/project files (for example: main.go, go.mod, index.html, install.sh, README.md), prefix EACH file clearly on its own line inside your "message" using this exact header format:
 === FILE: path/to/filename.ext ===
@@ -783,7 +883,7 @@ followed by the complete code for that file.
 	if latestUserRev != "" {
 		sb.WriteString(fmt.Sprintf("\n### IMPORTANT — LATEST USER REVISION REQUEST:\n%s\n\nApply the user's requested changes above to the project while keeping all existing working functionality intact. Output all project files in full using === FILE: filename === headers in the required JSON format.", latestUserRev))
 	} else if round > 1 {
-		sb.WriteString("\nAddress all revision requests from the Coordinator's latest review and provide the complete updated deliverable (including all === FILE: filename === sections) in the required JSON format.")
+		sb.WriteString("\nAddress all revision requests from the QA Auditor and Coordinator's latest review, and provide the complete updated deliverable (including all === FILE: filename === sections) in the required JSON format.")
 	} else {
 		sb.WriteString("\nExecute the Coordinator's plan now and provide your complete result in the required JSON format.")
 	}
@@ -794,8 +894,62 @@ followed by the complete code for that file.
 	}
 }
 
+// BuildPipelineAuditorContext constructs the bounded context for the 3-role pipeline's QA / Auditor turn
+func BuildPipelineAuditorContext(task, plan, latestWorkerResult string, history []CollaborationMessage, auditor Participant, round, maxRounds, maxChars int) []provider.Message {
+	if maxChars <= 0 {
+		maxChars = 28000
+	}
+	baseSys := strings.TrimSpace(auditor.SystemPrompt)
+	if baseSys == "" {
+		baseSys = "You are the Quality Assurance (QA) & Security Auditor in a 3-tier AI collaboration pipeline managed by Sahand Cortex."
+	}
+
+	sysPrompt := baseSys + `
+
+Your responsibilities:
+1. Independently test and audit the Worker's deliverable before the Coordinator gives final approval.
+2. Check for:
+   - Runtime bugs, uninitialized listeners, or broken logic.
+   - Invalid constants or API parameters (e.g., verify IANA timezones like "Asia/Tehran", "America/Chicago", "Europe/Dublin" in Intl.DateTimeFormat).
+   - Missing project files or incomplete placeholders ("// TODO", "...").
+   - Unfulfilled requirements from the user task or User Revision Requests.
+3. Set "action": "complete" ONLY if the Worker's deliverable is 100% working, complete, and ready for delivery.
+4. Set "action": "revise" if you find ANY bugs, missing files, or broken logic, and provide a numbered list of exact fixes required.
+5. Respond using ONLY valid JSON matching this schema:
+{
+  "action": "complete | revise",
+  "message": "Your detailed QA inspection report and numbered fixes (if any)",
+  "completion_summary": "1-sentence QA verdict summary"
+}`
+
+	taskBudget := maxChars / 5
+	planBudget := maxChars / 5
+	workerBudget := maxChars / 2
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("### Original User Task:\n%s\n\n", truncateText(task, taskBudget)))
+	sb.WriteString(fmt.Sprintf("### Coordinator Plan:\n%s\n\n", truncateText(plan, planBudget)))
+	latestUserRev := latestUserRevisionFromHistory(history)
+	if latestUserRev != "" {
+		sb.WriteString(fmt.Sprintf("### Latest User Revision Request:\n%s\n\n", latestUserRev))
+	}
+	sb.WriteString(fmt.Sprintf("### Worker Deliverable to Audit (Round %d of %d):\n%s\n\n", round, maxRounds, truncateText(latestWorkerResult, workerBudget)))
+	sb.WriteString("Perform your QA audit now and respond in the required JSON format.")
+
+	return []provider.Message{
+		{Role: "system", Content: sysPrompt},
+		{Role: "user", Content: sb.String()},
+	}
+}
+
 // BuildCoordinatorReviewContext constructs bounded context for the Coordinator's review turn
-func BuildCoordinatorReviewContext(task, plan, latestWorkerResult string, history []CollaborationMessage, coordinator Participant, round, maxRounds, maxChars int) []provider.Message {
+func BuildCoordinatorReviewContext(
+	task, plan, latestWorkerResult, auditorReport string,
+	auditorAction CollaborationAction,
+	history []CollaborationMessage,
+	coordinator Participant,
+	round, maxRounds, maxChars int,
+) []provider.Message {
 	if maxChars <= 0 {
 		maxChars = 28000
 	}
@@ -807,39 +961,34 @@ func BuildCoordinatorReviewContext(task, plan, latestWorkerResult string, histor
 	sysPrompt := baseSys + `
 
 Your responsibilities:
-1. Strictly audit the Worker's deliverable against the original user task, your implementation plan, and any User Revision Requests.
+1. Strictly evaluate the Worker's deliverable (and the QA Auditor's inspection report, if present) against the original user task, your implementation plan, and any User Revision Requests.
 2. Verify that ALL required project files requested by the user (e.g., backend code, frontend UI, install.sh / setup script if requested) are included and properly formatted with === FILE: filename === headers when multiple files are needed.
-3. If the deliverable contains code (HTML, JavaScript, Go, Python, Bash, etc.), mentally trace the execution from start to finish:
-   - Check that all scripts actually run on load and update the DOM or terminal.
-   - Check that API parameters (such as IANA timezones in Intl.DateTimeFormat, DOM IDs, variables, and event listeners) are 100% valid and will not throw runtime exceptions or leave placeholders like "--:--:--".
-   - Check that the code is complete and not truncated.
-4. If you find ANY bug, unfulfilled user revision request, missing file, or broken logic, you MUST set "action": "revise" and explain the exact fix needed.
-5. Only set "action": "complete" when all required files, user revisions, and features are verified working and complete.
-6. Respond using ONLY valid JSON matching this schema:
+3. If the QA Auditor reported bugs ("action": "revise") or if you find ANY bug, unfulfilled user revision request, missing file, or broken logic, you MUST set "action": "revise" and instruct the Worker on the exact fixes required.
+4. Only set "action": "complete" when all required files, user revisions, and features are verified working and complete.
+5. Respond using ONLY valid JSON matching this schema:
 {
   "action": "complete | revise | continue",
   "message": "Your detailed technical review, bug report, or approval",
   "completion_summary": "Brief final summary if action is complete, otherwise empty"
 }`
 
-	taskBudget := maxChars / 5
-	planBudget := maxChars / 5
+	taskBudget := maxChars / 6
+	planBudget := maxChars / 6
+	auditBudget := maxChars / 6
 	workerBudget := maxChars / 2
-	historyBudget := maxChars - taskBudget - planBudget - workerBudget
 
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("### Original User Task:\n%s\n\n", truncateText(task, taskBudget)))
 	sb.WriteString(fmt.Sprintf("### Implementation Plan:\n%s\n\n", truncateText(plan, planBudget)))
-	if len(history) > 2 && historyBudget > 500 {
-		sb.WriteString(formatBoundedHistory(history[:len(history)-1], historyBudget))
-		sb.WriteString("\n")
-	}
 	latestUserRev := latestUserRevisionFromHistory(history)
 	if latestUserRev != "" {
 		sb.WriteString(fmt.Sprintf("### Latest User Revision Request:\n%s\n\n", latestUserRev))
 	}
 	sb.WriteString(fmt.Sprintf("### Latest Worker Result (Round %d of %d):\n%s\n\n", round, maxRounds, truncateText(latestWorkerResult, workerBudget)))
-	sb.WriteString("Audit the Worker's deliverable carefully (ensuring any User Revision Request has been completely fulfilled) and respond with your decision in the required JSON format.")
+	if strings.TrimSpace(auditorReport) != "" {
+		sb.WriteString(fmt.Sprintf("### Quality Assurance / Auditor Report (Verdict: %s):\n%s\n\n", strings.ToUpper(string(auditorAction)), truncateText(auditorReport, auditBudget)))
+	}
+	sb.WriteString("Review the Worker's deliverable and the QA Auditor report carefully, and respond with your decision in the required JSON format.")
 
 	return []provider.Message{
 		{Role: "system", Content: sysPrompt},
@@ -983,7 +1132,6 @@ func extractJSONCandidates(s string) []string {
 
 	return out
 }
-
 
 // AuditDeliverable runs an on-demand Independent Second-Opinion Audit using the user-selected provider & model
 func (e *CollaborationEngine) AuditDeliverable(ctx context.Context, jobID, providerID, modelID string) (*CollaborationMessage, error) {
