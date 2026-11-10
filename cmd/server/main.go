@@ -1146,6 +1146,8 @@ func (a *App) orchGetJob(w http.ResponseWriter, r *http.Request) {
 	jobID = strings.TrimSuffix(jobID, "/cancel")
 	jobID = strings.TrimSuffix(jobID, "/retry")
 	jobID = strings.TrimSuffix(jobID, "/iterate")
+	jobID = strings.TrimSuffix(jobID, "/audit")
+	jobID = strings.TrimSuffix(jobID, "/apply-audit")
 
 	if jobID == "" {
 		jsonOut(w, 400, map[string]string{"error": "Job ID is required"})
@@ -1248,6 +1250,59 @@ func (a *App) orchGetJob(w http.ResponseWriter, r *http.Request) {
 				jsonOut(w, 404, map[string]string{"error": "Job not found"})
 				return
 			}
+			jsonOut(w, 400, map[string]string{"error": err.Error()})
+			return
+		}
+		jsonOut(w, 200, updatedJob)
+		return
+	}
+
+	if strings.HasSuffix(r.URL.Path, "/audit") {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", 405)
+			return
+		}
+		var body struct {
+			Provider string `json:"provider"`
+			Model    string `json:"model"`
+		}
+		if json.NewDecoder(http.MaxBytesReader(w, r.Body, 16*1024)).Decode(&body) != nil {
+			jsonOut(w, 400, map[string]string{"error": "Invalid audit request payload"})
+			return
+		}
+		prov := strings.TrimSpace(body.Provider)
+		mod := strings.TrimSpace(body.Model)
+		if strings.Contains(mod, "::") {
+			parts := strings.SplitN(mod, "::", 2)
+			prov = parts[0]
+			mod = parts[1]
+		}
+		if prov == "" {
+			prov = a.activeProvider()
+		}
+		if mod == "" {
+			mod = a.activeModel()
+		}
+		auditMsg, err := a.orchEngine.AuditDeliverable(r.Context(), jobID, prov, mod)
+		if err != nil {
+			jsonOut(w, 502, map[string]string{"error": err.Error()})
+			return
+		}
+		jsonOut(w, 200, auditMsg)
+		return
+	}
+
+	if strings.HasSuffix(r.URL.Path, "/apply-audit") {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", 405)
+			return
+		}
+		var body struct {
+			MessageID int64 `json:"message_id"`
+		}
+		_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 8192)).Decode(&body)
+		updatedJob, err := a.orchStorage.ApplyAuditResult(r.Context(), jobID, body.MessageID)
+		if err != nil {
 			jsonOut(w, 400, map[string]string{"error": err.Error()})
 			return
 		}
