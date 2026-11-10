@@ -18,6 +18,7 @@ let activeOrchJobId = localStorage.getItem("cortext_active_orch_job") || null;
 let orchPollTimer = null;
 let orchActiveSubView = "messages";
 let orchSubmitting = false;
+let selectedDeliverableFileIdx = 0;
 
 const providerCatalog = {
   gemini: {
@@ -122,97 +123,290 @@ async function copyTextToClipboard(text) {
   return ok;
 }
 
-// Smart Code & File Extractor for Downloads and Live HTML Previews
-function extractDeliverableArtifact(rawText, jobId) {
-  if (!rawText) return { content: "", ext: "txt", mime: "text/plain", isHtml: false, filename: `${jobId || "result"}.txt` };
+/* ============================================================================
+   MULTI-FILE PROJECT PARSER & PURE-JS ZIP ARCHIVE GENERATOR
+   ============================================================================ */
 
-  // Strip trailing Coordinator Completion Summary when extracting code file
-  let cleaned = rawText;
-  const sumIdx = cleaned.indexOf("\n---\n### Coordinator Completion Summary");
-  if (sumIdx !== -1) {
-    cleaned = cleaned.slice(0, sumIdx).trim();
+function detectCodeLanguageAndFilename(code, hintLang, index) {
+  const trimmed = (code || "").trim();
+  const firstLines = trimmed.slice(0, 300);
+  const h = (hintLang || "").toLowerCase().trim();
+
+  // Check if hintLang is already a filename like "main.go" or "install.sh"
+  if (h.includes(".") && /^[a-z0-9_./-]+$/i.test(h)) {
+    const ext = h.split(".").pop().toLowerCase();
+    return {
+      filename: h.replace(/^\/+/, ""),
+      ext,
+      isHtml: ext === "html" || ext === "htm"
+    };
   }
 
-  let code = cleaned;
-  let lang = "";
-
-  // If the deliverable contains a markdown code block ```lang ... ```, extract the largest code block
-  const fenceRegex = /```([a-zA-Z0-9_-]*)\s*\n([\s\S]*?)```/g;
-  let match;
-  let bestBlock = "";
-  let bestLang = "";
-  while ((match = fenceRegex.exec(cleaned)) !== null) {
-    if (match[2].length > bestBlock.length) {
-      bestLang = (match[1] || "").toLowerCase();
-      bestBlock = match[2].trim();
-    }
+  // 1. Check Go FIRST (before checking for embedded <!DOCTYPE html> inside Go strings!)
+  if (h === "go" || h === "golang" || /^package\s+[a-zA-Z0-9_]+/m.test(firstLines)) {
+    return { filename: index === 0 ? "main.go" : `file_${index + 1}.go`, ext: "go", isHtml: false };
   }
-  if (bestBlock.length > 40) {
-    code = bestBlock;
-    lang = bestLang;
+  if (firstLines.startsWith("module ") && firstLines.includes("\ngo ")) {
+    return { filename: "go.mod", ext: "mod", isHtml: false };
   }
-
-  const lower = code.trim().toLowerCase();
-  let ext = "txt";
-  let mime = "text/plain;charset=utf-8";
-  let isHtml = false;
-
-  if (lang === "html" || lower.startsWith("<!doctype html") || lower.startsWith("<html") || (lower.includes("<html") && lower.includes("</html>"))) {
-    ext = "html";
-    mime = "text/html;charset=utf-8";
-    isHtml = true;
-    // If raw text had prose before <!DOCTYPE html>, trim to the HTML document
-    if (!bestBlock) {
-      const docStart = code.search(/<!doctype html|<html/i);
-      const docEnd = code.search(/<\/html>/i);
-      if (docStart !== -1 && docEnd !== -1) {
-        code = code.slice(docStart, docEnd + 7);
-      }
-    }
-  } else if (lang === "json" || (lower.startsWith("{") && lower.endsWith("}"))) {
-    ext = "json";
-    mime = "application/json;charset=utf-8";
-  } else if (lang === "js" || lang === "javascript") {
-    ext = "js";
-    mime = "text/javascript;charset=utf-8";
-  } else if (lang === "ts" || lang === "typescript") {
-    ext = "ts";
-  } else if (lang === "py" || lang === "python") {
-    ext = "py";
-  } else if (lang === "go" || lang === "golang" || lower.startsWith("package ")) {
-    ext = "go";
-  } else if (lang === "css") {
-    ext = "css";
-    mime = "text/css;charset=utf-8";
-  } else if (lang === "sh" || lang === "bash" || lower.startsWith("#!/")) {
-    ext = "sh";
-  } else if (lang === "md" || lang === "markdown" || cleaned.includes("### ")) {
-    ext = "md";
-    mime = "text/markdown;charset=utf-8";
+  // 2. Check Shell / Bash script
+  if (h === "sh" || h === "bash" || h === "shell" || firstLines.startsWith("#!/usr/bin/env bash") || firstLines.startsWith("#!/bin/bash") || firstLines.startsWith("#!/bin/sh")) {
+    return { filename: index === 0 ? "install.sh" : `script_${index + 1}.sh`, ext: "sh", isHtml: false };
   }
+  // 3. Check Python
+  if (h === "py" || h === "python" || firstLines.startsWith("#!/usr/bin/env python") || /^(import\s+\w+|from\s+\w+\s+import\s+|def\s+\w+\s*\()/m.test(firstLines)) {
+    return { filename: index === 0 ? "main.py" : `module_${index + 1}.py`, ext: "py", isHtml: false };
+  }
+  // 4. Check standalone HTML (only when the file itself starts with <!DOCTYPE html> or <html)
+  if (h === "html" || /^<!doctype\s+html/i.test(firstLines) || /^<html[\s>]/i.test(firstLines)) {
+    return { filename: index === 0 ? "index.html" : `page_${index + 1}.html`, ext: "html", isHtml: true };
+  }
+  // 5. Check CSS / JS / JSON / YAML / SQL
+  if (h === "css") return { filename: index === 0 ? "style.css" : `style_${index + 1}.css`, ext: "css", isHtml: false };
+  if (h === "js" || h === "javascript") return { filename: index === 0 ? "app.js" : `script_${index + 1}.js`, ext: "js", isHtml: false };
+  if (h === "ts" || h === "typescript") return { filename: index === 0 ? "index.ts" : `module_${index + 1}.ts`, ext: "ts", isHtml: false };
+  if (h === "json" || (firstLines.startsWith("{") && trimmed.endsWith("}"))) {
+    return { filename: index === 0 ? "config.json" : `data_${index + 1}.json`, ext: "json", isHtml: false };
+  }
+  if (h === "yaml" || h === "yml") return { filename: index === 0 ? "config.yml" : `file_${index + 1}.yml`, ext: "yml", isHtml: false };
+  if (h === "sql") return { filename: index === 0 ? "schema.sql" : `query_${index + 1}.sql`, ext: "sql", isHtml: false };
+  if (h === "md" || h === "markdown") return { filename: index === 0 ? "README.md" : `doc_${index + 1}.md`, ext: "md", isHtml: false };
 
-  const shortId = (jobId || "deliverable").replace(/[^a-zA-Z0-9_-]/g, "");
-  return {
-    content: ext === "md" || ext === "txt" ? rawText : code,
-    ext,
-    mime,
-    isHtml,
-    filename: `${shortId}.${ext}`
-  };
+  return { filename: index === 0 ? "deliverable.txt" : `part_${index + 1}.txt`, ext: "txt", isHtml: false };
 }
 
-function downloadArtifactFile(rawText, jobId) {
-  const art = extractDeliverableArtifact(rawText, jobId);
-  const blob = new Blob([art.content], { type: art.mime });
+function stripOuterCodeFence(text) {
+  const t = (text || "").trim();
+  const m = t.match(/^```[a-zA-Z0-9_./-]*\s*\n([\s\S]*?)\n```\s*$/);
+  return m ? m[1].trim() : t;
+}
+
+// Extracts 1 or more project files from a deliverable string
+function extractProjectFiles(rawText, jobId) {
+  if (!rawText) return { files: [], summary: "" };
+
+  let body = rawText;
+  let summary = "";
+  const sumMarker = "\n---\n### Coordinator Completion Summary\n";
+  const sumIdx = body.indexOf(sumMarker);
+  if (sumIdx !== -1) {
+    summary = body.slice(sumIdx + sumMarker.length).trim();
+    body = body.slice(0, sumIdx).trim();
+  }
+
+  const files = [];
+  const usedNames = new Set();
+
+  function addUniqueFile(filename, content, ext, isHtml) {
+    let cleanName = (filename || "file.txt").trim().replace(/^[/\\]+/, "").replace(/\.\./g, "");
+    if (!cleanName) cleanName = "file.txt";
+    if (usedNames.has(cleanName)) {
+      const dot = cleanName.lastIndexOf(".");
+      if (dot !== -1) {
+        cleanName = `${cleanName.slice(0, dot)}_${files.length + 1}${cleanName.slice(dot)}`;
+      } else {
+        cleanName = `${cleanName}_${files.length + 1}`;
+      }
+    }
+    usedNames.add(cleanName);
+    const finalExt = ext || (cleanName.includes(".") ? cleanName.split(".").pop().toLowerCase() : "txt");
+    files.push({
+      filename: cleanName,
+      content: content.trim() + "\n",
+      ext: finalExt,
+      isHtml: isHtml || finalExt === "html" || finalExt === "htm"
+    });
+  }
+
+  // Strategy 1: Explicit === FILE: path/to/file === markers
+  const markerRe = /(?:^|\n)===\s*FILE:\s*([^\n=]+?)\s*===\s*\n/gi;
+  const matches = [...body.matchAll(markerRe)];
+  if (matches.length > 0) {
+    for (let i = 0; i < matches.length; i++) {
+      const fname = matches[i][1].trim();
+      const start = matches[i].index + matches[i][0].length;
+      const end = i + 1 < matches.length ? matches[i + 1].index : body.length;
+      const chunk = stripOuterCodeFence(body.slice(start, end));
+      if (chunk) {
+        const info = detectCodeLanguageAndFilename(chunk, fname, i);
+        addUniqueFile(fname, chunk, info.ext, info.isHtml);
+      }
+    }
+  }
+
+  // Strategy 2: Multiple or single Markdown code fences ```lang ... ```
+  if (files.length === 0) {
+    const fenceRe = /```([a-zA-Z0-9_./-]*)[ \t]*\n([\s\S]*?)```/g;
+    const fenceMatches = [...body.matchAll(fenceRe)];
+    if (fenceMatches.length > 0) {
+      fenceMatches.forEach((m, idx) => {
+        const hint = (m[1] || "").trim();
+        const code = (m[2] || "").trim();
+        if (!code) return;
+
+        // Check if preceding line before the code fence named a file (e.g. "### `install.sh`" or "**main.go**")
+        const before = body.slice(Math.max(0, m.index - 140), m.index);
+        const nameMatch = before.match(/(?:###|\*\*|`|File:)\s*`?([a-zA-Z0-9_/-]+\.[a-zA-Z0-9]+)`?\**\s*$/i);
+        const fileHint = nameMatch ? nameMatch[1] : hint;
+
+        const info = detectCodeLanguageAndFilename(code, fileHint, idx);
+        addUniqueFile(info.filename, code, info.ext, info.isHtml);
+      });
+
+      // Also save the full raw instructions/markdown as README.md if there were multiple blocks or prose around them
+      const withoutFences = body.replace(fenceRe, "").trim();
+      if (withoutFences.length > 80 && !usedNames.has("README.md")) {
+        addUniqueFile("README.md", body, "md", false);
+      }
+    }
+  }
+
+  // Strategy 3: Raw unfenced code or document
+  if (files.length === 0) {
+    const info = detectCodeLanguageAndFilename(body, "", 0);
+    addUniqueFile(info.filename, body, info.ext, info.isHtml);
+  }
+
+  // If a Go file is present without a go.mod, or if we want a quick-start README in the ZIP when multiple files exist
+  const hasGo = files.some(f => f.ext === "go");
+  const hasInstallSh = files.some(f => f.filename.endsWith(".sh"));
+  if (hasGo && !hasInstallSh && files.length === 1) {
+    // Auto-generate a helper run.sh script in the package so the user can run or install it with 1 command on Ubuntu
+    const goFile = files.find(f => f.ext === "go").filename;
+    const runScript = `#!/usr/bin/env bash
+set -e
+echo "Starting ${goFile}..."
+if ! command -v go >/dev/null 2>&1; then
+  echo "Installing Go..."
+  sudo apt-get update && sudo apt-get install -y golang-go
+fi
+go run ${goFile}
+`;
+    addUniqueFile("run.sh", runScript, "sh", false);
+  }
+
+  return { files, summary };
+}
+
+function downloadSingleFileObj(fileObj) {
+  if (!fileObj) return;
+  const blob = new Blob([fileObj.content], { type: "application/octet-stream" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = art.filename;
+  a.download = fileObj.filename.split("/").pop();
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
   setTimeout(() => URL.revokeObjectURL(url), 1500);
-  toast(`⬇ Downloaded ${art.filename}`);
+  toast(`⬇ Downloaded ${fileObj.filename}`);
+}
+
+// Pure-JS Standard ZIP Archive Generator (Zero external dependencies)
+const crc32Table = (() => {
+  const table = new Uint32Array(256);
+  for (let i = 0; i < 256; i++) {
+    let c = i;
+    for (let k = 0; k < 8; k++) {
+      c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+    }
+    table[i] = c >>> 0;
+  }
+  return table;
+})();
+
+function crc32Bytes(uint8Arr) {
+  let crc = 0xFFFFFFFF;
+  for (let i = 0; i < uint8Arr.length; i++) {
+    crc = crc32Table[(crc ^ uint8Arr[i]) & 0xFF] ^ (crc >>> 8);
+  }
+  return (crc ^ 0xFFFFFFFF) >>> 0;
+}
+
+function buildZipBlob(files) {
+  const encoder = new TextEncoder();
+  const localChunks = [];
+  const centralChunks = [];
+  let offset = 0;
+
+  files.forEach(f => {
+    const nameBytes = encoder.encode(f.filename);
+    const dataBytes = encoder.encode(f.content);
+    const crc = crc32Bytes(dataBytes);
+    const size = dataBytes.length;
+
+    // Local file header (30 bytes + filename)
+    const localHeader = new Uint8Array(30 + nameBytes.length);
+    const lv = new DataView(localHeader.buffer);
+    lv.setUint32(0, 0x04034b50, true); // signature
+    lv.setUint16(4, 20, true);         // version needed
+    lv.setUint16(6, 0x0800, true);     // UTF-8 flag
+    lv.setUint16(8, 0, true);          // store (0 = uncompressed)
+    lv.setUint16(10, 0, true);         // mod time
+    lv.setUint16(12, 0, true);         // mod date
+    lv.setUint32(14, crc, true);       // crc32
+    lv.setUint32(18, size, true);      // compressed size
+    lv.setUint32(22, size, true);      // uncompressed size
+    lv.setUint16(26, nameBytes.length, true);
+    lv.setUint16(28, 0, true);
+    localHeader.set(nameBytes, 30);
+
+    localChunks.push(localHeader, dataBytes);
+
+    // Central directory header (46 bytes + filename)
+    const centralHeader = new Uint8Array(46 + nameBytes.length);
+    const cv = new DataView(centralHeader.buffer);
+    cv.setUint32(0, 0x02014b50, true);
+    cv.setUint16(4, 20, true);
+    cv.setUint16(6, 20, true);
+    cv.setUint16(8, 0x0800, true);
+    cv.setUint16(10, 0, true);
+    cv.setUint16(12, 0, true);
+    cv.setUint16(14, 0, true);
+    cv.setUint32(16, crc, true);
+    cv.setUint32(20, size, true);
+    cv.setUint32(24, size, true);
+    cv.setUint16(28, nameBytes.length, true);
+    cv.setUint16(30, 0, true);
+    cv.setUint16(32, 0, true);
+    cv.setUint16(34, 0, true);
+    cv.setUint16(36, 0, true);
+    cv.setUint32(38, 0, true);
+    cv.setUint32(42, offset, true);
+    centralHeader.set(nameBytes, 46);
+
+    centralChunks.push(centralHeader);
+    offset += localHeader.length + size;
+  });
+
+  const centralSize = centralChunks.reduce((acc, c) => acc + c.length, 0);
+  const eocd = new Uint8Array(22);
+  const ev = new DataView(eocd.buffer);
+  ev.setUint32(0, 0x06054b50, true);
+  ev.setUint16(4, 0, true);
+  ev.setUint16(6, 0, true);
+  ev.setUint16(8, files.length, true);
+  ev.setUint16(10, files.length, true);
+  ev.setUint32(12, centralSize, true);
+  ev.setUint32(16, offset, true);
+  ev.setUint16(20, 0, true);
+
+  return new Blob([...localChunks, ...centralChunks, eocd], { type: "application/zip" });
+}
+
+function downloadProjectZip(files, jobId) {
+  if (!files || !files.length) return;
+  const zipBlob = buildZipBlob(files);
+  const url = URL.createObjectURL(zipBlob);
+  const a = document.createElement("a");
+  const cleanId = (jobId || "project").replace(/[^a-zA-Z0-9_-]/g, "");
+  a.href = url;
+  a.download = `${cleanId}-project.zip`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1500);
+  toast(`📦 Downloaded ${cleanId}-project.zip (${files.length} files)`);
 }
 
 function showLogin() {
@@ -1426,6 +1620,9 @@ function highlightActiveOrchJobCard() {
 }
 
 async function openOrchJobMonitor(jobId) {
+  if (activeOrchJobId !== jobId) {
+    selectedDeliverableFileIdx = 0;
+  }
   activeOrchJobId = jobId;
   localStorage.setItem("cortext_active_orch_job", jobId);
   $("orch-builder-panel").classList.add("hidden");
@@ -1562,41 +1759,110 @@ function renderOrchJobDetails(d) {
     pill.className = `orch-roster-pill${isWorkingNow ? " working-now" : ""}`;
     const roleLabel = p.role === "coordinator" ? "Coordinator / Architect" : "Worker / Developer";
     const provName = providerCatalog[p.provider]?.name || p.provider;
-    const sentCount = messages.filter(m => m.provider === p.provider && m.model === p.model && m.sender_role === p.role).length;
-    pill.innerHTML = `<span class="roster-role">#${i + 1} ${roleLabel} · ${sentCount} msg${sentCount === 1 ? "" : "s"}</span><b>${provName} · ${p.model}</b>`;
+    const modelMsgs = messages.filter(m => m.provider === p.provider && m.model === p.model).length;
+    pill.innerHTML = `<span class="roster-role">#${i + 1} ${roleLabel} · ${modelMsgs} msg${modelMsgs === 1 ? "" : "s"}</span><b>${provName} · ${p.model}</b>`;
     rosterEl.appendChild(pill);
   });
 
-  // Final Result Card + Copy + Download + Live HTML Preview
+  // Final Result Card + Multi-File Explorer + ZIP Download + Live HTML Preview
   const finalCard = $("orch-final-card");
   if (status === "completed" && d.execution_result) {
     finalCard.classList.remove("hidden");
-    $("orch-final-body").textContent = d.execution_result;
 
-    const art = extractDeliverableArtifact(d.execution_result, d.id);
+    const parsedPkg = extractProjectFiles(d.execution_result, d.id);
+    const files = parsedPkg.files;
+    if (selectedDeliverableFileIdx >= files.length) {
+      selectedDeliverableFileIdx = 0;
+    }
+    const activeFile = files[selectedDeliverableFileIdx] || { filename: "result.txt", content: d.execution_result, ext: "txt", isHtml: false };
+
+    if ($("orch-files-badge")) {
+      $("orch-files-badge").textContent = `${files.length} FILE${files.length === 1 ? "" : "S"}`;
+    }
+
+    // Render interactive file tabs
+    const explorerEl = $("orch-files-explorer");
+    const tabsEl = $("orch-files-tabs");
+    if (explorerEl && tabsEl) {
+      explorerEl.classList.remove("hidden");
+      tabsEl.innerHTML = "";
+      files.forEach((f, idx) => {
+        const tabWrap = document.createElement("div");
+        tabWrap.className = `orch-file-tab${idx === selectedDeliverableFileIdx ? " active" : ""}`;
+
+        const selectBtn = document.createElement("button");
+        selectBtn.type = "button";
+        selectBtn.className = "orch-file-select";
+        const sizeKb = Math.max(0.1, (new Blob([f.content]).size / 1024)).toFixed(1);
+        selectBtn.innerHTML = `<b>📄 ${f.filename}</b> <small>${sizeKb} KB</small>`;
+        selectBtn.onclick = () => {
+          selectedDeliverableFileIdx = idx;
+          renderOrchJobDetails(d);
+        };
+
+        const dlIcon = document.createElement("button");
+        dlIcon.type = "button";
+        dlIcon.className = "orch-file-dl";
+        dlIcon.title = `Download ${f.filename}`;
+        dlIcon.textContent = "⬇";
+        dlIcon.onclick = e => {
+          e.stopPropagation();
+          downloadSingleFileObj(f);
+        };
+
+        tabWrap.append(selectBtn, dlIcon);
+        tabsEl.appendChild(tabWrap);
+      });
+    }
+
+    $("orch-final-body").textContent = activeFile.content;
+
+    const sumNote = $("orch-final-summary-note");
+    if (sumNote) {
+      if (parsedPkg.summary) {
+        sumNote.classList.remove("hidden");
+        sumNote.innerHTML = `<b>Coordinator Summary:</b> `;
+        const s = document.createElement("span");
+        s.textContent = parsedPkg.summary;
+        sumNote.appendChild(s);
+      } else {
+        sumNote.classList.add("hidden");
+      }
+    }
+
+    const zipBtn = $("orch-download-zip-btn");
+    if (zipBtn) {
+      zipBtn.textContent = `📦 Download Project (.zip · ${files.length} file${files.length === 1 ? "" : "s"})`;
+      zipBtn.onclick = () => downloadProjectZip(files, d.id);
+    }
+
     const dlBtn = $("orch-download-result-btn");
     if (dlBtn) {
-      dlBtn.textContent = `⬇ Download .${art.ext}`;
-      dlBtn.onclick = () => downloadArtifactFile(d.execution_result, d.id);
+      dlBtn.textContent = `⬇ Download ${activeFile.filename}`;
+      dlBtn.onclick = () => downloadSingleFileObj(activeFile);
     }
 
     const copyBtn = $("orch-copy-result-btn");
     if (copyBtn) {
+      copyBtn.textContent = `📋 Copy ${activeFile.filename}`;
       copyBtn.onclick = async () => {
-        const ok = await copyTextToClipboard(art.content || d.execution_result);
-        toast(ok ? "✓ Copied to clipboard!" : "Could not copy automatically");
+        const ok = await copyTextToClipboard(activeFile.content);
+        toast(ok ? `✓ Copied ${activeFile.filename} to clipboard!` : "Could not copy automatically");
       };
     }
 
+    // Live HTML Preview only when an actual standalone HTML file exists
+    const htmlFile = activeFile.isHtml ? activeFile : files.find(f => f.isHtml);
     const prevBtn = $("orch-preview-toggle-btn");
     const prevWrap = $("orch-preview-wrap");
     const prevFrame = $("orch-preview-frame");
     if (prevBtn && prevWrap && prevFrame) {
-      prevBtn.classList.toggle("hidden", !art.isHtml);
+      prevBtn.classList.toggle("hidden", !htmlFile);
       prevBtn.onclick = () => {
+        if (!htmlFile) return;
         const isHidden = prevWrap.classList.contains("hidden");
         if (isHidden) {
-          prevFrame.srcdoc = art.content;
+          prevFrame.srcdoc = htmlFile.content;
           prevWrap.classList.remove("hidden");
           prevBtn.textContent = "👁 Hide HTML Preview";
         } else {
@@ -1658,7 +1924,14 @@ function renderOrchJobDetails(d) {
       dlTurnBtn.type = "button";
       dlTurnBtn.className = "mini-turn-btn";
       dlTurnBtn.textContent = "⬇ Save";
-      dlTurnBtn.onclick = () => downloadArtifactFile(m.content, `${d.id}-turn-${idx + 1}`);
+      dlTurnBtn.onclick = () => {
+        const turnFiles = extractProjectFiles(m.content, `${d.id}-turn-${idx + 1}`).files;
+        if (turnFiles.length > 1) {
+          downloadProjectZip(turnFiles, `${d.id}-turn-${idx + 1}`);
+        } else {
+          downloadSingleFileObj(turnFiles[0]);
+        }
+      };
 
       right.append(copyTurnBtn, dlTurnBtn);
       head.append(left, right);
