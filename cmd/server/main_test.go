@@ -15,11 +15,11 @@ import (
 )
 
 func TestChatContinuityAndOrchestrationAPIs(t *testing.T) {
-	// 1. Mock upstream server for chat
+	// 1. Mock upstream server for chat and collaboration
 	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"choices":[{"message":{"content":"Acknowledged."}}]}`))
+		w.Write([]byte(`{"choices":[{"message":{"content":"{\"action\":\"complete\",\"message\":\"Acknowledged.\",\"completion_summary\":\"Done\"}"}}]}`))
 	}))
 	defer mockServer.Close()
 
@@ -34,28 +34,40 @@ func TestChatContinuityAndOrchestrationAPIs(t *testing.T) {
 	router := provider.NewRouter()
 	router.OpenRouterBaseURL = mockServer.URL
 	orchStorage := orchestration.NewStorage(db)
-	orchPool := orchestration.NewWorkerPool(orchStorage, nil, 1)
 
 	app := &App{
 		db:          db,
 		sessions:    map[string]time.Time{},
 		router:      router,
 		orchStorage: orchStorage,
-		orchPool:    orchPool,
 	}
+	collabEngine := orchestration.NewCollaborationEngine(
+		orchStorage,
+		router,
+		app.providerKey,
+		func() (string, string) { return app.activeProvider(), app.activeModel() },
+		orchestration.DefaultCollaborationConfig(),
+	)
+	orchPool := orchestration.NewWorkerPool(orchStorage, collabEngine, 1)
+	app.orchEngine = collabEngine
+	app.orchPool = orchPool
+
 	if err := app.initDB(); err != nil {
 		t.Fatalf("initDB: %v", err)
 	}
 	_ = app.setSetting("openrouter_api_key", "sk-test-key")
 
-	// 3. Test Orchestration Job REST Endpoints
+	// 3. Test Orchestration Job REST Endpoints with Participants
 	t.Run("Orchestration Job Lifecycle", func(t *testing.T) {
-		// Create Job
 		createBody, _ := json.Marshal(map[string]any{
 			"task":       "Perform architectural audit",
 			"max_rounds": 4,
 			"max_calls":  8,
-			"metadata":   map[string]string{"env": "test"},
+			"participants": []map[string]string{
+				{"role": "coordinator", "name": "Architect", "provider": "openrouter", "model": "model-a"},
+				{"role": "worker", "name": "Developer", "provider": "openrouter", "model": "model-b"},
+			},
+			"metadata": map[string]string{"env": "test"},
 		})
 		req := httptest.NewRequest(http.MethodPost, "/api/orchestration/jobs", bytes.NewReader(createBody))
 		w := httptest.NewRecorder()
@@ -76,6 +88,14 @@ func TestChatContinuityAndOrchestrationAPIs(t *testing.T) {
 		app.orchGetJob(w, req)
 		if w.Code != 200 {
 			t.Fatalf("get job failed code %d: %s", w.Code, w.Body.String())
+		}
+
+		// Get Collaboration Messages endpoint
+		req = httptest.NewRequest(http.MethodGet, "/api/orchestration/jobs/"+created.ID+"/messages", nil)
+		w = httptest.NewRecorder()
+		app.orchGetJob(w, req)
+		if w.Code != 200 {
+			t.Fatalf("get messages failed code %d: %s", w.Code, w.Body.String())
 		}
 
 		// List Jobs
@@ -108,7 +128,7 @@ func TestChatContinuityAndOrchestrationAPIs(t *testing.T) {
 		}
 		var events []orchestration.Event
 		_ = json.Unmarshal(w.Body.Bytes(), &events)
-		if len(events) < 2 { // created + cancelled
+		if len(events) < 2 {
 			t.Fatalf("expected at least 2 events, got %d", len(events))
 		}
 	})
