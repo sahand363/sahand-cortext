@@ -693,11 +693,14 @@ func BuildCoordinatorPlanContext(task string, coordinator Participant, maxChars 
 Your responsibilities:
 1. Analyze the original user task.
 2. Formulate a clear, structured implementation plan and explicit technical instructions for the Worker / Developer.
-3. For coding or web tasks, explicitly specify all required technical constants (for example, exact IANA timezone IDs such as "Asia/Tehran", "America/Chicago", "Europe/Dublin", DOM element IDs, and event listeners) so the Worker does not use invalid placeholders.
-4. Respond using ONLY valid JSON matching this schema:
+3. If the task requires a software project or deployment (such as a Go backend, frontend HTML/CSS/JS, and an Ubuntu installer script), instruct the Worker to output every required file using explicit file headers:
+   === FILE: filename.ext ===
+   (complete file content)
+4. For coding or web tasks, explicitly specify all required technical constants (for example, exact IANA timezone IDs such as "Asia/Tehran", "America/Chicago", "Europe/Dublin", DOM element IDs, and event listeners) so the Worker does not use invalid placeholders.
+5. Respond using ONLY valid JSON matching this schema:
 {
   "action": "continue",
-  "message": "Your detailed implementation plan and instructions for the Worker",
+  "message": "Your detailed implementation plan, file manifest, and instructions for the Worker",
   "completion_summary": ""
 }
 Allowed values for "action": "continue" (send plan to Worker) or "complete" (only if the task is a simple question already answered in message).`
@@ -725,12 +728,15 @@ func BuildWorkerExecutionContext(task, plan string, history []CollaborationMessa
 Your responsibilities:
 1. Follow the Coordinator's implementation plan and review instructions carefully.
 2. Produce complete, working, self-contained deliverables with zero placeholders or "// TODO" comments.
-3. For HTML/JS/CSS tasks, ensure all JavaScript functions initialize properly on load, use valid standard APIs (e.g. valid IANA timezone strings like "Asia/Tehran", "America/Chicago", "Europe/Dublin" in Intl.DateTimeFormat), and have no syntax or runtime errors.
-4. Respond using ONLY valid JSON matching this schema:
+3. MULTI-FILE PACKAGING RULE: Whenever your deliverable consists of one or more code/project files (for example: main.go, go.mod, index.html, install.sh, README.md), prefix EACH file clearly on its own line inside your "message" using this exact header format:
+=== FILE: path/to/filename.ext ===
+followed by the complete code for that file. This allows Sahand Cortex to package your files into a downloadable ZIP archive and individual file downloads for the user.
+4. For HTML/JS/CSS tasks, ensure all JavaScript functions initialize properly on load, use valid standard APIs (e.g. valid IANA timezone strings like "Asia/Tehran", "America/Chicago", "Europe/Dublin" in Intl.DateTimeFormat), and have no syntax or runtime errors.
+5. Respond using ONLY valid JSON matching this schema:
 {
   "action": "continue",
-  "message": "Your complete implementation, code, or analysis deliverable",
-  "completion_summary": "Brief summary of what you produced or revised"
+  "message": "Your complete deliverable (with === FILE: name === headers for each file)",
+  "completion_summary": "Brief summary of the files and features you produced or revised"
 }`
 
 	taskBudget := maxChars / 4
@@ -746,7 +752,7 @@ Your responsibilities:
 	}
 
 	if round > 1 {
-		sb.WriteString("\nAddress all revision requests from the Coordinator's latest review and provide the complete updated deliverable in the required JSON format.")
+		sb.WriteString("\nAddress all revision requests from the Coordinator's latest review and provide the complete updated deliverable (including all === FILE: filename === sections) in the required JSON format.")
 	} else {
 		sb.WriteString("\nExecute the Coordinator's plan now and provide your complete result in the required JSON format.")
 	}
@@ -771,13 +777,14 @@ func BuildCoordinatorReviewContext(task, plan, latestWorkerResult string, histor
 
 Your responsibilities:
 1. Strictly audit the Worker's deliverable against the original user task and your implementation plan.
-2. If the deliverable contains code (HTML, JavaScript, Go, Python, etc.), mentally trace the execution from start to finish:
-   - Check that all scripts actually run on page load and update the DOM.
+2. Verify that ALL required project files requested by the user (e.g., backend code, frontend UI, install.sh / setup script if requested) are included and properly formatted with === FILE: filename === headers when multiple files are needed.
+3. If the deliverable contains code (HTML, JavaScript, Go, Python, Bash, etc.), mentally trace the execution from start to finish:
+   - Check that all scripts actually run on load and update the DOM or terminal.
    - Check that API parameters (such as IANA timezones in Intl.DateTimeFormat, DOM IDs, variables, and event listeners) are 100% valid and will not throw runtime exceptions or leave placeholders like "--:--:--".
    - Check that the code is complete and not truncated.
-3. If you find ANY bug, broken logic, invalid parameter, or missing requirement, you MUST set "action": "revise" and explain the exact fix needed.
-4. Only set "action": "complete" when the deliverable is verified working and complete.
-5. Respond using ONLY valid JSON matching this schema:
+4. If you find ANY bug, missing file, missing installer script, broken logic, or invalid parameter, you MUST set "action": "revise" and explain the exact fix needed.
+5. Only set "action": "complete" when all required files and features are verified working and complete.
+6. Respond using ONLY valid JSON matching this schema:
 {
   "action": "complete | revise | continue",
   "message": "Your detailed technical review, bug report, or approval",
