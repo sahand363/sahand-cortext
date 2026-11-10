@@ -821,7 +821,7 @@ func BuildCoordinatorPlanContext(task string, coordinator Participant, maxChars 
 Your responsibilities:
 1. Analyze the original user task.
 2. Formulate a clear, structured implementation plan and explicit technical instructions for the Worker / Developer.
-3. If the task requires a software project or deployment (such as a Go backend, frontend HTML/CSS/JS, and an Ubuntu installer script), instruct the Worker to output every required file using explicit file headers:
+3. If the task requires a software project or deployment (such as a Go backend, frontend HTML/CSS/JS, config.json, and an Ubuntu installer script), instruct the Worker to output every required file using explicit file headers:
    === FILE: filename.ext ===
    (complete file content)
 4. For coding or web tasks, explicitly specify all required technical constants (for example, exact IANA timezone IDs such as "Asia/Tehran", "America/Chicago", "Europe/Dublin", DOM element IDs, and event listeners) so the Worker does not use invalid placeholders.
@@ -856,16 +856,17 @@ func BuildWorkerExecutionContext(task, plan string, history []CollaborationMessa
 Your responsibilities:
 1. Follow the Coordinator's implementation plan, QA Auditor findings, review instructions, and any direct User Revision Requests carefully.
 2. Produce complete, working, self-contained deliverables with zero placeholders or "// TODO" comments. Never omit unchanged files—always output the complete set of project files so the user's ZIP download has everything needed.
-3. MULTI-FILE PACKAGING RULE: Whenever your deliverable consists of one or more code/project files (for example: main.go, go.mod, index.html, install.sh, README.md), prefix EACH file clearly on its own line inside your "message" using this exact header format:
-=== FILE: path/to/filename.ext ===
-followed by the complete code for that file.
-4. For HTML/JS/CSS tasks, ensure all JavaScript functions initialize properly on load, use valid standard APIs (e.g. valid IANA timezone strings like "Asia/Tehran", "America/Chicago", "Europe/Dublin" in Intl.DateTimeFormat), and have no syntax or runtime errors.
-5. Respond using ONLY valid JSON matching this schema:
-{
-  "action": "continue",
-  "message": "Your complete deliverable (with === FILE: name === headers for each file)",
-  "completion_summary": "Brief summary of the files and features you produced or revised"
-}`
+3. MULTI-FILE PACKAGING RULE (CRITICAL): Do NOT wrap your code in a JSON object where quotes can break. Instead, output plain text starting with a 1-line summary, followed by EACH project file under its own exact header:
+SUMMARY: Brief summary of the files and features you produced
+=== FILE: main.go ===
+(complete Go code here)
+=== FILE: index.html ===
+(complete HTML code here)
+=== FILE: config.json ===
+(complete JSON config here)
+=== FILE: install.sh ===
+(complete Bash installer script here)
+4. Ensure all JavaScript functions initialize properly on load, use valid standard APIs (e.g. valid IANA timezone strings like "Asia/Tehran", "America/Chicago", "Europe/Dublin"), and have no syntax or runtime errors.`
 
 	taskBudget := maxChars / 5
 	planBudget := maxChars / 5
@@ -881,11 +882,11 @@ followed by the complete code for that file.
 
 	latestUserRev := latestUserRevisionFromHistory(history)
 	if latestUserRev != "" {
-		sb.WriteString(fmt.Sprintf("\n### IMPORTANT — LATEST USER REVISION REQUEST:\n%s\n\nApply the user's requested changes above to the project while keeping all existing working functionality intact. Output all project files in full using === FILE: filename === headers in the required JSON format.", latestUserRev))
+		sb.WriteString(fmt.Sprintf("\n### IMPORTANT — LATEST USER REVISION REQUEST:\n%s\n\nApply the user's requested changes above to the project while keeping all existing working functionality intact. Output all project files in full using === FILE: filename === headers.", latestUserRev))
 	} else if round > 1 {
-		sb.WriteString("\nAddress all revision requests from the QA Auditor and Coordinator's latest review, and provide the complete updated deliverable (including all === FILE: filename === sections) in the required JSON format.")
+		sb.WriteString("\nAddress all revision requests from the QA Auditor and Coordinator's latest review, and provide the complete updated deliverable using === FILE: filename === headers for every file.")
 	} else {
-		sb.WriteString("\nExecute the Coordinator's plan now and provide your complete result in the required JSON format.")
+		sb.WriteString("\nExecute the Coordinator's plan now and provide every required project file using === FILE: filename === headers.")
 	}
 
 	return []provider.Message{
@@ -1023,7 +1024,7 @@ func truncateText(s string, maxChars int) string {
 	return s[:maxChars] + "\n...[truncated]..."
 }
 
-// ParseStructuredResponse safely parses and validates structured JSON from any model.
+// ParseStructuredResponse safely parses both plain === FILE: ... === deliverables and structured JSON responses.
 func ParseStructuredResponse(raw string, defaultAction CollaborationAction) StructuredModelResponse {
 	if defaultAction == "" {
 		defaultAction = ActionContinue
@@ -1036,6 +1037,25 @@ func ParseStructuredResponse(raw string, defaultAction CollaborationAction) Stru
 		}
 	}
 
+	// 1. If the model used the clean === FILE: ... === format directly (not wrapped in outer JSON)
+	if !strings.HasPrefix(trimmed, "{") && strings.Contains(trimmed, "=== FILE:") {
+		var summary string
+		msg := trimmed
+		lines := strings.SplitN(trimmed, "\n", 3)
+		if len(lines) > 0 && strings.HasPrefix(strings.ToUpper(strings.TrimSpace(lines[0])), "SUMMARY:") {
+			summary = strings.TrimSpace(lines[0][len("SUMMARY:"):])
+			if idx := strings.Index(trimmed, "=== FILE:"); idx != -1 {
+				msg = strings.TrimSpace(trimmed[idx:])
+			}
+		}
+		return StructuredModelResponse{
+			Action:            defaultAction,
+			Message:           msg,
+			CompletionSummary: summary,
+		}
+	}
+
+	// 2. Try standard JSON candidates
 	candidates := extractJSONCandidates(trimmed)
 	for _, c := range candidates {
 		var parsed struct {
@@ -1046,7 +1066,7 @@ func ParseStructuredResponse(raw string, defaultAction CollaborationAction) Stru
 			CompletionSummary string `json:"completion_summary"`
 			Summary           string `json:"summary"`
 		}
-		if err := json.Unmarshal([]byte(c), &parsed); err == nil {
+		if err := json.Unmarshal([]byte(c), &parsed); err == nil && (parsed.Action != "" || parsed.Decision != "" || parsed.Message != "" || parsed.Content != "") {
 			actRaw := strings.ToLower(strings.TrimSpace(parsed.Action))
 			if actRaw == "" {
 				actRaw = strings.ToLower(strings.TrimSpace(parsed.Decision))
@@ -1071,6 +1091,28 @@ func ParseStructuredResponse(raw string, defaultAction CollaborationAction) Stru
 				Action:            action,
 				Message:           msg,
 				CompletionSummary: summary,
+			}
+		}
+	}
+
+	// 3. Resilient fallback if model returned a huge JSON object with unescaped quotes inside "message"
+	if strings.HasPrefix(trimmed, "{") && strings.Contains(trimmed, `"message"`) {
+		msgIdx := strings.Index(trimmed, `"message"`)
+		if msgIdx != -1 {
+			rest := trimmed[msgIdx+len(`"message"`):]
+			if colonIdx := strings.Index(rest, `"`); colonIdx != -1 {
+				body := rest[colonIdx+1:]
+				if endIdx := strings.LastIndex(body, `"completion_summary"`); endIdx != -1 {
+					body = strings.TrimRight(strings.TrimSpace(body[:endIdx]), `",`)
+				} else if lastQuote := strings.LastIndex(body, `"`); lastQuote != -1 {
+					body = body[:lastQuote]
+				}
+				body = strings.ReplaceAll(body, `\n`, "\n")
+				body = strings.ReplaceAll(body, `\r`, "\r")
+				body = strings.ReplaceAll(body, `\t`, "\t")
+				body = strings.ReplaceAll(body, `\"`, `"`)
+				body = strings.ReplaceAll(body, `\\`, `\`)
+				trimmed = strings.TrimSpace(body)
 			}
 		}
 	}
@@ -1251,16 +1293,15 @@ Audit Checklist:
 4. Security & Edge Cases: Check for obvious command injection, broken error handling, or race conditions.
 
 How to Respond:
-- Respond using ONLY valid JSON matching this schema:
-{
-  "action": "complete | revise",
-  "message": "...",
-  "completion_summary": "..."
-}
-- Set "action": "complete" if the project is 100% solid and ready for production. Put your detailed verification notes in "message" and a brief summary in "completion_summary".
-- Set "action": "revise" if you find ANY bugs, missing files, or improvements needed. In "completion_summary", list the exact bugs you found and fixed. In "message", output the COMPLETE corrected project files using the exact header format:
+- If you find ANY bugs, missing files, or improvements needed, output plain text starting with:
+DECISION: REVISE
+SUMMARY: Concise bulleted list of the exact bugs you found and fixed
+followed by the COMPLETE corrected project files using the exact header format:
 === FILE: path/to/filename.ext ===
-followed by the full corrected code for each file, so the user can apply your fixed files with one click.`
+followed by the full corrected code for each file, so the user can apply your fixed files with one click.
+- If the project is 100% solid and ready for production, output:
+DECISION: COMPLETE
+SUMMARY: Brief confirmation that all files and logic are verified working.`
 
 	taskBudget := maxChars / 5
 	planBudget := maxChars / 5
@@ -1272,7 +1313,7 @@ followed by the full corrected code for each file, so the user can apply your fi
 		sb.WriteString(fmt.Sprintf("### Architectural Plan:\n%s\n\n", truncateText(plan, planBudget)))
 	}
 	sb.WriteString(fmt.Sprintf("### Project Deliverable Files to Audit:\n%s\n\n", truncateText(deliverable, delivBudget)))
-	sb.WriteString("Perform your independent audit now and return your JSON report (including complete corrected === FILE: ... === blocks in 'message' if any fixes are needed).")
+	sb.WriteString("Perform your independent audit now and return your report (including complete corrected === FILE: ... === blocks if any fixes are needed).")
 
 	return []provider.Message{
 		{Role: "system", Content: sysPrompt},
