@@ -913,6 +913,7 @@ async function loadAllConfiguredModels() {
     }
   }
   syncModelDropdown();
+  syncAuditorModelDropdown();
   renderModelGrids();
   ensureDefaultOrchParticipants();
 }
@@ -927,6 +928,7 @@ async function loadProviderModels(provider, showToastMsg = false) {
     }
     updateProviderBadges();
     syncModelDropdown();
+    syncAuditorModelDropdown();
     renderModelGrids();
     if (showToastMsg) {
       toast(`Loaded ${providerState[provider].models.length} models from ${providerCatalog[provider].name}`);
@@ -936,9 +938,9 @@ async function loadProviderModels(provider, showToastMsg = false) {
   }
 }
 
-function syncModelDropdown() {
-  const sel = $("model");
+function buildUnifiedModelOptions(sel) {
   if (!sel) return;
+  const prevVal = sel.value;
   sel.innerHTML = "";
 
   const workingGroup = document.createElement("optgroup");
@@ -974,12 +976,36 @@ function syncModelDropdown() {
     sel.appendChild(grp);
   });
 
+  if (prevVal && [...sel.options].some(o => o.value === prevVal)) {
+    sel.value = prevVal;
+  }
+}
+
+function syncModelDropdown() {
+  const sel = $("model");
+  if (!sel) return;
+  buildUnifiedModelOptions(sel);
+
   const targetVal = `${activeProvider}::${activeModel}`;
   if ([...sel.options].some(o => o.value === targetVal)) {
     sel.value = targetVal;
   } else if (sel.options.length > 0) {
     const [p, m] = sel.options[0].value.split("::");
     setActiveSelectionUI(p, m);
+  }
+}
+
+function syncAuditorModelDropdown() {
+  const sel = $("orch-auditor-select");
+  if (!sel) return;
+  buildUnifiedModelOptions(sel);
+  if (!sel.value && sel.options.length > 0) {
+    const targetVal = `${activeProvider}::${activeModel}`;
+    if ([...sel.options].some(o => o.value === targetVal)) {
+      sel.value = targetVal;
+    } else {
+      sel.value = sel.options[0].value;
+    }
   }
 }
 
@@ -1122,6 +1148,7 @@ async function testSingleModel(provider, modelId, setActive = true) {
     }
   }
   syncModelDropdown();
+  syncAuditorModelDropdown();
   renderModelGrids();
   renderOrchParticipantsBuilder();
 }
@@ -1172,6 +1199,7 @@ $("api-key-form").addEventListener("submit", async e => {
     }
     updateProviderBadges();
     syncModelDropdown();
+    syncAuditorModelDropdown();
     renderModelGrids();
     ensureDefaultOrchParticipants();
     $("setup-banner").classList.add("hidden");
@@ -1242,6 +1270,7 @@ function ensureDefaultOrchParticipants() {
 
 async function initOrchestrationPage() {
   ensureDefaultOrchParticipants();
+  syncAuditorModelDropdown();
   renderOrchParticipantsBuilder();
   await loadOrchJobsList();
 
@@ -1621,6 +1650,7 @@ async function openOrchJobMonitor(jobId) {
   $("orch-builder-panel").classList.add("hidden");
   $("orch-monitor-panel").classList.remove("hidden");
   if ($("orch-preview-wrap")) $("orch-preview-wrap").classList.add("hidden");
+  syncAuditorModelDropdown();
   highlightActiveOrchJobCard();
 
   await fetchAndRenderOrchJob(jobId);
@@ -1674,14 +1704,18 @@ function renderOrchJobDetails(d) {
   // Calculate Collaboration Exchange Stats
   const coordMsgs = messages.filter(m => m.sender_role === "coordinator").length;
   const workerMsgs = messages.filter(m => m.sender_role === "worker").length;
+  const auditorMsgs = messages.filter(m => m.sender_role === "auditor").length;
   const userRevs = messages.filter(m => m.sender_role === "user").length;
-  const revisionsReq = messages.filter(m => (m.sender_role === "coordinator" || m.sender_role === "user") && m.action === "revise").length;
+  const revisionsReq = messages.filter(m => (m.sender_role === "coordinator" || m.sender_role === "user" || m.sender_role === "auditor") && m.action === "revise").length;
   const failoversCount = events.filter(e => e.event_type === "participant_fallback" || e.event_type === "retry_scheduled").length;
   const totalLatencyMs = messages.reduce((sum, m) => sum + (m.latency_ms || 0), 0);
 
   if ($("orch-stat-msgs")) {
     $("orch-stat-msgs").textContent = String(messages.length);
-    $("orch-stat-msgs-sub").textContent = `${coordMsgs} Coord · ${workerMsgs} Worker${userRevs ? ` · ${userRevs} User` : ""}`;
+    const partsSub = [`${coordMsgs} Coord`, `${workerMsgs} Worker`];
+    if (auditorMsgs) partsSub.push(`${auditorMsgs} Audit`);
+    if (userRevs) partsSub.push(`${userRevs} User`);
+    $("orch-stat-msgs-sub").textContent = partsSub.join(" · ");
     $("orch-stat-revisions").textContent = String(revisionsReq);
     $("orch-stat-revisions-sub").textContent = `Rounds active: ${d.current_round || 0} of ${d.max_rounds || 5}`;
     $("orch-stat-failovers").textContent = String(failoversCount);
@@ -1758,10 +1792,11 @@ function renderOrchJobDetails(d) {
     rosterEl.appendChild(pill);
   });
 
-  // Final Result Card + Multi-File Explorer + ZIP Download + Live HTML Preview
+  // Final Result Card + Second-Opinion Auditor + Multi-File Explorer + ZIP Download
   const finalCard = $("orch-final-card");
   if (status === "completed" && d.execution_result) {
     finalCard.classList.remove("hidden");
+    syncAuditorModelDropdown();
 
     const parsedPkg = extractProjectFiles(d.execution_result, d.id);
     const files = parsedPkg.files;
@@ -1772,6 +1807,52 @@ function renderOrchJobDetails(d) {
 
     if ($("orch-files-badge")) {
       $("orch-files-badge").textContent = `${files.length} FILE${files.length === 1 ? "" : "S"}`;
+    }
+
+    // Wire up Second-Opinion Audit button
+    const runAuditBtn = $("orch-run-audit-btn");
+    if (runAuditBtn) {
+      runAuditBtn.onclick = () => runIndependentAudit(d.id);
+    }
+
+    // Display Latest Auditor Report if one exists
+    const latestAuditMsg = [...messages].reverse().find(m => m.sender_role === "auditor");
+    const auditReportEl = $("orch-audit-report");
+    if (auditReportEl) {
+      if (latestAuditMsg) {
+        auditReportEl.classList.remove("hidden");
+        const verdictBadge = $("orch-audit-verdict-badge");
+        const isApproved = latestAuditMsg.action === "complete";
+        verdictBadge.className = `orch-status-badge ${isApproved ? "status-completed" : "status-waiting"}`;
+        verdictBadge.textContent = isApproved ? "✓ APPROVED BY AUDITOR" : "⚠ ISSUES FOUND & FIXED";
+
+        const provShort = providerCatalog[latestAuditMsg.provider]?.name || latestAuditMsg.provider;
+        $("orch-audit-model-title").textContent = `${provShort} · ${latestAuditMsg.model} (${latestAuditMsg.latency_ms || 0} ms)`;
+        $("orch-audit-summary").textContent = latestAuditMsg.completion_summary || "See full auditor report below.";
+        $("orch-audit-body").textContent = latestAuditMsg.content || "";
+
+        const applyAuditBtn = $("orch-apply-audit-btn");
+        if (applyAuditBtn) {
+          // Show "Apply Auditor's Corrected Files" whenever the auditor provided revised code
+          const hasCodeInAudit = latestAuditMsg.action === "revise" || latestAuditMsg.content.includes("=== FILE:") || latestAuditMsg.content.includes("```");
+          applyAuditBtn.classList.toggle("hidden", !hasCodeInAudit);
+          applyAuditBtn.onclick = () => applyAuditorFixes(d.id, latestAuditMsg.id);
+        }
+
+        const sendToWorkerBtn = $("orch-send-audit-worker-btn");
+        if (sendToWorkerBtn) {
+          sendToWorkerBtn.onclick = () => {
+            const summaryText = latestAuditMsg.completion_summary || latestAuditMsg.content;
+            if ($("orch-revision-input")) {
+              $("orch-revision-input").value = `Please fix all issues identified by the Independent Auditor (${latestAuditMsg.model}):\n${summaryText}`;
+              $("orch-revision-input").focus();
+              toast("Auditor findings copied into the revision box below — click Send Revision to AI Team");
+            }
+          };
+        }
+      } else {
+        auditReportEl.classList.add("hidden");
+      }
     }
 
     const explorerEl = $("orch-files-explorer");
@@ -1903,6 +1984,7 @@ function renderOrchJobDetails(d) {
       left.className = "orch-msg-sender";
       let roleTitle = "WORKER / DEVELOPER";
       if (m.sender_role === "coordinator") roleTitle = "COORDINATOR / ARCHITECT";
+      if (m.sender_role === "auditor") roleTitle = "INDEPENDENT AI AUDITOR";
       if (m.sender_role === "user") roleTitle = "WORKSPACE OWNER (USER REVISION)";
 
       const provShort = m.sender_role === "user"
@@ -1998,6 +2080,57 @@ function renderOrchJobDetails(d) {
   });
 }
 
+async function runIndependentAudit(jobId) {
+  const sel = $("orch-auditor-select");
+  const btn = $("orch-run-audit-btn");
+  if (!sel || !sel.value) {
+    toast("Please select an Auditor model first.");
+    return;
+  }
+  const [provider, model] = sel.value.split("::");
+  btn.disabled = true;
+  btn.textContent = `🔍 Auditing with ${model}…`;
+  toast(`Running independent audit with ${model}…`);
+
+  try {
+    await api(`/api/orchestration/jobs/${encodeURIComponent(jobId)}/audit`, {
+      method: "POST",
+      body: JSON.stringify({ provider, model })
+    });
+    toast("✓ Independent Second-Opinion Audit completed!");
+    await fetchAndRenderOrchJob(jobId);
+  } catch (err) {
+    toast("Audit failed: " + err.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "🔍 Audit Project Now";
+  }
+}
+
+async function applyAuditorFixes(jobId, messageId) {
+  const btn = $("orch-apply-audit-btn");
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = "Applying Fixes…";
+  }
+  try {
+    await api(`/api/orchestration/jobs/${encodeURIComponent(jobId)}/apply-audit`, {
+      method: "POST",
+      body: JSON.stringify({ message_id: messageId })
+    });
+    selectedDeliverableFileIdx = 0;
+    toast("✓ Auditor's corrected files applied to project!");
+    await fetchAndRenderOrchJob(jobId);
+  } catch (err) {
+    toast("Could not apply auditor fixes: " + err.message);
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = "✓ Apply Auditor's Corrected Files";
+    }
+  }
+}
+
 // Submit Human-in-the-Loop Revision Request
 if ($("orch-revision-form")) {
   $("orch-revision-form").addEventListener("submit", async e => {
@@ -2084,6 +2217,9 @@ function formatEventTypeLabel(evtType, phase) {
     revision_completed: "Worker Revision Completed",
     participant_fallback: "Automatic Model Failover",
     user_revision_requested: "User Revision Submitted",
+    audit_started: "Second-Opinion Audit Started",
+    audit_completed: "Second-Opinion Audit Completed",
+    audit_applied: "Auditor Fixes Applied",
     model_invoked: "Model Request Sent",
     model_responded: "Model Response Received",
     retry_scheduled: "Retry / Resume Scheduled",
