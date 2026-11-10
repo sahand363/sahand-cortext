@@ -160,14 +160,16 @@ func (s *Storage) ClaimNextJob(ctx context.Context, workerID string, leaseDurati
 	var prevStatus JobStatus
 	var isRecovery bool
 
-	// Select 1 eligible job: queued or expired lease
+	now := time.Now().UTC()
+
+	// Select 1 eligible job using parameterized 'now' for sub-second precision
 	err = tx.QueryRowContext(ctx, `
 		SELECT id, status, coalesce(claimed_by, '')
 		FROM orchestration_jobs
 		WHERE status = 'queued'
-		   OR (status IN ('running', 'waiting') AND lease_expires_at IS NOT NULL AND lease_expires_at < CURRENT_TIMESTAMP)
+		   OR (status IN ('running', 'waiting') AND lease_expires_at IS NOT NULL AND lease_expires_at < ?)
 		ORDER BY created_at ASC
-		LIMIT 1`).Scan(&jobID, &prevStatus, &prevWorker)
+		LIMIT 1`, now).Scan(&jobID, &prevStatus, &prevWorker)
 
 	if err == sql.ErrNoRows {
 		return nil, false, nil
@@ -180,7 +182,6 @@ func (s *Storage) ClaimNextJob(ctx context.Context, workerID string, leaseDurati
 		isRecovery = true
 	}
 
-	now := time.Now().UTC()
 	leaseEnd := now.Add(leaseDuration)
 
 	res, err := tx.ExecContext(ctx, `
@@ -190,8 +191,8 @@ func (s *Storage) ClaimNextJob(ctx context.Context, workerID string, leaseDurati
 		    lease_expires_at = ?,
 		    started_at = coalesce(started_at, ?),
 		    updated_at = ?
-		WHERE id = ?`,
-		workerID, leaseEnd, now, now, jobID)
+		WHERE id = ? AND (status = 'queued' OR lease_expires_at IS NULL OR lease_expires_at <= ?)`,
+		workerID, leaseEnd, now, now, jobID, now)
 	if err != nil {
 		return nil, false, err
 	}
