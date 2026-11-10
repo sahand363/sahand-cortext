@@ -69,11 +69,6 @@ func TruncateHistory(messages []provider.Message, cfg HistoryConfig) []provider.
 	}
 	filtered = filtered[cutIndex:]
 
-	// 3. Ensure conversation begins with a user turn
-	if len(filtered) > 0 && filtered[0].Role != "user" {
-		filtered = filtered[1:]
-	}
-
 	var result []provider.Message
 	if systemMsg != nil {
 		result = append(result, *systemMsg)
