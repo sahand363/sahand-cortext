@@ -132,7 +132,6 @@ function detectCodeLanguageAndFilename(code, hintLang, index) {
   const firstLines = trimmed.slice(0, 300);
   const h = (hintLang || "").toLowerCase().trim();
 
-  // Check if hintLang is already a filename like "main.go" or "install.sh"
   if (h.includes(".") && /^[a-z0-9_./-]+$/i.test(h)) {
     const ext = h.split(".").pop().toLowerCase();
     return {
@@ -244,7 +243,6 @@ function extractProjectFiles(rawText, jobId) {
         const code = (m[2] || "").trim();
         if (!code) return;
 
-        // Check if preceding line before the code fence named a file (e.g. "### `install.sh`" or "**main.go**")
         const before = body.slice(Math.max(0, m.index - 140), m.index);
         const nameMatch = before.match(/(?:###|\*\*|`|File:)\s*`?([a-zA-Z0-9_/-]+\.[a-zA-Z0-9]+)`?\**\s*$/i);
         const fileHint = nameMatch ? nameMatch[1] : hint;
@@ -253,7 +251,6 @@ function extractProjectFiles(rawText, jobId) {
         addUniqueFile(info.filename, code, info.ext, info.isHtml);
       });
 
-      // Also save the full raw instructions/markdown as README.md if there were multiple blocks or prose around them
       const withoutFences = body.replace(fenceRe, "").trim();
       if (withoutFences.length > 80 && !usedNames.has("README.md")) {
         addUniqueFile("README.md", body, "md", false);
@@ -267,11 +264,9 @@ function extractProjectFiles(rawText, jobId) {
     addUniqueFile(info.filename, body, info.ext, info.isHtml);
   }
 
-  // If a Go file is present without a go.mod, or if we want a quick-start README in the ZIP when multiple files exist
   const hasGo = files.some(f => f.ext === "go");
   const hasInstallSh = files.some(f => f.filename.endsWith(".sh"));
   if (hasGo && !hasInstallSh && files.length === 1) {
-    // Auto-generate a helper run.sh script in the package so the user can run or install it with 1 command on Ubuntu
     const goFile = files.find(f => f.ext === "go").filename;
     const runScript = `#!/usr/bin/env bash
 set -e
@@ -335,25 +330,23 @@ function buildZipBlob(files) {
     const crc = crc32Bytes(dataBytes);
     const size = dataBytes.length;
 
-    // Local file header (30 bytes + filename)
     const localHeader = new Uint8Array(30 + nameBytes.length);
     const lv = new DataView(localHeader.buffer);
-    lv.setUint32(0, 0x04034b50, true); // signature
-    lv.setUint16(4, 20, true);         // version needed
-    lv.setUint16(6, 0x0800, true);     // UTF-8 flag
-    lv.setUint16(8, 0, true);          // store (0 = uncompressed)
-    lv.setUint16(10, 0, true);         // mod time
-    lv.setUint16(12, 0, true);         // mod date
-    lv.setUint32(14, crc, true);       // crc32
-    lv.setUint32(18, size, true);      // compressed size
-    lv.setUint32(22, size, true);      // uncompressed size
+    lv.setUint32(0, 0x04034b50, true);
+    lv.setUint16(4, 20, true);
+    lv.setUint16(6, 0x0800, true);
+    lv.setUint16(8, 0, true);
+    lv.setUint16(10, 0, true);
+    lv.setUint16(12, 0, true);
+    lv.setUint32(14, crc, true);
+    lv.setUint32(18, size, true);
+    lv.setUint32(22, size, true);
     lv.setUint16(26, nameBytes.length, true);
     lv.setUint16(28, 0, true);
     localHeader.set(nameBytes, 30);
 
     localChunks.push(localHeader, dataBytes);
 
-    // Central directory header (46 bytes + filename)
     const centralHeader = new Uint8Array(46 + nameBytes.length);
     const cv = new DataView(centralHeader.buffer);
     cv.setUint32(0, 0x02014b50, true);
@@ -1681,13 +1674,14 @@ function renderOrchJobDetails(d) {
   // Calculate Collaboration Exchange Stats
   const coordMsgs = messages.filter(m => m.sender_role === "coordinator").length;
   const workerMsgs = messages.filter(m => m.sender_role === "worker").length;
-  const revisionsReq = messages.filter(m => m.sender_role === "coordinator" && m.action === "revise").length;
+  const userRevs = messages.filter(m => m.sender_role === "user").length;
+  const revisionsReq = messages.filter(m => (m.sender_role === "coordinator" || m.sender_role === "user") && m.action === "revise").length;
   const failoversCount = events.filter(e => e.event_type === "participant_fallback" || e.event_type === "retry_scheduled").length;
   const totalLatencyMs = messages.reduce((sum, m) => sum + (m.latency_ms || 0), 0);
 
   if ($("orch-stat-msgs")) {
     $("orch-stat-msgs").textContent = String(messages.length);
-    $("orch-stat-msgs-sub").textContent = `${coordMsgs} Coordinator · ${workerMsgs} Worker`;
+    $("orch-stat-msgs-sub").textContent = `${coordMsgs} Coord · ${workerMsgs} Worker${userRevs ? ` · ${userRevs} User` : ""}`;
     $("orch-stat-revisions").textContent = String(revisionsReq);
     $("orch-stat-revisions-sub").textContent = `Rounds active: ${d.current_round || 0} of ${d.max_rounds || 5}`;
     $("orch-stat-failovers").textContent = String(failoversCount);
@@ -1731,7 +1725,7 @@ function renderOrchJobDetails(d) {
       $("orch-active-subline").textContent = "Analyzing task and preparing instructions for Worker.";
     } else if (stage === "working") {
       $("orch-active-headline").textContent = `Worker (${workerPart ? `${providerCatalog[workerPart.provider]?.name || workerPart.provider} · ${workerPart.model}` : "Developer"}) is executing round ${d.current_round || 1}…`;
-      $("orch-active-subline").textContent = "Producing deliverable based on Coordinator instructions.";
+      $("orch-active-subline").textContent = "Producing deliverable based on Coordinator and User instructions.";
     } else if (stage === "reviewing") {
       $("orch-active-headline").textContent = `Coordinator (${coordPart ? `${providerCatalog[coordPart.provider]?.name || coordPart.provider} · ${coordPart.model}` : "Architect"}) is reviewing round ${d.current_round || 1}…`;
       $("orch-active-subline").textContent = "Evaluating Worker deliverable for completeness and accuracy.";
@@ -1780,7 +1774,6 @@ function renderOrchJobDetails(d) {
       $("orch-files-badge").textContent = `${files.length} FILE${files.length === 1 ? "" : "S"}`;
     }
 
-    // Render interactive file tabs
     const explorerEl = $("orch-files-explorer");
     const tabsEl = $("orch-files-tabs");
     if (explorerEl && tabsEl) {
@@ -1851,7 +1844,6 @@ function renderOrchJobDetails(d) {
       };
     }
 
-    // Live HTML Preview only when an actual standalone HTML file exists
     const htmlFile = activeFile.isHtml ? activeFile : files.find(f => f.isHtml);
     const prevBtn = $("orch-preview-toggle-btn");
     const prevWrap = $("orch-preview-wrap");
@@ -1881,6 +1873,12 @@ function renderOrchJobDetails(d) {
     finalCard.classList.add("hidden");
   }
 
+  // Show Human-in-the-Loop Revision Box whenever job is completed, failed, or cancelled
+  const revCard = $("orch-revision-card");
+  if (revCard) {
+    revCard.classList.toggle("hidden", isActive);
+  }
+
   // Render Collaboration Messages Transcript
   $("orch-msg-count").textContent = String(messages.length);
   const msgContainer = $("orch-messages-view");
@@ -1903,13 +1901,19 @@ function renderOrchJobDetails(d) {
 
       const left = document.createElement("div");
       left.className = "orch-msg-sender";
-      const roleTitle = m.sender_role === "coordinator" ? "COORDINATOR / ARCHITECT" : "WORKER / DEVELOPER";
-      const provShort = providerCatalog[m.provider]?.short || (m.provider || "").toUpperCase();
-      left.innerHTML = `<span class="orch-role-tag ${m.sender_role}">#${idx + 1} · ${roleTitle}</span> <b>${provShort} · ${m.model}</b>`;
+      let roleTitle = "WORKER / DEVELOPER";
+      if (m.sender_role === "coordinator") roleTitle = "COORDINATOR / ARCHITECT";
+      if (m.sender_role === "user") roleTitle = "WORKSPACE OWNER (USER REVISION)";
+
+      const provShort = m.sender_role === "user"
+        ? "HUMAN FEEDBACK"
+        : (providerCatalog[m.provider]?.short || (m.provider || "").toUpperCase());
+      const modelLabel = m.sender_role === "user" ? "Interactive Revision" : `${provShort} · ${m.model}`;
+      left.innerHTML = `<span class="orch-role-tag ${m.sender_role}">#${idx + 1} · ${roleTitle}</span> <b>${modelLabel}</b>`;
 
       const right = document.createElement("div");
       right.className = "orch-msg-meta";
-      right.innerHTML = `<span>Round ${m.round}</span> · <span class="action-tag action-${m.action}">Action: ${(m.action || "continue").toUpperCase()}</span> · <span>${m.latency_ms || 0} ms</span>`;
+      right.innerHTML = `<span>Round ${m.round}</span> · <span class="action-tag action-${m.action}">Action: ${(m.action || "continue").toUpperCase()}</span>${m.latency_ms ? ` · <span>${m.latency_ms} ms</span>` : ""}`;
 
       const copyTurnBtn = document.createElement("button");
       copyTurnBtn.type = "button";
@@ -1994,6 +1998,41 @@ function renderOrchJobDetails(d) {
   });
 }
 
+// Submit Human-in-the-Loop Revision Request
+if ($("orch-revision-form")) {
+  $("orch-revision-form").addEventListener("submit", async e => {
+    e.preventDefault();
+    if (!activeOrchJobId) return;
+    const input = $("orch-revision-input");
+    const instruction = input.value.trim();
+    if (!instruction) return;
+
+    const btn = $("orch-revision-submit");
+    btn.disabled = true;
+    btn.textContent = "Sending to AI Team…";
+
+    try {
+      await api(`/api/orchestration/jobs/${encodeURIComponent(activeOrchJobId)}/iterate`, {
+        method: "POST",
+        body: JSON.stringify({
+          instruction,
+          extra_rounds: 3,
+          extra_calls: 8
+        })
+      });
+      input.value = "";
+      toast("✓ Revision sent! AI team is updating your project…");
+      await loadOrchJobsList();
+      await fetchAndRenderOrchJob(activeOrchJobId);
+    } catch (err) {
+      toast("Revision error: " + err.message);
+    } finally {
+      btn.disabled = false;
+      btn.innerHTML = 'Send Revision to AI Team <span>↗</span>';
+    }
+  });
+}
+
 async function retryOrchJob(jobId) {
   const btn = $("orch-retry-btn");
   if (btn) {
@@ -2044,6 +2083,7 @@ function formatEventTypeLabel(evtType, phase) {
     revision_requested: "Revision Requested",
     revision_completed: "Worker Revision Completed",
     participant_fallback: "Automatic Model Failover",
+    user_revision_requested: "User Revision Submitted",
     model_invoked: "Model Request Sent",
     model_responded: "Model Response Received",
     retry_scheduled: "Retry / Resume Scheduled",
