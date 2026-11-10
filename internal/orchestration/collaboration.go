@@ -136,6 +136,7 @@ func boolOpt(ptr *bool, defaultVal bool) bool {
 }
 
 // ProcessJob implements the JobProcessor interface for WorkerPool.
+// It supports both crash recovery and interactive human-in-the-loop revisions.
 func (e *CollaborationEngine) ProcessJob(ctx context.Context, job *Job, helper ExecutionHelper) (string, error) {
 	if e.checkCancelled(ctx, job.ID, helper) {
 		return "", ErrJobCancelled
@@ -209,7 +210,11 @@ func (e *CollaborationEngine) ProcessJob(ctx context.Context, job *Job, helper E
 
 	var currentPlan string
 	var latestWorkerResult string
+	var completedFinalResult string
+	isCurrentlyComplete := false
 
+	// Chronologically reconstruct state; if a User Revision message appears AFTER a previous completion,
+	// isCurrentlyComplete resets to false so the team executes the new user revision!
 	for i, m := range history {
 		if i == 0 && m.SenderRole == RoleCoordinator {
 			currentPlan = m.Content
@@ -218,22 +223,36 @@ func (e *CollaborationEngine) ProcessJob(ctx context.Context, job *Job, helper E
 				if strings.TrimSpace(finalOut) == "" {
 					finalOut = m.Content
 				}
-				return finalOut, nil
+				completedFinalResult = finalOut
+				isCurrentlyComplete = true
 			}
 		}
 		if m.SenderRole == RoleWorker {
 			latestWorkerResult = m.Content
+			isCurrentlyComplete = false
 		}
-		if i > 0 && m.SenderRole == RoleCoordinator && m.Action == ActionComplete {
-			finalResult := latestWorkerResult
-			if strings.TrimSpace(m.CompletionSummary) != "" {
-				finalResult = fmt.Sprintf("%s\n\n---\n### Coordinator Completion Summary\n%s", latestWorkerResult, strings.TrimSpace(m.CompletionSummary))
+		if m.SenderRole == RoleUser {
+			isCurrentlyComplete = false
+		}
+		if i > 0 && m.SenderRole == RoleCoordinator {
+			if m.Action == ActionComplete {
+				finalResult := latestWorkerResult
+				if strings.TrimSpace(m.CompletionSummary) != "" {
+					finalResult = fmt.Sprintf("%s\n\n---\n### Coordinator Completion Summary\n%s", latestWorkerResult, strings.TrimSpace(m.CompletionSummary))
+				}
+				completedFinalResult = finalResult
+				isCurrentlyComplete = true
+			} else {
+				isCurrentlyComplete = false
 			}
-			return finalResult, nil
 		}
 	}
 
-	// Step 1: Coordinator creates the implementation plan (with optional failover)
+	if isCurrentlyComplete && completedFinalResult != "" {
+		return completedFinalResult, nil
+	}
+
+	// Step 1: Coordinator creates the implementation plan (if not already present)
 	if currentPlan == "" {
 		if e.checkCancelled(ctx, job.ID, helper) {
 			return "", ErrJobCancelled
@@ -681,6 +700,15 @@ func marshalPayload(v any) string {
 	return string(b)
 }
 
+func latestUserRevisionFromHistory(history []CollaborationMessage) string {
+	for i := len(history) - 1; i >= 0; i-- {
+		if history[i].SenderRole == RoleUser {
+			return history[i].Content
+		}
+	}
+	return ""
+}
+
 // BuildCoordinatorPlanContext constructs the bounded context for the Coordinator's initial plan
 func BuildCoordinatorPlanContext(task string, coordinator Participant, maxChars int) []provider.Message {
 	baseSys := strings.TrimSpace(coordinator.SystemPrompt)
@@ -726,11 +754,11 @@ func BuildWorkerExecutionContext(task, plan string, history []CollaborationMessa
 	sysPrompt := baseSys + `
 
 Your responsibilities:
-1. Follow the Coordinator's implementation plan and review instructions carefully.
-2. Produce complete, working, self-contained deliverables with zero placeholders or "// TODO" comments.
+1. Follow the Coordinator's implementation plan, review instructions, and any direct User Revision Requests carefully.
+2. Produce complete, working, self-contained deliverables with zero placeholders or "// TODO" comments. Never omit unchanged files—always output the complete set of project files so the user's ZIP download has everything needed.
 3. MULTI-FILE PACKAGING RULE: Whenever your deliverable consists of one or more code/project files (for example: main.go, go.mod, index.html, install.sh, README.md), prefix EACH file clearly on its own line inside your "message" using this exact header format:
 === FILE: path/to/filename.ext ===
-followed by the complete code for that file. This allows Sahand Cortex to package your files into a downloadable ZIP archive and individual file downloads for the user.
+followed by the complete code for that file.
 4. For HTML/JS/CSS tasks, ensure all JavaScript functions initialize properly on load, use valid standard APIs (e.g. valid IANA timezone strings like "Asia/Tehran", "America/Chicago", "Europe/Dublin" in Intl.DateTimeFormat), and have no syntax or runtime errors.
 5. Respond using ONLY valid JSON matching this schema:
 {
@@ -739,8 +767,8 @@ followed by the complete code for that file. This allows Sahand Cortex to packag
   "completion_summary": "Brief summary of the files and features you produced or revised"
 }`
 
-	taskBudget := maxChars / 4
-	planBudget := maxChars / 4
+	taskBudget := maxChars / 5
+	planBudget := maxChars / 5
 	historyBudget := maxChars - taskBudget - planBudget
 
 	var sb strings.Builder
@@ -751,7 +779,10 @@ followed by the complete code for that file. This allows Sahand Cortex to packag
 		sb.WriteString(formatBoundedHistory(history, historyBudget))
 	}
 
-	if round > 1 {
+	latestUserRev := latestUserRevisionFromHistory(history)
+	if latestUserRev != "" {
+		sb.WriteString(fmt.Sprintf("\n### IMPORTANT — LATEST USER REVISION REQUEST:\n%s\n\nApply the user's requested changes above to the project while keeping all existing working functionality intact. Output all project files in full using === FILE: filename === headers in the required JSON format.", latestUserRev))
+	} else if round > 1 {
 		sb.WriteString("\nAddress all revision requests from the Coordinator's latest review and provide the complete updated deliverable (including all === FILE: filename === sections) in the required JSON format.")
 	} else {
 		sb.WriteString("\nExecute the Coordinator's plan now and provide your complete result in the required JSON format.")
@@ -776,14 +807,14 @@ func BuildCoordinatorReviewContext(task, plan, latestWorkerResult string, histor
 	sysPrompt := baseSys + `
 
 Your responsibilities:
-1. Strictly audit the Worker's deliverable against the original user task and your implementation plan.
+1. Strictly audit the Worker's deliverable against the original user task, your implementation plan, and any User Revision Requests.
 2. Verify that ALL required project files requested by the user (e.g., backend code, frontend UI, install.sh / setup script if requested) are included and properly formatted with === FILE: filename === headers when multiple files are needed.
 3. If the deliverable contains code (HTML, JavaScript, Go, Python, Bash, etc.), mentally trace the execution from start to finish:
    - Check that all scripts actually run on load and update the DOM or terminal.
    - Check that API parameters (such as IANA timezones in Intl.DateTimeFormat, DOM IDs, variables, and event listeners) are 100% valid and will not throw runtime exceptions or leave placeholders like "--:--:--".
    - Check that the code is complete and not truncated.
-4. If you find ANY bug, missing file, missing installer script, broken logic, or invalid parameter, you MUST set "action": "revise" and explain the exact fix needed.
-5. Only set "action": "complete" when all required files and features are verified working and complete.
+4. If you find ANY bug, unfulfilled user revision request, missing file, or broken logic, you MUST set "action": "revise" and explain the exact fix needed.
+5. Only set "action": "complete" when all required files, user revisions, and features are verified working and complete.
 6. Respond using ONLY valid JSON matching this schema:
 {
   "action": "complete | revise | continue",
@@ -803,8 +834,12 @@ Your responsibilities:
 		sb.WriteString(formatBoundedHistory(history[:len(history)-1], historyBudget))
 		sb.WriteString("\n")
 	}
+	latestUserRev := latestUserRevisionFromHistory(history)
+	if latestUserRev != "" {
+		sb.WriteString(fmt.Sprintf("### Latest User Revision Request:\n%s\n\n", latestUserRev))
+	}
 	sb.WriteString(fmt.Sprintf("### Latest Worker Result (Round %d of %d):\n%s\n\n", round, maxRounds, truncateText(latestWorkerResult, workerBudget)))
-	sb.WriteString("Audit the Worker's deliverable carefully and respond with your decision in the required JSON format.")
+	sb.WriteString("Audit the Worker's deliverable carefully (ensuring any User Revision Request has been completely fulfilled) and respond with your decision in the required JSON format.")
 
 	return []provider.Message{
 		{Role: "system", Content: sysPrompt},
