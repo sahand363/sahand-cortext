@@ -877,3 +877,53 @@ footer b{margin-left:auto;font-weight:500;letter-spacing:1px}
   footer{padding:0 16px;font-size:10px}
   .auth-card{padding:32px}
 }
+
+
+
+
+.orch-options-box{
+  border:1px solid #263040;
+  background:#131924;
+  border-radius:11px;
+  padding:15px 18px;
+  margin-bottom:20px;
+  display:grid;
+  gap:12px;
+}
+.orch-options-title{
+  font-size:11.5px;
+  font-weight:700;
+  letter-spacing:1.3px;
+  color:#8f9bad;
+  margin-bottom:2px;
+}
+.orch-check-row{
+  display:flex;
+  align-items:flex-start;
+  gap:12px;
+  cursor:pointer;
+  user-select:none;
+}
+.orch-check-row input{
+  width:18px;
+  height:18px;
+  margin-top:3px;
+  accent-color:var(--lime);
+  cursor:pointer;
+  flex:none;
+}
+.orch-check-row b{
+  display:block;
+  font-size:14px;
+  color:#e5ebf5;
+}
+.orch-check-row small{
+  display:block;
+  font-size:12.5px;
+  color:#828ea2;
+  margin-top:2px;
+}
+.evt-participant_fallback .orch-event-dot{
+  background:#8be9fd;
+  box-shadow:0 0 8px #8be9fd;
+}
