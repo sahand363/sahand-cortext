@@ -983,3 +983,151 @@ func extractJSONCandidates(s string) []string {
 
 	return out
 }
+
+
+// AuditDeliverable runs an on-demand Independent Second-Opinion Audit using the user-selected provider & model
+func (e *CollaborationEngine) AuditDeliverable(ctx context.Context, jobID, providerID, modelID string) (*CollaborationMessage, error) {
+	if e.router == nil {
+		return nil, errors.New("provider router is not initialized")
+	}
+	normProv := provider.NormalizeProvider(providerID)
+	modelID = strings.TrimSpace(modelID)
+	if modelID == "" {
+		return nil, errors.New("auditor model ID is required")
+	}
+	key := strings.TrimSpace(e.keyResolver(normProv))
+	if key == "" {
+		return nil, fmt.Errorf("missing API key for auditor provider %s", provider.ProviderLabel(normProv))
+	}
+
+	job, err := e.storage.GetJob(ctx, jobID)
+	if err != nil {
+		return nil, err
+	}
+	history, err := e.storage.GetCollaborationMessages(ctx, jobID)
+	if err != nil {
+		return nil, err
+	}
+
+	var plan string
+	var deliverable string
+	for i, m := range history {
+		if i == 0 && m.SenderRole == RoleCoordinator {
+			plan = m.Content
+		}
+		if m.SenderRole == RoleWorker {
+			deliverable = m.Content
+		}
+	}
+	if strings.TrimSpace(job.ExecutionResult) != "" {
+		deliverable = job.ExecutionResult
+		if idx := strings.Index(deliverable, "\n---\n### Coordinator Completion Summary"); idx != -1 {
+			deliverable = strings.TrimSpace(deliverable[:idx])
+		}
+	}
+	if strings.TrimSpace(deliverable) == "" {
+		return nil, errors.New("no deliverable found to audit yet")
+	}
+
+	_ = e.storage.RecordEvent(ctx, jobID, EventAuditStarted, "auditing", "auditor",
+		fmt.Sprintf("Independent Second-Opinion Audit started with %s / %s", normProv, modelID),
+		marshalPayload(map[string]any{"provider": normProv, "model": modelID}))
+
+	promptMsgs := BuildIndependentAuditContext(job.Task, plan, deliverable, e.config.MaxContextChars)
+
+	callCtx, cancel := context.WithTimeout(ctx, e.config.CallTimeout)
+	defer cancel()
+
+	rawReply, latency, err := e.router.Call(callCtx, normProv, key, modelID, promptMsgs, provider.CallOpts{})
+	if err != nil {
+		_ = e.storage.RecordEvent(ctx, jobID, EventStepProgress, "auditing", "auditor",
+			fmt.Sprintf("Independent Audit failed on %s/%s: %v", normProv, modelID, err), "{}")
+		return nil, err
+	}
+
+	parsed := ParseStructuredResponse(rawReply, ActionComplete)
+	nextTurn := len(history) + 1
+	round := job.CurrentRound
+	if round <= 0 {
+		round = 1
+	}
+
+	savedMsg, err := e.storage.SaveCollaborationMessage(ctx, CollaborationMessage{
+		JobID:             jobID,
+		Round:             round,
+		TurnIndex:         nextTurn,
+		SenderRole:        RoleAuditor,
+		SenderName:        "Independent AI Auditor",
+		Provider:          normProv,
+		Model:             modelID,
+		Action:            parsed.Action,
+		Content:           parsed.Message,
+		CompletionSummary: parsed.CompletionSummary,
+		RawResponse:       rawReply,
+		LatencyMs:         latency,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	verdictLabel := "APPROVED (No critical bugs found)"
+	if parsed.Action == ActionRevise {
+		verdictLabel = "ISSUES FOUND (Fixes provided)"
+	}
+
+	_ = e.storage.RecordEvent(ctx, jobID, EventAuditCompleted, "auditing", "auditor",
+		fmt.Sprintf("Independent Auditor (%s/%s) finished in %d ms — Verdict: %s", normProv, modelID, latency, verdictLabel),
+		marshalPayload(map[string]any{
+			"provider":           normProv,
+			"model":              modelID,
+			"action":             parsed.Action,
+			"latency_ms":         latency,
+			"completion_summary": parsed.CompletionSummary,
+		}))
+
+	return savedMsg, nil
+}
+
+// BuildIndependentAuditContext builds the prompt for the Independent Senior Code Reviewer / Auditor
+func BuildIndependentAuditContext(task, plan, deliverable string, maxChars int) []provider.Message {
+	if maxChars <= 0 {
+		maxChars = 28000
+	}
+	sysPrompt := `You are an independent Senior Code Reviewer and Security/Quality Auditor in Sahand Cortex.
+Your job is to perform a rigorous second-opinion audit of the project files produced by the primary AI team.
+
+Audit Checklist:
+1. Runtime Bugs & Initialization: Verify that all functions, event listeners, timers, and DOM selectors initialize and run without errors.
+2. Valid Constants & APIs: Check for invalid timezone strings (must be valid IANA IDs like "Asia/Tehran", "America/Chicago", "Europe/Dublin"), broken imports, or undefined variables.
+3. Completeness & Multi-File Packaging: Verify that every file required by the user's task (e.g., Go backend, HTML/JS frontend, install.sh script) is complete with zero placeholders or "// TODO" comments.
+4. Security & Edge Cases: Check for obvious command injection, broken error handling, or race conditions.
+
+How to Respond:
+- Respond using ONLY valid JSON matching this schema:
+{
+  "action": "complete | revise",
+  "message": "...",
+  "completion_summary": "..."
+}
+- Set "action": "complete" if the project is 100% solid and ready for production. Put your detailed verification notes in "message" and a brief summary in "completion_summary".
+- Set "action": "revise" if you find ANY bugs, missing files, or improvements needed. In "completion_summary", list the exact bugs you found and fixed. In "message", output the COMPLETE corrected project files using the exact header format:
+=== FILE: path/to/filename.ext ===
+followed by the full corrected code for each file, so the user can apply your fixed files with one click.`
+
+	taskBudget := maxChars / 5
+	planBudget := maxChars / 5
+	delivBudget := maxChars - taskBudget - planBudget
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("### Original User Task:\n%s\n\n", truncateText(task, taskBudget)))
+	if strings.TrimSpace(plan) != "" {
+		sb.WriteString(fmt.Sprintf("### Architectural Plan:\n%s\n\n", truncateText(plan, planBudget)))
+	}
+	sb.WriteString(fmt.Sprintf("### Project Deliverable Files to Audit:\n%s\n\n", truncateText(deliverable, delivBudget)))
+	sb.WriteString("Perform your independent audit now and return your JSON report (including complete corrected === FILE: ... === blocks in 'message' if any fixes are needed).")
+
+	return []provider.Message{
+		{Role: "system", Content: sysPrompt},
+		{Role: "user", Content: sb.String()},
+	}
+}
