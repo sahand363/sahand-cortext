@@ -3,10 +3,21 @@ let currentSession = null, toastTimer, deleteConfirmTimer;
 let sessionsCache = [];
 
 let selectedProvider = "gemini"; // currently viewed tab in Settings / Models
-let activeProvider = "gemini";   // active provider used for Chat
+let activeProvider = "gemini";   // active provider used for Ordinary Chat
 let activeModel = "gemini-2.0-flash";
-let freeOnlyOpenRouter = true;   // default to showing :free models first on OpenRouter
+let freeOnlyOpenRouter = true;
 let deleteArmed = false;
+
+// Orchestration State
+let orchParticipantsDraft = [
+  { role: "coordinator", name: "Coordinator / Architect", provider: "gemini", model: "gemini-2.0-flash" },
+  { role: "worker", name: "Worker / Developer", provider: "gemini", model: "gemini-2.0-flash" }
+];
+let orchJobsCache = [];
+let activeOrchJobId = localStorage.getItem("cortext_active_orch_job") || null;
+let orchPollTimer = null;
+let orchActiveSubView = "messages"; // "messages" or "events"
+let orchSubmitting = false;
 
 const providerCatalog = {
   gemini: {
@@ -67,6 +78,11 @@ async function api(url, opts = {}) {
   });
   let d = {};
   try { d = await r.json(); } catch {}
+  if (r.status === 401 && url !== "/api/login") {
+    stopOrchPolling();
+    showLogin();
+    throw new Error(d.error || "Session expired. Please sign in again.");
+  }
   if (!r.ok) throw new Error(d.error || "Request failed");
   return d;
 }
@@ -96,9 +112,14 @@ async function checkAuth() {
     applyStatus(s);
     await loadSessions();
     await loadAllConfiguredModels();
+    await loadOrchJobsList();
     if (!s.any_configured) {
       $("setup-banner").classList.remove("hidden");
       showSetupNudge();
+    }
+    const savedPage = localStorage.getItem("cortext_active_page");
+    if (savedPage && pageNames[savedPage]) {
+      switchPage(savedPage);
     }
   } catch {
     showLogin();
@@ -234,6 +255,7 @@ $("login-form").addEventListener("submit", async e => {
 });
 
 $("logout").onclick = async () => {
+  stopOrchPolling();
   try { await api("/api/logout", { method: "POST" }); } finally { showLogin(); }
 };
 
@@ -256,7 +278,6 @@ async function loadSessions() {
   $("chat-count").textContent = String(sessionsCache.length).padStart(2, "0");
 
   sessionsCache.forEach(s => {
-    // Sidebar row with hover quick actions (Pin, Rename, Delete)
     const row = document.createElement("div");
     row.className = "session-row" + (s.id === currentSession ? " active" : "");
 
@@ -311,7 +332,6 @@ async function loadSessions() {
     row.append(openBtn, actions);
     $("session-list").appendChild(row);
 
-    // Sessions Page Card
     const card = document.createElement("div");
     card.className = "session-card" + (s.pinned ? " is-pinned" : "");
 
@@ -549,15 +569,22 @@ $("message-input").addEventListener("keydown", e => {
 });
 
 function switchPage(name) {
+  localStorage.setItem("cortext_active_page", name);
   document.querySelectorAll(".page").forEach(p => p.classList.add("hidden"));
   $("page-" + name).classList.remove("hidden");
   document.querySelectorAll(".nav-link").forEach(b => b.classList.toggle("active", b.dataset.page === name));
   $("breadcrumb-page").textContent = pageNames[name];
   $("sidebar").classList.remove("open");
+
   if (name === "sessions") loadSessions();
   if (name === "settings" || name === "models") {
     refreshStatus();
     switchProviderTab(selectedProvider);
+  }
+  if (name === "orchestration") {
+    initOrchestrationPage();
+  } else {
+    stopOrchPolling();
   }
 }
 
@@ -580,6 +607,7 @@ async function loadAllConfiguredModels() {
   }
   syncModelDropdown();
   renderModelGrids();
+  ensureDefaultOrchParticipants();
 }
 
 async function loadProviderModels(provider, showToastMsg = false) {
@@ -788,6 +816,7 @@ async function testSingleModel(provider, modelId, setActive = true) {
   }
   syncModelDropdown();
   renderModelGrids();
+  renderOrchParticipantsBuilder();
 }
 
 async function testShownModels() {
@@ -837,6 +866,7 @@ $("api-key-form").addEventListener("submit", async e => {
     updateProviderBadges();
     syncModelDropdown();
     renderModelGrids();
+    ensureDefaultOrchParticipants();
     $("setup-banner").classList.add("hidden");
 
     fb.className = "key-feedback ok";
@@ -868,12 +898,689 @@ document.querySelectorAll(".settings-tab").forEach(b => b.onclick = () => {
   $(b.dataset.tab).classList.remove("hidden");
 });
 
+/* ============================================================================
+   PHASE 3.3 — AI ORCHESTRATION FRONTEND INTEGRATION
+   ============================================================================ */
+
+function getConfiguredProvidersList() {
+  return ["gemini", "openrouter", "codecraft"].filter(p => providerState[p].configured);
+}
+
+function getDefaultModelForProvider(p) {
+  const models = providerState[p]?.models || [];
+  const working = models.find(m => m.status === "working");
+  if (working) return working.id;
+  if (p === "openrouter") {
+    const free = models.find(m => m.is_free);
+    if (free) return free.id;
+  }
+  if (models.length > 0) return models[0].id;
+  return p === "gemini" ? "gemini-2.0-flash" : "";
+}
+
+function ensureDefaultOrchParticipants() {
+  const configured = getConfiguredProvidersList();
+  const fallbackProv = configured[0] || activeProvider || "gemini";
+  const fallbackMod = getDefaultModelForProvider(fallbackProv) || activeModel || "gemini-2.0-flash";
+
+  orchParticipantsDraft.forEach(p => {
+    if (!providerState[p.provider]?.configured && configured.length > 0) {
+      p.provider = fallbackProv;
+      p.model = fallbackMod;
+    } else if (!p.model) {
+      p.model = getDefaultModelForProvider(p.provider) || fallbackMod;
+    }
+  });
+}
+
+async function initOrchestrationPage() {
+  ensureDefaultOrchParticipants();
+  renderOrchParticipantsBuilder();
+  await loadOrchJobsList();
+
+  if (activeOrchJobId) {
+    await openOrchJobMonitor(activeOrchJobId);
+  } else {
+    showOrchBuilder();
+  }
+}
+
+function showOrchBuilder() {
+  stopOrchPolling();
+  activeOrchJobId = null;
+  localStorage.removeItem("cortext_active_orch_job");
+  $("orch-monitor-panel").classList.add("hidden");
+  $("orch-builder-panel").classList.remove("hidden");
+  renderOrchParticipantsBuilder();
+  highlightActiveOrchJobCard();
+}
+
+function renderOrchParticipantsBuilder() {
+  const container = $("orch-participants-list");
+  if (!container) return;
+  container.innerHTML = "";
+
+  orchParticipantsDraft.forEach((part, idx) => {
+    const row = document.createElement("div");
+    row.className = "orch-participant-card";
+
+    // Order badge & Role selector
+    const topBar = document.createElement("div");
+    topBar.className = "orch-part-top";
+
+    const stepBadge = document.createElement("span");
+    stepBadge.className = "orch-step-num";
+    stepBadge.textContent = `#${idx + 1}`;
+
+    const roleSelect = document.createElement("select");
+    roleSelect.className = "orch-role-select";
+    [
+      { value: "coordinator", label: "Coordinator / Architect" },
+      { value: "worker", label: "Worker / Developer" }
+    ].forEach(r => {
+      const opt = document.createElement("option");
+      opt.value = r.value;
+      opt.textContent = r.label;
+      if (part.role === r.value) opt.selected = true;
+      roleSelect.appendChild(opt);
+    });
+    roleSelect.onchange = () => {
+      part.role = roleSelect.value;
+      part.name = roleSelect.value === "coordinator" ? "Coordinator / Architect" : "Worker / Developer";
+    };
+
+    const orderBtns = document.createElement("div");
+    orderBtns.className = "orch-part-controls";
+
+    const upBtn = document.createElement("button");
+    upBtn.type = "button";
+    upBtn.className = "mini-act";
+    upBtn.title = "Move up";
+    upBtn.textContent = "↑";
+    upBtn.disabled = idx === 0;
+    upBtn.onclick = () => {
+      if (idx > 0) {
+        const tmp = orchParticipantsDraft[idx - 1];
+        orchParticipantsDraft[idx - 1] = orchParticipantsDraft[idx];
+        orchParticipantsDraft[idx] = tmp;
+        renderOrchParticipantsBuilder();
+      }
+    };
+
+    const downBtn = document.createElement("button");
+    downBtn.type = "button";
+    downBtn.className = "mini-act";
+    downBtn.title = "Move down";
+    downBtn.textContent = "↓";
+    downBtn.disabled = idx === orchParticipantsDraft.length - 1;
+    downBtn.onclick = () => {
+      if (idx < orchParticipantsDraft.length - 1) {
+        const tmp = orchParticipantsDraft[idx + 1];
+        orchParticipantsDraft[idx + 1] = orchParticipantsDraft[idx];
+        orchParticipantsDraft[idx] = tmp;
+        renderOrchParticipantsBuilder();
+      }
+    };
+
+    orderBtns.append(upBtn, downBtn);
+
+    if (orchParticipantsDraft.length > 2) {
+      const rmBtn = document.createElement("button");
+      rmBtn.type = "button";
+      rmBtn.className = "mini-act danger";
+      rmBtn.title = "Remove participant";
+      rmBtn.textContent = "×";
+      rmBtn.onclick = () => {
+        orchParticipantsDraft.splice(idx, 1);
+        renderOrchParticipantsBuilder();
+      };
+      orderBtns.appendChild(rmBtn);
+    }
+
+    topBar.append(stepBadge, roleSelect, orderBtns);
+
+    // Provider & Model selectors
+    const gridRow = document.createElement("div");
+    gridRow.className = "orch-part-grid";
+
+    const provWrap = document.createElement("label");
+    provWrap.innerHTML = `<span>Provider</span>`;
+    const provSelect = document.createElement("select");
+    ["gemini", "openrouter", "codecraft"].forEach(p => {
+      const opt = document.createElement("option");
+      opt.value = p;
+      const isCfg = providerState[p].configured;
+      opt.textContent = `${providerCatalog[p].name}${isCfg ? " (Connected)" : " (Needs API Key)"}`;
+      if (part.provider === p) opt.selected = true;
+      provSelect.appendChild(opt);
+    });
+
+    const modWrap = document.createElement("label");
+    modWrap.innerHTML = `<span>Model</span>`;
+    const modSelect = document.createElement("select");
+
+    function populateModelsForPart() {
+      modSelect.innerHTML = "";
+      const p = part.provider;
+      const list = providerState[p]?.models || [];
+      if (!list.length) {
+        const fallbackOpt = document.createElement("option");
+        fallbackOpt.value = part.model || "";
+        fallbackOpt.textContent = part.model ? `${part.model} (Configure key in Settings)` : "No models loaded — configure provider";
+        modSelect.appendChild(fallbackOpt);
+        return;
+      }
+
+      const working = list.filter(m => m.status === "working");
+      const others = p === "openrouter"
+        ? list.filter((m, i) => m.status !== "working" && (m.is_free || i < 40))
+        : list.filter(m => m.status !== "working");
+
+      if (working.length) {
+        const grpW = document.createElement("optgroup");
+        grpW.label = "★ Verified Working";
+        working.forEach(m => {
+          const o = document.createElement("option");
+          o.value = m.id;
+          o.textContent = `✓ ${m.display_name} (${m.id})`;
+          grpW.appendChild(o);
+        });
+        modSelect.appendChild(grpW);
+      }
+
+      if (others.length) {
+        const grpO = document.createElement("optgroup");
+        grpO.label = "Available Models";
+        others.forEach(m => {
+          const o = document.createElement("option");
+          o.value = m.id;
+          const freeTag = (p === "openrouter" && m.is_free) ? " [FREE]" : "";
+          o.textContent = `${m.display_name}${freeTag} (${m.id})`;
+          grpO.appendChild(o);
+        });
+        modSelect.appendChild(grpO);
+      }
+
+      if ([...modSelect.options].some(o => o.value === part.model)) {
+        modSelect.value = part.model;
+      } else if (modSelect.options.length > 0) {
+        part.model = modSelect.options[0].value;
+        modSelect.value = part.model;
+      }
+    }
+
+    provSelect.onchange = () => {
+      part.provider = provSelect.value;
+      part.model = getDefaultModelForProvider(part.provider);
+      populateModelsForPart();
+    };
+    modSelect.onchange = () => {
+      part.model = modSelect.value;
+    };
+
+    populateModelsForPart();
+    provWrap.appendChild(provSelect);
+    modWrap.appendChild(modSelect);
+    gridRow.append(provWrap, modWrap);
+
+    row.append(topBar, gridRow);
+    container.appendChild(row);
+  });
+}
+
+$("orch-add-participant").onclick = () => {
+  const configured = getConfiguredProvidersList();
+  const defProv = configured[0] || activeProvider || "gemini";
+  const defMod = getDefaultModelForProvider(defProv) || activeModel || "gemini-2.0-flash";
+  orchParticipantsDraft.push({
+    role: "worker",
+    name: "Worker / Developer",
+    provider: defProv,
+    model: defMod
+  });
+  renderOrchParticipantsBuilder();
+};
+
+$("orch-new-task-btn").onclick = () => showOrchBuilder();
+$("orch-back-builder-btn").onclick = () => showOrchBuilder();
+$("orch-refresh-btn").onclick = async () => {
+  await loadOrchJobsList();
+  if (activeOrchJobId) await fetchAndRenderOrchJob(activeOrchJobId);
+  toast("Orchestration state refreshed");
+};
+
+// Switch between Collaboration Transcript and Live Progress Timeline
+document.querySelectorAll(".orch-view-tab").forEach(btn => {
+  btn.onclick = () => {
+    orchActiveSubView = btn.dataset.orchview;
+    document.querySelectorAll(".orch-view-tab").forEach(b => b.classList.toggle("active", b === btn));
+    $("orch-messages-view").classList.toggle("hidden", orchActiveSubView !== "messages");
+    $("orch-events-view").classList.toggle("hidden", orchActiveSubView !== "events");
+  };
+});
+
+// Submit New Collaboration Job
+$("orch-create-form").addEventListener("submit", async e => {
+  e.preventDefault();
+  if (orchSubmitting) return;
+
+  const errBanner = $("orch-form-error");
+  errBanner.classList.add("hidden");
+  errBanner.textContent = "";
+
+  const task = $("orch-task-input").value.trim();
+  if (!task) {
+    errBanner.textContent = "Please enter a task or objective for the models to collaborate on.";
+    errBanner.classList.remove("hidden");
+    return;
+  }
+
+  if (orchParticipantsDraft.length < 2) {
+    errBanner.textContent = "At least two participants are required for collaboration.";
+    errBanner.classList.remove("hidden");
+    return;
+  }
+
+  const hasCoord = orchParticipantsDraft.some(p => p.role === "coordinator");
+  const hasWorker = orchParticipantsDraft.some(p => p.role === "worker");
+  if (!hasCoord || !hasWorker) {
+    errBanner.textContent = "Please assign at least one Coordinator / Architect and one Worker / Developer.";
+    errBanner.classList.remove("hidden");
+    return;
+  }
+
+  for (let i = 0; i < orchParticipantsDraft.length; i++) {
+    const p = orchParticipantsDraft[i];
+    if (!providerState[p.provider]?.configured) {
+      errBanner.textContent = `Participant #${i + 1} uses ${providerCatalog[p.provider]?.name || p.provider}, which does not have a saved API key yet. Configure it in Settings first.`;
+      errBanner.classList.remove("hidden");
+      return;
+    }
+    if (!p.model || !p.model.trim()) {
+      errBanner.textContent = `Please select a valid model for Participant #${i + 1}.`;
+      errBanner.classList.remove("hidden");
+      return;
+    }
+  }
+
+  const maxRounds = parseInt($("orch-max-rounds").value, 10) || 5;
+  const maxCalls = parseInt($("orch-max-calls").value, 10) || 12;
+
+  orchSubmitting = true;
+  const submitBtn = $("orch-submit-btn");
+  submitBtn.disabled = true;
+  submitBtn.textContent = "Starting Collaboration…";
+
+  try {
+    const createdJob = await api("/api/orchestration/jobs", {
+      method: "POST",
+      body: JSON.stringify({
+        task,
+        max_rounds: maxRounds,
+        max_calls: maxCalls,
+        participants: orchParticipantsDraft.map((p, idx) => ({
+          role: p.role,
+          name: p.role === "coordinator" ? "Coordinator / Architect" : "Worker / Developer",
+          provider: p.provider,
+          model: p.model,
+          sort_order: idx
+        }))
+      })
+    });
+
+    $("orch-task-input").value = "";
+    toast("Collaboration task started in background");
+    await loadOrchJobsList();
+    await openOrchJobMonitor(createdJob.id);
+  } catch (err) {
+    errBanner.textContent = err.message;
+    errBanner.classList.remove("hidden");
+  } finally {
+    orchSubmitting = false;
+    submitBtn.disabled = false;
+    submitBtn.innerHTML = 'Start Collaboration <span>↗</span>';
+  }
+});
+
+async function loadOrchJobsList() {
+  try {
+    const jobs = await api("/api/orchestration/jobs?limit=40");
+    orchJobsCache = jobs || [];
+    $("orch-count").textContent = String(orchJobsCache.length).padStart(2, "0");
+    if ($("orch-jobs-total")) $("orch-jobs-total").textContent = `${orchJobsCache.length} TASKS`;
+    renderOrchJobsList();
+  } catch {}
+}
+
+function renderOrchJobsList() {
+  const listEl = $("orch-jobs-list");
+  if (!listEl) return;
+  listEl.innerHTML = "";
+
+  if (!orchJobsCache.length) {
+    const empty = document.createElement("div");
+    empty.className = "orch-empty-note";
+    empty.textContent = "No collaboration tasks yet. Configure your team and start your first multi-model task.";
+    listEl.appendChild(empty);
+    return;
+  }
+
+  orchJobsCache.forEach(j => {
+    const item = document.createElement("button");
+    item.type = "button";
+    item.className = `orch-job-item${j.id === activeOrchJobId ? " active" : ""}`;
+    item.dataset.jobId = j.id;
+
+    const top = document.createElement("div");
+    top.className = "orch-job-item-top";
+
+    const badge = document.createElement("span");
+    badge.className = `orch-status-pill status-${j.status}`;
+    badge.textContent = (j.status || "queued").toUpperCase();
+
+    const meta = document.createElement("small");
+    meta.textContent = `R${j.current_round || 0}/${j.max_rounds || 5} · ${j.total_calls || 0} calls`;
+    top.append(badge, meta);
+
+    const title = document.createElement("b");
+    title.setAttribute("dir", "auto");
+    title.textContent = j.task;
+
+    const timeEl = document.createElement("span");
+    timeEl.className = "orch-job-time";
+    timeEl.textContent = formatShortTimestamp(j.created_at);
+
+    item.append(top, title, timeEl);
+    item.onclick = () => openOrchJobMonitor(j.id);
+    listEl.appendChild(item);
+  });
+}
+
+function highlightActiveOrchJobCard() {
+  document.querySelectorAll(".orch-job-item").forEach(el => {
+    el.classList.toggle("active", el.dataset.jobId === activeOrchJobId);
+  });
+}
+
+async function openOrchJobMonitor(jobId) {
+  activeOrchJobId = jobId;
+  localStorage.setItem("cortext_active_orch_job", jobId);
+  $("orch-builder-panel").classList.add("hidden");
+  $("orch-monitor-panel").classList.remove("hidden");
+  highlightActiveOrchJobCard();
+
+  await fetchAndRenderOrchJob(jobId);
+}
+
+function stopOrchPolling() {
+  if (orchPollTimer) {
+    clearTimeout(orchPollTimer);
+    orchPollTimer = null;
+  }
+}
+
+async function fetchAndRenderOrchJob(jobId) {
+  stopOrchPolling();
+  if (!jobId || activeOrchJobId !== jobId) return;
+
+  try {
+    const details = await api(`/api/orchestration/jobs/${encodeURIComponent(jobId)}/details`);
+    renderOrchJobDetails(details);
+
+    // Update cached job status in sidebar list
+    const idx = orchJobsCache.findIndex(x => x.id === jobId);
+    if (idx !== -1) {
+      orchJobsCache[idx] = { ...orchJobsCache[idx], ...details };
+      renderOrchJobsList();
+    }
+
+    // Keep polling while job is active
+    if (details.status === "queued" || details.status === "running" || details.status === "waiting") {
+      orchPollTimer = setTimeout(() => fetchAndRenderOrchJob(jobId), 1500);
+    }
+  } catch (err) {
+    toast("Could not load orchestration job: " + err.message);
+  }
+}
+
+function renderOrchJobDetails(d) {
+  const status = (d.status || "queued").toLowerCase();
+  const stage = (d.current_stage || status).toLowerCase();
+
+  const statusEl = $("orch-detail-status");
+  statusEl.className = `orch-status-badge status-${status}`;
+  statusEl.textContent = status.toUpperCase();
+
+  $("orch-detail-stage").textContent = `STAGE: ${stage.toUpperCase()}`;
+  $("orch-detail-rounds").textContent = `Round ${d.current_round || 0} / ${d.max_rounds || 5}`;
+  $("orch-detail-calls").textContent = `Calls ${d.total_calls || 0} / ${d.max_calls || 12}`;
+  $("orch-detail-task").textContent = d.task || "";
+  $("orch-detail-sub").textContent = `Job ID: ${d.id} · Created ${formatShortTimestamp(d.created_at)}${d.retry_count ? ` · Retries: ${d.retry_count}/${d.max_retries}` : ""}`;
+
+  // Show/hide Cancel button based on active state
+  const isActive = status === "queued" || status === "running" || status === "waiting";
+  const cancelBtn = $("orch-cancel-btn");
+  cancelBtn.classList.toggle("hidden", !isActive);
+  cancelBtn.disabled = false;
+  cancelBtn.textContent = "⏹ Stop Task";
+  cancelBtn.onclick = () => cancelActiveOrchJob(d.id);
+
+  // Active model indicator banner
+  const activeBanner = $("orch-active-banner");
+  const participants = d.participants || [];
+  const coordPart = participants.find(p => p.role === "coordinator") || participants[0];
+  const workerPart = participants.find(p => p.role === "worker") || participants[1] || coordPart;
+
+  if (isActive) {
+    activeBanner.classList.remove("hidden");
+    if (status === "queued") {
+      $("orch-active-headline").textContent = "Task queued — waiting for background worker…";
+      $("orch-active-subline").textContent = "A worker will claim this job automatically.";
+    } else if (status === "waiting") {
+      $("orch-active-headline").textContent = "Waiting to retry after temporary provider error…";
+      $("orch-active-subline").textContent = d.error_message || "Scheduled for automatic retry.";
+    } else if (stage === "planning") {
+      $("orch-active-headline").textContent = `Coordinator (${coordPart ? `${providerCatalog[coordPart.provider]?.name || coordPart.provider} · ${coordPart.model}` : "Architect"}) is creating the implementation plan…`;
+      $("orch-active-subline").textContent = "Analyzing task and preparing instructions for Worker.";
+    } else if (stage === "working") {
+      $("orch-active-headline").textContent = `Worker (${workerPart ? `${providerCatalog[workerPart.provider]?.name || workerPart.provider} · ${workerPart.model}` : "Developer"}) is executing round ${d.current_round || 1}…`;
+      $("orch-active-subline").textContent = "Producing deliverable based on Coordinator instructions.";
+    } else if (stage === "reviewing") {
+      $("orch-active-headline").textContent = `Coordinator (${coordPart ? `${providerCatalog[coordPart.provider]?.name || coordPart.provider} · ${coordPart.model}` : "Architect"}) is reviewing round ${d.current_round || 1}…`;
+      $("orch-active-subline").textContent = "Evaluating Worker deliverable for completeness and accuracy.";
+    } else {
+      $("orch-active-headline").textContent = "Collaboration in progress…";
+      $("orch-active-subline").textContent = `Stage: ${stage}`;
+    }
+  } else {
+    activeBanner.classList.add("hidden");
+  }
+
+  // Error Banner
+  const errEl = $("orch-detail-error");
+  if (d.error_message && (status === "failed" || status === "waiting")) {
+    errEl.textContent = `Error: ${d.error_message}`;
+    errEl.classList.remove("hidden");
+  } else {
+    errEl.classList.add("hidden");
+  }
+
+  // Participant Roster Pills
+  const rosterEl = $("orch-detail-roster");
+  rosterEl.innerHTML = "";
+  participants.forEach((p, i) => {
+    const pill = document.createElement("div");
+    const isWorkingNow = isActive && ((stage === "planning" || stage === "reviewing") ? p.role === "coordinator" : (stage === "working" && p.role === "worker"));
+    pill.className = `orch-roster-pill${isWorkingNow ? " working-now" : ""}`;
+    const roleLabel = p.role === "coordinator" ? "Coordinator / Architect" : "Worker / Developer";
+    const provName = providerCatalog[p.provider]?.name || p.provider;
+    pill.innerHTML = `<span class="roster-role">#${i + 1} ${roleLabel}</span><b>${provName} · ${p.model}</b>`;
+    rosterEl.appendChild(pill);
+  });
+
+  // Final Result Card
+  const finalCard = $("orch-final-card");
+  if (status === "completed" && d.execution_result) {
+    finalCard.classList.remove("hidden");
+    $("orch-final-body").textContent = d.execution_result;
+    $("orch-copy-result-btn").onclick = () => {
+      navigator.clipboard.writeText(d.execution_result).then(() => toast("✓ Final result copied to clipboard"));
+    };
+  } else {
+    finalCard.classList.add("hidden");
+  }
+
+  // Render Collaboration Messages Transcript
+  const messages = d.messages || [];
+  $("orch-msg-count").textContent = String(messages.length);
+  const msgContainer = $("orch-messages-view");
+  msgContainer.innerHTML = "";
+
+  if (!messages.length) {
+    const emptyMsg = document.createElement("div");
+    emptyMsg.className = "orch-empty-note";
+    emptyMsg.textContent = isActive
+      ? "Waiting for the first model response to complete…"
+      : "No model responses were recorded for this task.";
+    msgContainer.appendChild(emptyMsg);
+  } else {
+    messages.forEach(m => {
+      const card = document.createElement("article");
+      card.className = `orch-msg-card role-${m.sender_role}`;
+
+      const head = document.createElement("div");
+      head.className = "orch-msg-head";
+
+      const left = document.createElement("div");
+      left.className = "orch-msg-sender";
+      const roleTitle = m.sender_role === "coordinator" ? "COORDINATOR / ARCHITECT" : "WORKER / DEVELOPER";
+      const provShort = providerCatalog[m.provider]?.short || (m.provider || "").toUpperCase();
+      left.innerHTML = `<span class="orch-role-tag ${m.sender_role}">${roleTitle}</span> <b>${provShort} · ${m.model}</b>`;
+
+      const right = document.createElement("div");
+      right.className = "orch-msg-meta";
+      right.innerHTML = `<span>Round ${m.round}</span> · <span class="action-tag action-${m.action}">Action: ${(m.action || "continue").toUpperCase()}</span> · <span>${m.latency_ms || 0} ms</span>`;
+
+      head.append(left, right);
+
+      const body = document.createElement("div");
+      body.className = "orch-msg-body";
+      body.setAttribute("dir", "auto");
+      body.textContent = m.content;
+
+      card.append(head, body);
+
+      if (m.completion_summary) {
+        const sum = document.createElement("div");
+        sum.className = "orch-msg-summary";
+        sum.setAttribute("dir", "auto");
+        sum.innerHTML = `<b>Summary:</b> `;
+        const span = document.createElement("span");
+        span.textContent = m.completion_summary;
+        sum.appendChild(span);
+        card.appendChild(sum);
+      }
+
+      msgContainer.appendChild(card);
+    });
+  }
+
+  // Render Persisted Event Timeline
+  const events = d.events || [];
+  $("orch-evt-count").textContent = String(events.length);
+  const evtContainer = $("orch-events-view");
+  evtContainer.innerHTML = "";
+
+  events.forEach(ev => {
+    const row = document.createElement("div");
+    row.className = `orch-event-row evt-${ev.event_type}`;
+
+    const dot = document.createElement("span");
+    dot.className = "orch-event-dot";
+
+    const main = document.createElement("div");
+    main.className = "orch-event-main";
+    const topLine = document.createElement("div");
+    topLine.className = "orch-event-top";
+
+    const label = document.createElement("b");
+    label.textContent = formatEventTypeLabel(ev.event_type, ev.phase);
+
+    const time = document.createElement("small");
+    time.textContent = formatShortTimestamp(ev.created_at);
+
+    topLine.append(label, time);
+
+    const msg = document.createElement("div");
+    msg.className = "orch-event-msg";
+    msg.setAttribute("dir", "auto");
+    msg.textContent = ev.message;
+
+    main.append(topLine, msg);
+    row.append(dot, main);
+    evtContainer.appendChild(row);
+  });
+}
+
+async function cancelActiveOrchJob(jobId) {
+  const btn = $("orch-cancel-btn");
+  btn.disabled = true;
+  btn.textContent = "Stopping…";
+  try {
+    await api(`/api/orchestration/jobs/${encodeURIComponent(jobId)}/cancel`, { method: "POST" });
+    toast("⏹ Task cancellation confirmed");
+    await loadOrchJobsList();
+    await fetchAndRenderOrchJob(jobId);
+  } catch (err) {
+    toast("Cancel failed: " + err.message);
+    btn.disabled = false;
+    btn.textContent = "⏹ Stop Task";
+  }
+}
+
+function formatEventTypeLabel(evtType, phase) {
+  const map = {
+    job_created: "Job Created",
+    job_claimed: "Claimed by Worker",
+    job_started: "Execution Started",
+    coordinator_started: "Coordinator Planning Started",
+    plan_generated: "Implementation Plan Generated",
+    worker_started: "Worker Execution Started",
+    worker_response_received: "Worker Deliverable Received",
+    review_started: "Coordinator Review Started",
+    review_decision: "Coordinator Review Decision",
+    revision_requested: "Revision Requested",
+    revision_completed: "Worker Revision Completed",
+    model_invoked: "Model Request Sent",
+    model_responded: "Model Response Received",
+    retry_scheduled: "Transient Retry Scheduled",
+    worker_recovery: "Recovered by Worker",
+    task_completed: "Collaboration Completed",
+    job_completed: "Job Marked Complete",
+    job_failed: "Job Failed",
+    job_cancelled: "Job Cancelled"
+  };
+  return map[evtType] || `${evtType} (${phase || "info"})`;
+}
+
+function formatShortTimestamp(ts) {
+  if (!ts) return "";
+  try {
+    const d = new Date(ts);
+    if (isNaN(d.getTime())) return String(ts);
+    return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  } catch {
+    return String(ts);
+  }
+}
+
 $("mobile-menu").onclick = () => $("sidebar").classList.add("open");
 $("mobile-close").onclick = () => $("sidebar").classList.remove("open");
 
 document.addEventListener("keydown", e => {
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
     e.preventDefault();
+    switchPage("chat");
     newSession();
   }
   if (e.key === "Escape") {
