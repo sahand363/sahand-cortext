@@ -14,7 +14,7 @@ import (
 type mockProcessor struct {
 	processCount int64
 	delay        time.Duration
-	fail         bool
+	errToReturn  error
 }
 
 func (m *mockProcessor) ProcessJob(ctx context.Context, job *Job, h ExecutionHelper) (string, error) {
@@ -26,8 +26,8 @@ func (m *mockProcessor) ProcessJob(ctx context.Context, job *Job, h ExecutionHel
 		case <-time.After(m.delay):
 		}
 	}
-	if m.fail {
-		return "", errors.New("transient upstream failure")
+	if m.errToReturn != nil {
+		return "", m.errToReturn
 	}
 	return "mock complete", nil
 }
@@ -55,7 +55,6 @@ func TestWorkerPoolExecution(t *testing.T) {
 	job1, _ := storage.CreateJob(ctx, "Job 1", 5, 12, "{}")
 	job2, _ := storage.CreateJob(ctx, "Job 2", 5, 12, "{}")
 
-	// Wait for processing with active polling loop
 	deadline := time.Now().Add(3 * time.Second)
 	var j1, j2 *Job
 	for time.Now().Before(deadline) {
@@ -88,7 +87,7 @@ func TestWorkerCancellationDuringExecution(t *testing.T) {
 
 	mock := &mockProcessor{delay: 300 * time.Millisecond}
 	pool := NewWorkerPool(storage, mock, 1)
-	pool.renewInterval = 20 * time.Millisecond // fast renewal check
+	pool.renewInterval = 20 * time.Millisecond
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -98,7 +97,6 @@ func TestWorkerCancellationDuringExecution(t *testing.T) {
 
 	job, _ := storage.CreateJob(ctx, "Cancel Me", 5, 12, "{}")
 
-	// Wait until worker claims the job and is running
 	deadlineClaim := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadlineClaim) {
 		j, _ := storage.GetJob(ctx, job.ID)
@@ -110,7 +108,6 @@ func TestWorkerCancellationDuringExecution(t *testing.T) {
 
 	_ = storage.CancelJob(ctx, job.ID)
 
-	// Wait until worker detects cancellation
 	deadlineCancel := time.Now().Add(2 * time.Second)
 	var updated *Job
 	for time.Now().Before(deadlineCancel) {
@@ -123,5 +120,37 @@ func TestWorkerCancellationDuringExecution(t *testing.T) {
 
 	if updated == nil || updated.Status != StatusCancelled {
 		t.Errorf("expected status 'cancelled', got '%v'", updated)
+	}
+}
+
+func TestWorkerRetryableVsPermanentFailure(t *testing.T) {
+	db, _ := sql.Open("sqlite", ":memory:")
+	db.SetMaxOpenConns(1)
+	defer db.Close()
+
+	storage := NewStorage(db)
+	_ = storage.InitSchema()
+
+	// 1. Permanent failure (HTTP 401 Invalid API key) -> transitions immediately to 'failed'
+	permMock := &mockProcessor{errToReturn: errors.New("OpenRouter HTTP 401: invalid API key")}
+	pool := NewWorkerPool(storage, permMock, 1)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	pool.Start(ctx)
+	defer pool.Stop()
+
+	jobPerm, _ := storage.CreateJob(ctx, "Permanent Error Job", 3, 6, "{}")
+	deadline := time.Now().Add(2 * time.Second)
+	var pJob *Job
+	for time.Now().Before(deadline) {
+		pJob, _ = storage.GetJob(ctx, jobPerm.ID)
+		if pJob != nil && pJob.Status == StatusFailed {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if pJob == nil || pJob.Status != StatusFailed || pJob.RetryCount != 0 {
+		t.Fatalf("expected immediate failed status with 0 retries on 401, got: %+v", pJob)
 	}
 }
