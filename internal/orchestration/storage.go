@@ -765,6 +765,74 @@ func (s *Storage) IterateJob(ctx context.Context, jobID, instructions string, ex
 	return s.GetJob(ctx, jobID)
 }
 
+// ApplyAuditResult promotes an Auditor message's corrected files to become the job's active execution_result
+func (s *Storage) ApplyAuditResult(ctx context.Context, jobID string, messageID int64) (*Job, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	var content, summary, providerName, modelName string
+	if messageID > 0 {
+		err = tx.QueryRowContext(ctx, `
+			SELECT content, completion_summary, provider, model
+			FROM orchestration_messages
+			WHERE id = ? AND job_id = ? AND sender_role = ?`,
+			messageID, jobID, RoleAuditor).Scan(&content, &summary, &providerName, &modelName)
+	} else {
+		err = tx.QueryRowContext(ctx, `
+			SELECT content, completion_summary, provider, model
+			FROM orchestration_messages
+			WHERE job_id = ? AND sender_role = ?
+			ORDER BY id DESC LIMIT 1`,
+			jobID, RoleAuditor).Scan(&content, &summary, &providerName, &modelName)
+	}
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, errors.New("auditor report not found for this job")
+		}
+		return nil, err
+	}
+
+	finalResult := strings.TrimSpace(content)
+	if strings.TrimSpace(summary) != "" {
+		finalResult = fmt.Sprintf("%s\n\n---\n### Coordinator Completion Summary\n[Verified & Corrected by Independent Auditor %s/%s]\n%s",
+			finalResult, providerName, modelName, strings.TrimSpace(summary))
+	}
+
+	now := time.Now().UTC()
+	_, err = tx.ExecContext(ctx, `
+		UPDATE orchestration_jobs
+		SET execution_result = ?,
+		    status = 'completed',
+		    current_stage = 'completed',
+		    updated_at = ?
+		WHERE id = ?`,
+		finalResult, now, jobID)
+	if err != nil {
+		return nil, err
+	}
+
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO orchestration_events (job_id, event_type, phase, message, created_at)
+		VALUES (?, ?, 'completed', ?, ?)`,
+		jobID, string(EventAuditApplied),
+		fmt.Sprintf("Applied corrected deliverable from Independent Auditor (%s/%s)", providerName, modelName), now)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+
+	return s.GetJob(ctx, jobID)
+}
+
 // CancelJob marks a job cancelled and informs workers
 func (s *Storage) CancelJob(ctx context.Context, jobID string) error {
 	s.mu.Lock()
