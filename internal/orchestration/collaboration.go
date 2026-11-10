@@ -17,6 +17,9 @@ type KeyResolverFunc func(providerID string) string
 // DefaultCollaboratorFunc returns default (provider, model) when none are specified in the job
 type DefaultCollaboratorFunc func() (providerID, modelID string)
 
+// FallbackCandidatesFunc returns verified working participants across all configured providers
+type FallbackCandidatesFunc func() []Participant
+
 // CollaborationConfig holds configurable safety limits for the collaboration loop
 type CollaborationConfig struct {
 	DefaultMaxRounds int
@@ -35,7 +38,6 @@ func DefaultCollaborationConfig() CollaborationConfig {
 }
 
 // IsRetryableProviderError classifies whether an error should trigger a background job retry
-// (e.g., HTTP 429, 5xx, timeouts, network drops) vs fail permanently (e.g., HTTP 401/403/404, missing API key).
 func IsRetryableProviderError(err error) bool {
 	if err == nil {
 		return false
@@ -64,6 +66,10 @@ func IsRetryableProviderError(err error) bool {
 		strings.Contains(msg, "timeout") ||
 		strings.Contains(msg, "deadline exceeded") ||
 		strings.Contains(msg, "connection reset") ||
+		strings.Contains(msg, "unexpected end of json") ||
+		strings.Contains(msg, "invalid json response") ||
+		strings.Contains(msg, "empty content") ||
+		strings.Contains(msg, "empty response") ||
 		strings.Contains(msg, "temporary") ||
 		strings.Contains(msg, "eof") ||
 		strings.Contains(msg, "network error") {
@@ -74,11 +80,12 @@ func IsRetryableProviderError(err error) bool {
 
 // CollaborationEngine implements JobProcessor to run multi-model collaboration
 type CollaborationEngine struct {
-	storage         *Storage
-	router          *provider.Router
-	keyResolver     KeyResolverFunc
-	defaultProvider DefaultCollaboratorFunc
-	config          CollaborationConfig
+	storage            *Storage
+	router             *provider.Router
+	keyResolver        KeyResolverFunc
+	defaultProvider    DefaultCollaboratorFunc
+	fallbackCandidates FallbackCandidatesFunc
+	config             CollaborationConfig
 }
 
 func NewCollaborationEngine(
@@ -109,6 +116,11 @@ func NewCollaborationEngine(
 	}
 }
 
+// SetFallbackCandidatesProvider registers a callback returning verified working models across all providers
+func (e *CollaborationEngine) SetFallbackCandidatesProvider(fn FallbackCandidatesFunc) {
+	e.fallbackCandidates = fn
+}
+
 func (e *CollaborationEngine) checkCancelled(ctx context.Context, jobID string, helper ExecutionHelper) bool {
 	if ctx.Err() != nil || helper.IsCancelled() {
 		return true
@@ -116,9 +128,14 @@ func (e *CollaborationEngine) checkCancelled(ctx context.Context, jobID string, 
 	return e.storage.IsJobCancelled(context.Background(), jobID)
 }
 
+func boolOpt(ptr *bool, defaultVal bool) bool {
+	if ptr == nil {
+		return defaultVal
+	}
+	return *ptr
+}
+
 // ProcessJob implements the JobProcessor interface for WorkerPool.
-// It supports full turn-level state reconstruction so interrupted or retried jobs resume
-// from the exact round and step where they left off without repeating completed API calls.
 func (e *CollaborationEngine) ProcessJob(ctx context.Context, job *Job, helper ExecutionHelper) (string, error) {
 	if e.checkCancelled(ctx, job.ID, helper) {
 		return "", ErrJobCancelled
@@ -132,27 +149,27 @@ func (e *CollaborationEngine) ProcessJob(ctx context.Context, job *Job, helper E
 		return "", err
 	}
 
-	// If no participants were configured and no default API key exists, fall back to baseline processor
 	if len(participants) == 0 {
 		helper.RecordProgress("working", "Processing orchestration baseline task", "{}")
 		return fmt.Sprintf("Orchestration infrastructure processed task: %s", job.Task), nil
 	}
 
-	var coordinator Participant
+	var coordinators []Participant
 	var workers []Participant
 	for _, p := range participants {
-		if strings.ToLower(p.Role) == RoleCoordinator && coordinator.Model == "" {
-			coordinator = p
+		if strings.ToLower(p.Role) == RoleCoordinator {
+			coordinators = append(coordinators, p)
 		} else {
 			workers = append(workers, p)
 		}
 	}
-	if coordinator.Model == "" {
-		coordinator = participants[0]
-		coordinator.Role = RoleCoordinator
+	if len(coordinators) == 0 {
+		c := participants[0]
+		c.Role = RoleCoordinator
+		coordinators = append(coordinators, c)
 	}
 	if len(workers) == 0 {
-		w := coordinator
+		w := coordinators[0]
 		w.Role = RoleWorker
 		if w.Name == "" || w.Name == "Coordinator" {
 			w.Name = "Worker"
@@ -160,8 +177,7 @@ func (e *CollaborationEngine) ProcessJob(ctx context.Context, job *Job, helper E
 		workers = append(workers, w)
 	}
 
-	// Validate credentials up front before making network calls
-	for _, p := range append([]Participant{coordinator}, workers...) {
+	for _, p := range append(append([]Participant{}, coordinators...), workers...) {
 		if strings.TrimSpace(e.keyResolver(p.Provider)) == "" {
 			return "", fmt.Errorf("missing API key for participant %s (%s / %s)", p.Role, p.Provider, p.Model)
 		}
@@ -184,7 +200,6 @@ func (e *CollaborationEngine) ProcessJob(ctx context.Context, job *Job, helper E
 		callTimeout = time.Duration(metaCfg.TimeoutSeconds) * time.Second
 	}
 
-	// Reconstruct durable state from any previously saved messages in SQLite
 	history, err := e.storage.GetCollaborationMessages(ctx, job.ID)
 	if err != nil {
 		return "", fmt.Errorf("failed loading collaboration history: %w", err)
@@ -195,7 +210,6 @@ func (e *CollaborationEngine) ProcessJob(ctx context.Context, job *Job, helper E
 	var currentPlan string
 	var latestWorkerResult string
 
-	// Inspect history to determine what has already been completed
 	for i, m := range history {
 		if i == 0 && m.SenderRole == RoleCoordinator {
 			currentPlan = m.Content
@@ -219,7 +233,7 @@ func (e *CollaborationEngine) ProcessJob(ctx context.Context, job *Job, helper E
 		}
 	}
 
-	// Step 1: Coordinator creates the implementation plan (if not already present from recovery)
+	// Step 1: Coordinator creates the implementation plan (with optional failover)
 	if currentPlan == "" {
 		if e.checkCancelled(ctx, job.ID, helper) {
 			return "", ErrJobCancelled
@@ -228,13 +242,16 @@ func (e *CollaborationEngine) ProcessJob(ctx context.Context, job *Job, helper E
 			return "", errors.New("maximum model calls reached before planning")
 		}
 
+		primaryCoord := coordinators[0]
 		_ = e.storage.UpdateJobStage(ctx, job.ID, StagePlanning, 1, totalCalls)
 		_ = e.storage.RecordEvent(ctx, job.ID, EventCoordinatorStarted, string(StagePlanning), helper.WorkerID(),
-			fmt.Sprintf("Coordinator (%s/%s) started analyzing task and building plan", coordinator.Provider, coordinator.Model),
-			marshalPayload(map[string]any{"round": 1, "role": RoleCoordinator, "provider": coordinator.Provider, "model": coordinator.Model}))
+			fmt.Sprintf("Coordinator (%s/%s) started analyzing task and building plan", primaryCoord.Provider, primaryCoord.Model),
+			marshalPayload(map[string]any{"round": 1, "role": RoleCoordinator, "provider": primaryCoord.Provider, "model": primaryCoord.Model}))
 
-		planPrompt := BuildCoordinatorPlanContext(job.Task, coordinator, maxChars)
-		parsed, raw, latency, err := e.invokeParticipant(ctx, job.ID, 1, string(StagePlanning), coordinator, planPrompt, callTimeout, helper)
+		coordCandidates := e.buildCandidateRoster(primaryCoord, coordinators, participants, RoleCoordinator, metaCfg)
+		parsed, raw, latency, usedCoord, err := e.invokeWithFailover(ctx, job.ID, 1, string(StagePlanning), coordCandidates, func(cand Participant) []provider.Message {
+			return BuildCoordinatorPlanContext(job.Task, cand, maxChars)
+		}, callTimeout, metaCfg, helper)
 		if err != nil {
 			return "", fmt.Errorf("coordinator planning failed: %w", err)
 		}
@@ -252,9 +269,9 @@ func (e *CollaborationEngine) ProcessJob(ctx context.Context, job *Job, helper E
 			Round:             1,
 			TurnIndex:         turnIndex,
 			SenderRole:        RoleCoordinator,
-			SenderName:        coordinator.Name,
-			Provider:          coordinator.Provider,
-			Model:             coordinator.Model,
+			SenderName:        usedCoord.Name,
+			Provider:          usedCoord.Provider,
+			Model:             usedCoord.Model,
 			Action:            parsed.Action,
 			Content:           parsed.Message,
 			CompletionSummary: parsed.CompletionSummary,
@@ -267,10 +284,9 @@ func (e *CollaborationEngine) ProcessJob(ctx context.Context, job *Job, helper E
 		history = append(history, *savedMsg)
 
 		_ = e.storage.RecordEvent(ctx, job.ID, EventPlanGenerated, string(StagePlanning), helper.WorkerID(),
-			fmt.Sprintf("Coordinator generated implementation plan (%d ms)", latency),
-			marshalPayload(map[string]any{"round": 1, "action": parsed.Action, "latency_ms": latency}))
+			fmt.Sprintf("Coordinator (%s/%s) generated implementation plan (%d ms)", usedCoord.Provider, usedCoord.Model, latency),
+			marshalPayload(map[string]any{"round": 1, "action": parsed.Action, "latency_ms": latency, "provider": usedCoord.Provider, "model": usedCoord.Model}))
 
-		// If the Coordinator immediately marked the task complete during planning
 		if parsed.Action == ActionComplete {
 			finalOut := parsed.CompletionSummary
 			if strings.TrimSpace(finalOut) == "" {
@@ -290,12 +306,11 @@ func (e *CollaborationEngine) ProcessJob(ctx context.Context, job *Job, helper E
 			return "", ErrJobCancelled
 		}
 
-		// Check if Worker and/or Coordinator Review already ran for this round prior to a restart
 		hasWorkerForRound := false
 		hasReviewForRound := false
 		for idx, m := range history {
 			if idx == 0 {
-				continue // skip initial plan
+				continue
 			}
 			if m.Round == round && m.SenderRole == RoleWorker {
 				hasWorkerForRound = true
@@ -306,14 +321,13 @@ func (e *CollaborationEngine) ProcessJob(ctx context.Context, job *Job, helper E
 			}
 		}
 
-		// If both Worker and Coordinator Review were already persisted for this round, advance to next round
 		if hasWorkerForRound && hasReviewForRound {
 			continue
 		}
 
-		activeWorker := workers[(round-1)%len(workers)]
+		primaryWorker := workers[(round-1)%len(workers)]
 
-		// Phase A: Worker performs work or revises based on Coordinator review (unless already persisted)
+		// Phase A: Worker performs work or revises (with automatic participant & global failover)
 		if !hasWorkerForRound {
 			if totalCalls >= maxCalls {
 				return e.finalizeAtLimit(ctx, job.ID, round, totalCalls, "maximum model calls limit reached", latestWorkerResult, currentPlan, helper), nil
@@ -321,11 +335,13 @@ func (e *CollaborationEngine) ProcessJob(ctx context.Context, job *Job, helper E
 
 			_ = e.storage.UpdateJobStage(ctx, job.ID, StageWorking, round, totalCalls)
 			_ = e.storage.RecordEvent(ctx, job.ID, EventWorkerStarted, string(StageWorking), helper.WorkerID(),
-				fmt.Sprintf("Worker (%s/%s) started round %d execution", activeWorker.Provider, activeWorker.Model, round),
-				marshalPayload(map[string]any{"round": round, "role": RoleWorker, "provider": activeWorker.Provider, "model": activeWorker.Model}))
+				fmt.Sprintf("Worker (%s/%s) started round %d execution", primaryWorker.Provider, primaryWorker.Model, round),
+				marshalPayload(map[string]any{"round": round, "role": RoleWorker, "provider": primaryWorker.Provider, "model": primaryWorker.Model}))
 
-			workerCtx := BuildWorkerExecutionContext(job.Task, currentPlan, history, activeWorker, round, maxChars)
-			workerParsed, workerRaw, workerLat, err := e.invokeParticipant(ctx, job.ID, round, string(StageWorking), activeWorker, workerCtx, callTimeout, helper)
+			workerCandidates := e.buildCandidateRoster(primaryWorker, workers, participants, RoleWorker, metaCfg)
+			workerParsed, workerRaw, workerLat, usedWorker, err := e.invokeWithFailover(ctx, job.ID, round, string(StageWorking), workerCandidates, func(cand Participant) []provider.Message {
+				return BuildWorkerExecutionContext(job.Task, currentPlan, history, cand, round, maxChars)
+			}, callTimeout, metaCfg, helper)
 			if err != nil {
 				return "", fmt.Errorf("worker execution failed in round %d: %w", round, err)
 			}
@@ -343,9 +359,9 @@ func (e *CollaborationEngine) ProcessJob(ctx context.Context, job *Job, helper E
 				Round:             round,
 				TurnIndex:         turnIndex,
 				SenderRole:        RoleWorker,
-				SenderName:        activeWorker.Name,
-				Provider:          activeWorker.Provider,
-				Model:             activeWorker.Model,
+				SenderName:        usedWorker.Name,
+				Provider:          usedWorker.Provider,
+				Model:             usedWorker.Model,
 				Action:            workerParsed.Action,
 				Content:           workerParsed.Message,
 				CompletionSummary: workerParsed.CompletionSummary,
@@ -358,12 +374,12 @@ func (e *CollaborationEngine) ProcessJob(ctx context.Context, job *Job, helper E
 			history = append(history, *savedWork)
 
 			_ = e.storage.RecordEvent(ctx, job.ID, EventWorkerResponded, string(StageWorking), helper.WorkerID(),
-				fmt.Sprintf("Worker completed round %d deliverable (%d ms)", round, workerLat),
-				marshalPayload(map[string]any{"round": round, "latency_ms": workerLat, "action": workerParsed.Action}))
+				fmt.Sprintf("Worker (%s/%s) completed round %d deliverable (%d ms)", usedWorker.Provider, usedWorker.Model, round, workerLat),
+				marshalPayload(map[string]any{"round": round, "latency_ms": workerLat, "action": workerParsed.Action, "provider": usedWorker.Provider, "model": usedWorker.Model}))
 
 			if round > 1 {
 				_ = e.storage.RecordEvent(ctx, job.ID, EventRevisionCompleted, string(StageWorking), helper.WorkerID(),
-					fmt.Sprintf("Worker completed requested revision for round %d", round),
+					fmt.Sprintf("Worker (%s/%s) completed requested revision for round %d", usedWorker.Provider, usedWorker.Model, round),
 					marshalPayload(map[string]any{"round": round, "latency_ms": workerLat}))
 			}
 		}
@@ -372,19 +388,21 @@ func (e *CollaborationEngine) ProcessJob(ctx context.Context, job *Job, helper E
 			return "", ErrJobCancelled
 		}
 
-		// Check call budget before Coordinator review
 		if totalCalls >= maxCalls {
 			return e.finalizeAtLimit(ctx, job.ID, round, totalCalls, "maximum model calls limit reached after worker turn", latestWorkerResult, currentPlan, helper), nil
 		}
 
-		// Phase B: Coordinator reviews the Worker's output
+		// Phase B: Coordinator reviews the Worker's output (with automatic failover)
+		primaryCoord := coordinators[0]
 		_ = e.storage.UpdateJobStage(ctx, job.ID, StageReviewing, round, totalCalls)
 		_ = e.storage.RecordEvent(ctx, job.ID, EventReviewStarted, string(StageReviewing), helper.WorkerID(),
-			fmt.Sprintf("Coordinator (%s/%s) started reviewing round %d output", coordinator.Provider, coordinator.Model, round),
-			marshalPayload(map[string]any{"round": round, "role": RoleCoordinator, "provider": coordinator.Provider, "model": coordinator.Model}))
+			fmt.Sprintf("Coordinator (%s/%s) started reviewing round %d output", primaryCoord.Provider, primaryCoord.Model, round),
+			marshalPayload(map[string]any{"round": round, "role": RoleCoordinator, "provider": primaryCoord.Provider, "model": primaryCoord.Model}))
 
-		reviewCtx := BuildCoordinatorReviewContext(job.Task, currentPlan, latestWorkerResult, history, coordinator, round, maxRounds, maxChars)
-		reviewParsed, reviewRaw, reviewLat, err := e.invokeParticipant(ctx, job.ID, round, string(StageReviewing), coordinator, reviewCtx, callTimeout, helper)
+		coordCandidates := e.buildCandidateRoster(primaryCoord, coordinators, participants, RoleCoordinator, metaCfg)
+		reviewParsed, reviewRaw, reviewLat, usedCoord, err := e.invokeWithFailover(ctx, job.ID, round, string(StageReviewing), coordCandidates, func(cand Participant) []provider.Message {
+			return BuildCoordinatorReviewContext(job.Task, currentPlan, latestWorkerResult, history, cand, round, maxRounds, maxChars)
+		}, callTimeout, metaCfg, helper)
 		if err != nil {
 			return "", fmt.Errorf("coordinator review failed in round %d: %w", round, err)
 		}
@@ -401,9 +419,9 @@ func (e *CollaborationEngine) ProcessJob(ctx context.Context, job *Job, helper E
 			Round:             round,
 			TurnIndex:         turnIndex,
 			SenderRole:        RoleCoordinator,
-			SenderName:        coordinator.Name,
-			Provider:          coordinator.Provider,
-			Model:             coordinator.Model,
+			SenderName:        usedCoord.Name,
+			Provider:          usedCoord.Provider,
+			Model:             usedCoord.Model,
 			Action:            reviewParsed.Action,
 			Content:           reviewParsed.Message,
 			CompletionSummary: reviewParsed.CompletionSummary,
@@ -420,11 +438,12 @@ func (e *CollaborationEngine) ProcessJob(ctx context.Context, job *Job, helper E
 			"action":             reviewParsed.Action,
 			"completion_summary": reviewParsed.CompletionSummary,
 			"latency_ms":         reviewLat,
+			"provider":           usedCoord.Provider,
+			"model":              usedCoord.Model,
 		})
 		_ = e.storage.RecordEvent(ctx, job.ID, EventReviewDecision, string(StageReviewing), helper.WorkerID(),
-			fmt.Sprintf("Coordinator decision in round %d: %s", round, reviewParsed.Action), decisionPayload)
+			fmt.Sprintf("Coordinator (%s/%s) decision in round %d: %s", usedCoord.Provider, usedCoord.Model, round, reviewParsed.Action), decisionPayload)
 
-		// Complete if Coordinator accepted the result
 		if reviewParsed.Action == ActionComplete {
 			finalResult := latestWorkerResult
 			if strings.TrimSpace(reviewParsed.CompletionSummary) != "" {
@@ -437,13 +456,114 @@ func (e *CollaborationEngine) ProcessJob(ctx context.Context, job *Job, helper E
 			return finalResult, nil
 		}
 
-		// Revision or continuation requested
 		_ = e.storage.RecordEvent(ctx, job.ID, EventRevisionRequested, string(StageReviewing), helper.WorkerID(),
 			fmt.Sprintf("Coordinator requested revision in round %d", round), decisionPayload)
 	}
 
-	// Reached maximum collaboration rounds
 	return e.finalizeAtLimit(ctx, job.ID, maxRounds, totalCalls, "maximum collaboration rounds reached", latestWorkerResult, currentPlan, helper), nil
+}
+
+// buildCandidateRoster assembles the ordered failover list of models to try for a given turn
+func (e *CollaborationEngine) buildCandidateRoster(
+	primary Participant,
+	sameRolePool []Participant,
+	allAssignedPool []Participant,
+	targetRole string,
+	metaCfg JobMetadata,
+) []Participant {
+	seen := map[string]bool{}
+	var roster []Participant
+
+	addCandidate := func(p Participant) {
+		key := strings.ToLower(p.Provider) + "::" + strings.TrimSpace(p.Model)
+		if p.Model == "" || seen[key] {
+			return
+		}
+		if strings.TrimSpace(e.keyResolver(p.Provider)) == "" {
+			return
+		}
+		seen[key] = true
+		p.Role = targetRole
+		if p.Name == "" {
+			if targetRole == RoleCoordinator {
+				p.Name = "Coordinator / Architect"
+			} else {
+				p.Name = "Worker / Developer"
+			}
+		}
+		roster = append(roster, p)
+	}
+
+	// 1. Primary participant assigned to this turn
+	addCandidate(primary)
+
+	// 2. If SwitchParticipant is enabled (default true), try other assigned participants
+	if boolOpt(metaCfg.SwitchParticipant, true) {
+		for _, p := range sameRolePool {
+			addCandidate(p)
+		}
+		for _, p := range allAssignedPool {
+			addCandidate(p)
+		}
+	}
+
+	// 3. If AllowGlobalFallback is enabled (default true), try any other verified working models on the server
+	if boolOpt(metaCfg.AllowGlobalFallback, true) && e.fallbackCandidates != nil {
+		for _, fb := range e.fallbackCandidates() {
+			addCandidate(fb)
+		}
+	}
+
+	return roster
+}
+
+// invokeWithFailover attempts the primary candidate first, and if it fails, automatically switches to the next candidate
+func (e *CollaborationEngine) invokeWithFailover(
+	ctx context.Context,
+	jobID string,
+	round int,
+	phase string,
+	candidates []Participant,
+	promptBuilder func(Participant) []provider.Message,
+	timeout time.Duration,
+	metaCfg JobMetadata,
+	helper ExecutionHelper,
+) (StructuredModelResponse, string, int64, Participant, error) {
+	if len(candidates) == 0 {
+		return StructuredModelResponse{}, "", 0, Participant{}, errors.New("no valid model candidates available")
+	}
+
+	autoRetry := boolOpt(metaCfg.AutoRetry, true)
+	var errs []string
+
+	for idx, cand := range candidates {
+		if e.checkCancelled(ctx, jobID, helper) {
+			return StructuredModelResponse{}, "", 0, cand, ErrJobCancelled
+		}
+
+		if idx > 0 {
+			prev := candidates[idx-1]
+			_ = e.storage.RecordEvent(ctx, jobID, EventParticipantFallback, phase, helper.WorkerID(),
+				fmt.Sprintf("Switching from failed model (%s/%s) to fallback (%s/%s)", prev.Provider, prev.Model, cand.Provider, cand.Model),
+				marshalPayload(map[string]any{
+					"round":         round,
+					"from_provider": prev.Provider,
+					"from_model":    prev.Model,
+					"to_provider":   cand.Provider,
+					"to_model":      cand.Model,
+				}))
+		}
+
+		msgs := promptBuilder(cand)
+		parsed, raw, lat, err := e.invokeParticipant(ctx, jobID, round, phase, cand, msgs, timeout, !autoRetry, helper)
+		if err == nil {
+			return parsed, raw, lat, cand, nil
+		}
+
+		errs = append(errs, fmt.Sprintf("%s/%s: %v", cand.Provider, cand.Model, err))
+	}
+
+	return StructuredModelResponse{}, "", 0, candidates[0], fmt.Errorf("all candidate models failed (%s)", strings.Join(errs, " | "))
 }
 
 func (e *CollaborationEngine) finalizeAtLimit(ctx context.Context, jobID string, round, totalCalls int, reason, latestWorkerResult, currentPlan string, helper ExecutionHelper) string {
@@ -470,6 +590,7 @@ func (e *CollaborationEngine) invokeParticipant(
 	participant Participant,
 	messages []provider.Message,
 	timeout time.Duration,
+	disableRetry bool,
 	helper ExecutionHelper,
 ) (StructuredModelResponse, string, int64, error) {
 	if e.checkCancelled(ctx, jobID, helper) {
@@ -494,8 +615,9 @@ func (e *CollaborationEngine) invokeParticipant(
 	callCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	// External network call executes strictly outside any SQLite transaction
-	rawReply, latency, err := e.router.Call(callCtx, participant.Provider, key, participant.Model, messages, provider.CallOpts{})
+	rawReply, latency, err := e.router.Call(callCtx, participant.Provider, key, participant.Model, messages, provider.CallOpts{
+		DisableRetry: disableRetry,
+	})
 	if err != nil {
 		return StructuredModelResponse{}, "", latency, err
 	}
@@ -515,7 +637,7 @@ func (e *CollaborationEngine) invokeParticipant(
 		"latency_ms": latency,
 	})
 	_ = e.storage.RecordEvent(ctx, jobID, EventModelResponded, phase, helper.WorkerID(),
-		fmt.Sprintf("Received response from %s (%d ms, action=%s)", participant.Role, latency, parsed.Action), respPayload)
+		fmt.Sprintf("Received response from %s (%s/%s in %d ms, action=%s)", participant.Role, participant.Provider, participant.Model, latency, parsed.Action), respPayload)
 
 	return parsed, rawReply, latency, nil
 }
