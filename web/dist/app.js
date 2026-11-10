@@ -8,11 +8,10 @@ let activeModel = "gemini-2.0-flash";
 let freeOnlyOpenRouter = true;
 let deleteArmed = false;
 
-// Orchestration State
 // Orchestration State (Defaults to 3-Role Pipeline: Coordinator -> Worker -> QA Auditor)
 let orchParticipantsDraft = [
   { role: "coordinator", name: "Coordinator / Architect", provider: "gemini", model: "gemini-2.0-flash" },
-  { role: "worker", name: "Worker / Developer", provider: "openrouter", model: "" },
+  { role: "worker", name: "Worker / Developer", provider: "gemini", model: "gemini-2.0-flash" },
   { role: "auditor", name: "Quality Assurance / Auditor", provider: "gemini", model: "gemini-2.0-flash" }
 ];
 let orchJobsCache = [];
@@ -182,6 +181,58 @@ function stripOuterCodeFence(text) {
   return m ? m[1].trim() : t;
 }
 
+// Unwraps JSON-enveloped deliverables (even when a model produced slightly broken JSON with unescaped quotes)
+function unwrapEnvelopeIfPresent(raw) {
+  let s = stripOuterCodeFence(raw);
+  if (!s.startsWith("{")) return { text: s, extraFiles: [] };
+
+  // 1. Try standard JSON.parse first
+  try {
+    const parsed = JSON.parse(s);
+    if (parsed && typeof parsed === "object") {
+      if (Array.isArray(parsed.files)) {
+        return { text: parsed.message || "", extraFiles: parsed.files };
+      }
+      if (parsed.files && typeof parsed.files === "object") {
+        const list = Object.entries(parsed.files).map(([k, v]) => ({ filename: k, content: String(v) }));
+        return { text: parsed.message || "", extraFiles: list };
+      }
+      if (typeof parsed.message === "string" && parsed.message.trim()) {
+        return { text: parsed.message.trim(), extraFiles: [] };
+      }
+      if (typeof parsed.content === "string" && parsed.content.trim()) {
+        return { text: parsed.content.trim(), extraFiles: [] };
+      }
+    }
+  } catch {}
+
+  // 2. Resilient extraction if JSON.parse failed due to unescaped quotes in a huge code response
+  const msgMatch = s.match(/"message"\s*:\s*"([\s\S]*)"\s*,\s*"completion_summary"/i) ||
+                   s.match(/"message"\s*:\s*"([\s\S]*)"\s*\}/i);
+  if (msgMatch && msgMatch[1]) {
+    let extracted = msgMatch[1];
+    extracted = extracted
+      .replace(/\\n/g, "\n")
+      .replace(/\\r/g, "\r")
+      .replace(/\\t/g, "\t")
+      .replace(/\\"/g, '"')
+      .replace(/\\\\/g, "\\");
+    return { text: extracted.trim(), extraFiles: [] };
+  }
+
+  // 3. If raw string still has literal \n=== FILE: or \n``` inside it, unescape it
+  if (s.includes("\\n=== FILE:") || s.includes("\\n```") || s.includes("\\npackage main")) {
+    s = s
+      .replace(/\\n/g, "\n")
+      .replace(/\\r/g, "\r")
+      .replace(/\\t/g, "\t")
+      .replace(/\\"/g, '"')
+      .replace(/\\\\/g, "\\");
+  }
+
+  return { text: s, extraFiles: [] };
+}
+
 // Extracts 1 or more project files from a deliverable string
 function extractProjectFiles(rawText, jobId) {
   if (!rawText) return { files: [], summary: "" };
@@ -195,11 +246,19 @@ function extractProjectFiles(rawText, jobId) {
     body = body.slice(0, sumIdx).trim();
   }
 
+  // Unwrap outer JSON envelope if the model wrapped its deliverable in {"action":..., "message":...}
+  const unwrapped = unwrapEnvelopeIfPresent(body);
+  body = unwrapped.text;
+
   const files = [];
   const usedNames = new Set();
 
   function addUniqueFile(filename, content, ext, isHtml) {
-    let cleanName = (filename || "file.txt").trim().replace(/^[/\\]+/, "").replace(/\.\./g, "");
+    let cleanName = (filename || "file.txt")
+      .trim()
+      .replace(/^[/\\]+/, "")
+      .replace(/\.\./g, "")
+      .replace(/^[`*'"]+|[`*'"]+$/g, "");
     if (!cleanName) cleanName = "file.txt";
     if (usedNames.has(cleanName)) {
       const dot = cleanName.lastIndexOf(".");
@@ -213,24 +272,38 @@ function extractProjectFiles(rawText, jobId) {
     const finalExt = ext || (cleanName.includes(".") ? cleanName.split(".").pop().toLowerCase() : "txt");
     files.push({
       filename: cleanName,
-      content: content.trim() + "\n",
+      content: String(content || "").trim() + "\n",
       ext: finalExt,
       isHtml: isHtml || finalExt === "html" || finalExt === "htm"
     });
   }
 
+  // Add any structured files array/map from JSON envelope
+  if (unwrapped.extraFiles && unwrapped.extraFiles.length > 0) {
+    unwrapped.extraFiles.forEach((ef, i) => {
+      const fname = ef.filename || ef.name || ef.path || `file_${i + 1}.txt`;
+      const code = ef.content || ef.code || "";
+      if (code) {
+        const info = detectCodeLanguageAndFilename(code, fname, i);
+        addUniqueFile(fname, code, info.ext, info.isHtml);
+      }
+    });
+  }
+
   // Strategy 1: Explicit === FILE: path/to/file === markers
-  const markerRe = /(?:^|\n)===\s*FILE:\s*([^\n=]+?)\s*===\s*\n/gi;
-  const matches = [...body.matchAll(markerRe)];
-  if (matches.length > 0) {
-    for (let i = 0; i < matches.length; i++) {
-      const fname = matches[i][1].trim();
-      const start = matches[i].index + matches[i][0].length;
-      const end = i + 1 < matches.length ? matches[i + 1].index : body.length;
-      const chunk = stripOuterCodeFence(body.slice(start, end));
-      if (chunk) {
-        const info = detectCodeLanguageAndFilename(chunk, fname, i);
-        addUniqueFile(fname, chunk, info.ext, info.isHtml);
+  if (files.length === 0) {
+    const markerRe = /(?:^|\n)===\s*FILE:\s*([^\n=]+?)\s*===[ \t]*\n/gi;
+    const matches = [...body.matchAll(markerRe)];
+    if (matches.length > 0) {
+      for (let i = 0; i < matches.length; i++) {
+        const fname = matches[i][1].trim();
+        const start = matches[i].index + matches[i][0].length;
+        const end = i + 1 < matches.length ? matches[i + 1].index : body.length;
+        const chunk = stripOuterCodeFence(body.slice(start, end));
+        if (chunk) {
+          const info = detectCodeLanguageAndFilename(chunk, fname, i);
+          addUniqueFile(fname, chunk, info.ext, info.isHtml);
+        }
       }
     }
   }
@@ -245,8 +318,8 @@ function extractProjectFiles(rawText, jobId) {
         const code = (m[2] || "").trim();
         if (!code) return;
 
-        const before = body.slice(Math.max(0, m.index - 140), m.index);
-        const nameMatch = before.match(/(?:###|\*\*|`|File:)\s*`?([a-zA-Z0-9_/-]+\.[a-zA-Z0-9]+)`?\**\s*$/i);
+        const before = body.slice(Math.max(0, m.index - 200), m.index);
+        const nameMatch = before.match(/(?:###|\*\*|`|File:|filename:)\s*(?:\d+\.\s*)?`?([a-zA-Z0-9_./-]+\.[a-zA-Z0-9]{1,6})`?[:\s*]*$/i);
         const fileHint = nameMatch ? nameMatch[1] : hint;
 
         const info = detectCodeLanguageAndFilename(code, fileHint, idx);
@@ -1309,7 +1382,7 @@ function renderOrchParticipantsBuilder() {
     stepBadge.className = "orch-step-num";
     stepBadge.textContent = `#${idx + 1}`;
 
-const roleSelect = document.createElement("select");
+    const roleSelect = document.createElement("select");
     roleSelect.className = "orch-role-select";
     [
       { value: "coordinator", label: "Coordinator / Architect (Plans & Approves)" },
@@ -1832,13 +1905,11 @@ function renderOrchJobDetails(d) {
       $("orch-files-badge").textContent = `${files.length} FILE${files.length === 1 ? "" : "S"}`;
     }
 
-    // Wire up Second-Opinion Audit button
     const runAuditBtn = $("orch-run-audit-btn");
     if (runAuditBtn) {
       runAuditBtn.onclick = () => runIndependentAudit(d.id);
     }
 
-    // Display Latest Auditor Report if one exists
     const latestAuditMsg = [...messages].reverse().find(m => m.sender_role === "auditor");
     const auditReportEl = $("orch-audit-report");
     if (auditReportEl) {
@@ -1856,7 +1927,6 @@ function renderOrchJobDetails(d) {
 
         const applyAuditBtn = $("orch-apply-audit-btn");
         if (applyAuditBtn) {
-          // Show "Apply Auditor's Corrected Files" whenever the auditor provided revised code
           const hasCodeInAudit = latestAuditMsg.action === "revise" || latestAuditMsg.content.includes("=== FILE:") || latestAuditMsg.content.includes("```");
           applyAuditBtn.classList.toggle("hidden", !hasCodeInAudit);
           applyAuditBtn.onclick = () => applyAuditorFixes(d.id, latestAuditMsg.id);
@@ -2007,7 +2077,7 @@ function renderOrchJobDetails(d) {
       left.className = "orch-msg-sender";
       let roleTitle = "WORKER / DEVELOPER";
       if (m.sender_role === "coordinator") roleTitle = "COORDINATOR / ARCHITECT";
-      if (m.sender_role === "auditor") roleTitle = "INDEPENDENT AI AUDITOR";
+      if (m.sender_role === "auditor") roleTitle = "QUALITY ASSURANCE / AUDITOR";
       if (m.sender_role === "user") roleTitle = "WORKSPACE OWNER (USER REVISION)";
 
       const provShort = m.sender_role === "user"
