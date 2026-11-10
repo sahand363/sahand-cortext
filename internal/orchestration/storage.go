@@ -59,6 +59,35 @@ func (s *Storage) InitSchema() error {
 			completed_at DATETIME
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_orch_jobs_status_lease ON orchestration_jobs(status, lease_expires_at);`,
+		`CREATE TABLE IF NOT EXISTS orchestration_participants (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			job_id TEXT NOT NULL REFERENCES orchestration_jobs(id) ON DELETE CASCADE,
+			role TEXT NOT NULL,
+			name TEXT NOT NULL DEFAULT '',
+			provider TEXT NOT NULL,
+			model TEXT NOT NULL,
+			system_prompt TEXT NOT NULL DEFAULT '',
+			sort_order INTEGER NOT NULL DEFAULT 0,
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_orch_participants_job ON orchestration_participants(job_id, sort_order ASC);`,
+		`CREATE TABLE IF NOT EXISTS orchestration_messages (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			job_id TEXT NOT NULL REFERENCES orchestration_jobs(id) ON DELETE CASCADE,
+			round INTEGER NOT NULL DEFAULT 1,
+			turn_index INTEGER NOT NULL DEFAULT 1,
+			sender_role TEXT NOT NULL,
+			sender_name TEXT NOT NULL DEFAULT '',
+			provider TEXT NOT NULL,
+			model TEXT NOT NULL,
+			action TEXT NOT NULL DEFAULT 'continue',
+			content TEXT NOT NULL,
+			completion_summary TEXT NOT NULL DEFAULT '',
+			raw_response TEXT NOT NULL DEFAULT '',
+			latency_ms INTEGER NOT NULL DEFAULT 0,
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_orch_messages_job ON orchestration_messages(job_id, id ASC);`,
 		`CREATE TABLE IF NOT EXISTS orchestration_events (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			job_id TEXT NOT NULL REFERENCES orchestration_jobs(id) ON DELETE CASCADE,
@@ -143,6 +172,139 @@ func (s *Storage) CreateJob(ctx context.Context, task string, maxRounds, maxCall
 		CreatedAt: now,
 		UpdatedAt: now,
 	}, nil
+}
+
+// SaveParticipants stores the participant roster for a job
+func (s *Storage) SaveParticipants(ctx context.Context, jobID string, participants []Participant) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	_, err = tx.ExecContext(ctx, `DELETE FROM orchestration_participants WHERE job_id = ?`, jobID)
+	if err != nil {
+		return err
+	}
+
+	now := time.Now().UTC()
+	for i, p := range participants {
+		role := strings.ToLower(strings.TrimSpace(p.Role))
+		if role == "" {
+			if i == 0 {
+				role = RoleCoordinator
+			} else {
+				role = RoleWorker
+			}
+		}
+		name := strings.TrimSpace(p.Name)
+		if name == "" {
+			if role == RoleCoordinator {
+				name = "Coordinator"
+			} else {
+				name = "Worker"
+			}
+		}
+		_, err = tx.ExecContext(ctx, `
+			INSERT INTO orchestration_participants (job_id, role, name, provider, model, system_prompt, sort_order, created_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			jobID, role, name, strings.ToLower(strings.TrimSpace(p.Provider)), strings.TrimSpace(p.Model), p.SystemPrompt, i, now)
+		if err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
+}
+
+// GetParticipants returns the ordered list of participants for a job
+func (s *Storage) GetParticipants(ctx context.Context, jobID string) ([]Participant, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, job_id, role, name, provider, model, system_prompt, sort_order, created_at
+		FROM orchestration_participants
+		WHERE job_id = ?
+		ORDER BY sort_order ASC, id ASC`, jobID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []Participant
+	for rows.Next() {
+		var p Participant
+		if err := rows.Scan(&p.ID, &p.JobID, &p.Role, &p.Name, &p.Provider, &p.Model, &p.SystemPrompt, &p.SortOrder, &p.CreatedAt); err == nil {
+			out = append(out, p)
+		}
+	}
+	return out, nil
+}
+
+// SaveCollaborationMessage persists a single model turn and updates job progress
+func (s *Storage) SaveCollaborationMessage(ctx context.Context, msg CollaborationMessage) (*CollaborationMessage, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := time.Now().UTC()
+	if msg.Action == "" {
+		msg.Action = ActionContinue
+	}
+
+	res, err := s.db.ExecContext(ctx, `
+		INSERT INTO orchestration_messages
+		(job_id, round, turn_index, sender_role, sender_name, provider, model, action, content, completion_summary, raw_response, latency_ms, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		msg.JobID, msg.Round, msg.TurnIndex, msg.SenderRole, msg.SenderName, msg.Provider, msg.Model,
+		string(msg.Action), msg.Content, msg.CompletionSummary, msg.RawResponse, msg.LatencyMs, now)
+	if err != nil {
+		return nil, err
+	}
+
+	id, _ := res.LastInsertId()
+	msg.ID = id
+	msg.CreatedAt = now
+	return &msg, nil
+}
+
+// GetCollaborationMessages retrieves all collaboration turns for a job in chronological order
+func (s *Storage) GetCollaborationMessages(ctx context.Context, jobID string) ([]CollaborationMessage, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, job_id, round, turn_index, sender_role, sender_name, provider, model,
+		       action, content, completion_summary, raw_response, latency_ms, created_at
+		FROM orchestration_messages
+		WHERE job_id = ?
+		ORDER BY id ASC`, jobID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var msgs []CollaborationMessage
+	for rows.Next() {
+		var m CollaborationMessage
+		var act string
+		if err := rows.Scan(&m.ID, &m.JobID, &m.Round, &m.TurnIndex, &m.SenderRole, &m.SenderName,
+			&m.Provider, &m.Model, &act, &m.Content, &m.CompletionSummary, &m.RawResponse, &m.LatencyMs, &m.CreatedAt); err == nil {
+			m.Action = CollaborationAction(act)
+			msgs = append(msgs, m)
+		}
+	}
+	return msgs, nil
+}
+
+// UpdateJobProgress updates current_round and total_calls on an active job
+func (s *Storage) UpdateJobProgress(ctx context.Context, jobID string, currentRound, totalCalls int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE orchestration_jobs
+		SET current_round = ?, total_calls = ?, updated_at = ?
+		WHERE id = ?`,
+		currentRound, totalCalls, time.Now().UTC(), jobID)
+	return err
 }
 
 // ClaimNextJob atomically claims an available queued or expired job
