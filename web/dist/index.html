@@ -298,14 +298,23 @@
                 <div class="orch-final-head">
                   <div>
                     <div class="eyebrow">APPROVED DELIVERABLE</div>
-                    <h3>Final Collaboration Result</h3>
+                    <h3>Final Collaboration Result <span id="orch-files-badge" class="orch-files-count">1 FILE</span></h3>
                   </div>
                   <div class="orch-final-actions">
                     <button type="button" class="tool-btn hidden" id="orch-preview-toggle-btn">👁 Live HTML Preview</button>
+                    <button type="button" class="btn btn-primary btn-small" id="orch-download-zip-btn">📦 Download Project (.zip)</button>
                     <button type="button" class="tool-btn" id="orch-download-result-btn">⬇ Download File</button>
-                    <button type="button" class="tool-btn" id="orch-copy-result-btn">📋 Copy Result</button>
+                    <button type="button" class="tool-btn" id="orch-copy-result-btn">📋 Copy File</button>
                   </div>
                 </div>
+
+                <!-- Interactive Multi-File Explorer Tabs -->
+                <div id="orch-files-explorer" class="orch-files-explorer hidden">
+                  <div class="orch-files-label">GENERATED PROJECT FILES (CLICK TO VIEW OR DOWNLOAD):</div>
+                  <div id="orch-files-tabs" class="orch-files-tabs"></div>
+                </div>
+
+                <!-- Sandboxed HTML Preview Frame -->
                 <div id="orch-preview-wrap" class="orch-preview-wrap hidden">
                   <div class="orch-preview-bar">
                     <span>SANDBOXED LIVE HTML PREVIEW</span>
@@ -313,7 +322,9 @@
                   </div>
                   <iframe id="orch-preview-frame" class="orch-preview-frame" sandbox="allow-scripts allow-modals"></iframe>
                 </div>
+
                 <div id="orch-final-body" class="orch-final-body" dir="auto"></div>
+                <div id="orch-final-summary-note" class="orch-msg-summary hidden" dir="auto"></div>
               </div>
 
               <!-- Sub-tabs: Collaboration Transcript vs Durable Event Timeline -->
@@ -413,7 +424,7 @@
         </div>
       </section>
     </div>
-    <footer><span>SAHAND-CORTEXT</span><i>·</i> PRIVATE MULTI-PROVIDER AI WORKSPACE <b>v0.4.5</b></footer>
+    <footer><span>SAHAND-CORTEXT</span><i>·</i> PRIVATE MULTI-PROVIDER AI WORKSPACE <b>v0.4.6</b></footer>
   </main>
 </div>
 <div id="toast" class="toast"></div>
