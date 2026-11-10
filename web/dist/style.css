@@ -927,3 +927,86 @@ footer b{margin-left:auto;font-weight:500;letter-spacing:1px}
   background:#8be9fd;
   box-shadow:0 0 8px #8be9fd;
 }
+
+/* Collaboration Telemetry Stats Bar & Live HTML Preview */
+.orch-stats-bar{
+  display:grid;
+  grid-template-columns:repeat(4,1fr);
+  gap:10px;
+  margin-top:16px;
+}
+.orch-stat-box{
+  border:1px solid #263142;
+  background:#141b26;
+  border-radius:10px;
+  padding:12px 14px;
+  display:grid;
+  gap:3px;
+}
+.orch-stat-box span{
+  font-size:11px;
+  font-weight:700;
+  letter-spacing:.6px;
+  color:#8894a8;
+  text-transform:uppercase;
+}
+.orch-stat-box b{
+  font:700 22px var(--font-display);
+  color:var(--lime);
+}
+.orch-stat-box small{
+  font-size:11.5px;
+  color:#798599;
+}
+.orch-final-actions{
+  display:flex;
+  gap:8px;
+  align-items:center;
+  flex-wrap:wrap;
+}
+.orch-preview-wrap{
+  margin-bottom:16px;
+  border:1px solid #384a2d;
+  border-radius:10px;
+  overflow:hidden;
+  background:#0b0d12;
+}
+.orch-preview-bar{
+  display:flex;
+  justify-content:space-between;
+  align-items:center;
+  padding:8px 14px;
+  background:#182218;
+  border-bottom:1px solid #2e3e27;
+  font-size:11px;
+  font-weight:700;
+  letter-spacing:1px;
+  color:var(--lime);
+}
+.orch-preview-frame{
+  width:100%;
+  height:460px;
+  border:0;
+  background:#0f1218;
+  display:block;
+}
+.mini-turn-btn{
+  border:1px solid #2f3b4e;
+  background:#182130;
+  color:#bdcae0;
+  border-radius:5px;
+  padding:3px 8px;
+  font-size:11px;
+  font-weight:600;
+  margin-left:6px;
+}
+.mini-turn-btn:hover{
+  border-color:var(--lime);
+  color:#fff;
+}
+@media(max-width:900px){
+  .orch-stats-bar{grid-template-columns:1fr 1fr}
+}
+@media(max-width:560px){
+  .orch-stats-bar{grid-template-columns:1fr}
+}
