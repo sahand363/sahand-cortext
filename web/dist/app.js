@@ -9,9 +9,11 @@ let freeOnlyOpenRouter = true;
 let deleteArmed = false;
 
 // Orchestration State
+// Orchestration State (Defaults to 3-Role Pipeline: Coordinator -> Worker -> QA Auditor)
 let orchParticipantsDraft = [
   { role: "coordinator", name: "Coordinator / Architect", provider: "gemini", model: "gemini-2.0-flash" },
-  { role: "worker", name: "Worker / Developer", provider: "gemini", model: "gemini-2.0-flash" }
+  { role: "worker", name: "Worker / Developer", provider: "openrouter", model: "" },
+  { role: "auditor", name: "Quality Assurance / Auditor", provider: "gemini", model: "gemini-2.0-flash" }
 ];
 let orchJobsCache = [];
 let activeOrchJobId = localStorage.getItem("cortext_active_orch_job") || null;
@@ -1307,11 +1309,12 @@ function renderOrchParticipantsBuilder() {
     stepBadge.className = "orch-step-num";
     stepBadge.textContent = `#${idx + 1}`;
 
-    const roleSelect = document.createElement("select");
+const roleSelect = document.createElement("select");
     roleSelect.className = "orch-role-select";
     [
-      { value: "coordinator", label: "Coordinator / Architect" },
-      { value: "worker", label: "Worker / Developer" }
+      { value: "coordinator", label: "Coordinator / Architect (Plans & Approves)" },
+      { value: "worker", label: "Worker / Developer (Builds & Revises)" },
+      { value: "auditor", label: "Quality Assurance / Auditor (Tests & Audits)" }
     ].forEach(r => {
       const opt = document.createElement("option");
       opt.value = r.value;
@@ -1321,7 +1324,13 @@ function renderOrchParticipantsBuilder() {
     });
     roleSelect.onchange = () => {
       part.role = roleSelect.value;
-      part.name = roleSelect.value === "coordinator" ? "Coordinator / Architect" : "Worker / Developer";
+      if (roleSelect.value === "coordinator") {
+        part.name = "Coordinator / Architect";
+      } else if (roleSelect.value === "auditor") {
+        part.name = "Quality Assurance / Auditor";
+      } else {
+        part.name = "Worker / Developer";
+      }
     };
 
     const orderBtns = document.createElement("div");
@@ -1559,7 +1568,11 @@ $("orch-create-form").addEventListener("submit", async e => {
         allow_global_fallback: allowGlobalFallback,
         participants: orchParticipantsDraft.map((p, idx) => ({
           role: p.role,
-          name: p.role === "coordinator" ? "Coordinator / Architect" : "Worker / Developer",
+          name: p.role === "coordinator"
+            ? "Coordinator / Architect"
+            : p.role === "auditor"
+              ? "Quality Assurance / Auditor"
+              : "Worker / Developer",
           provider: p.provider,
           model: p.model,
           sort_order: idx
