@@ -55,17 +55,23 @@ func TestWorkerPoolExecution(t *testing.T) {
 	job1, _ := storage.CreateJob(ctx, "Job 1", 5, 12, "{}")
 	job2, _ := storage.CreateJob(ctx, "Job 2", 5, 12, "{}")
 
-	// Wait for processing
-	time.Sleep(200 * time.Millisecond)
-
-	j1, _ := storage.GetJob(ctx, job1.ID)
-	j2, _ := storage.GetJob(ctx, job2.ID)
-
-	if j1.Status != StatusCompleted {
-		t.Errorf("job 1 expected completed, got %s", j1.Status)
+	// Wait for processing with active polling loop
+	deadline := time.Now().Add(3 * time.Second)
+	var j1, j2 *Job
+	for time.Now().Before(deadline) {
+		j1, _ = storage.GetJob(ctx, job1.ID)
+		j2, _ = storage.GetJob(ctx, job2.ID)
+		if j1 != nil && j1.Status == StatusCompleted && j2 != nil && j2.Status == StatusCompleted {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
 	}
-	if j2.Status != StatusCompleted {
-		t.Errorf("job 2 expected completed, got %s", j2.Status)
+
+	if j1 == nil || j1.Status != StatusCompleted {
+		t.Errorf("job 1 expected completed, got %v", j1)
+	}
+	if j2 == nil || j2.Status != StatusCompleted {
+		t.Errorf("job 2 expected completed, got %v", j2)
 	}
 	if atomic.LoadInt64(&mock.processCount) != 2 {
 		t.Errorf("expected 2 processed jobs, got %d", atomic.LoadInt64(&mock.processCount))
@@ -80,9 +86,9 @@ func TestWorkerCancellationDuringExecution(t *testing.T) {
 	storage := NewStorage(db)
 	_ = storage.InitSchema()
 
-	mock := &mockProcessor{delay: 400 * time.Millisecond}
+	mock := &mockProcessor{delay: 300 * time.Millisecond}
 	pool := NewWorkerPool(storage, mock, 1)
-	pool.renewInterval = 25 * time.Millisecond // fast renewal check
+	pool.renewInterval = 20 * time.Millisecond // fast renewal check
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -92,13 +98,30 @@ func TestWorkerCancellationDuringExecution(t *testing.T) {
 
 	job, _ := storage.CreateJob(ctx, "Cancel Me", 5, 12, "{}")
 
-	time.Sleep(50 * time.Millisecond) // Worker claims
+	// Wait until worker claims the job and is running
+	deadlineClaim := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadlineClaim) {
+		j, _ := storage.GetJob(ctx, job.ID)
+		if j != nil && j.Status == StatusRunning {
+			break
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+
 	_ = storage.CancelJob(ctx, job.ID)
 
-	time.Sleep(200 * time.Millisecond) // Wait for renew detection
+	// Wait until worker detects cancellation
+	deadlineCancel := time.Now().Add(2 * time.Second)
+	var updated *Job
+	for time.Now().Before(deadlineCancel) {
+		updated, _ = storage.GetJob(ctx, job.ID)
+		if updated != nil && updated.Status == StatusCancelled {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 
-	updated, _ := storage.GetJob(ctx, job.ID)
-	if updated.Status != StatusCancelled {
-		t.Errorf("expected status 'cancelled', got '%s'", updated.Status)
+	if updated == nil || updated.Status != StatusCancelled {
+		t.Errorf("expected status 'cancelled', got '%v'", updated)
 	}
 }
