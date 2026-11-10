@@ -494,10 +494,8 @@ func (e *CollaborationEngine) buildCandidateRoster(
 		roster = append(roster, p)
 	}
 
-	// 1. Primary participant assigned to this turn
 	addCandidate(primary)
 
-	// 2. If SwitchParticipant is enabled (default true), try other assigned participants
 	if boolOpt(metaCfg.SwitchParticipant, true) {
 		for _, p := range sameRolePool {
 			addCandidate(p)
@@ -507,7 +505,6 @@ func (e *CollaborationEngine) buildCandidateRoster(
 		}
 	}
 
-	// 3. If AllowGlobalFallback is enabled (default true), try any other verified working models on the server
 	if boolOpt(metaCfg.AllowGlobalFallback, true) && e.fallbackCandidates != nil {
 		for _, fb := range e.fallbackCandidates() {
 			addCandidate(fb)
@@ -695,14 +692,15 @@ func BuildCoordinatorPlanContext(task string, coordinator Participant, maxChars 
 
 Your responsibilities:
 1. Analyze the original user task.
-2. Formulate a clear, structured implementation plan and explicit instructions for the Worker / Developer.
-3. Respond using ONLY valid JSON matching this schema:
+2. Formulate a clear, structured implementation plan and explicit technical instructions for the Worker / Developer.
+3. For coding or web tasks, explicitly specify all required technical constants (for example, exact IANA timezone IDs such as "Asia/Tehran", "America/Chicago", "Europe/Dublin", DOM element IDs, and event listeners) so the Worker does not use invalid placeholders.
+4. Respond using ONLY valid JSON matching this schema:
 {
   "action": "continue",
   "message": "Your detailed implementation plan and instructions for the Worker",
   "completion_summary": ""
 }
-Allowed values for "action": "continue" (send plan to Worker) or "complete" (only if the task is trivial and already answered in message).`
+Allowed values for "action": "continue" (send plan to Worker) or "complete" (only if the task is a simple question already answered in message).`
 
 	userPrompt := fmt.Sprintf("### Original User Task:\n%s\n\nCreate the implementation plan and instructions for the Worker in the required JSON format.", truncateText(task, maxChars/2))
 
@@ -726,8 +724,9 @@ func BuildWorkerExecutionContext(task, plan string, history []CollaborationMessa
 
 Your responsibilities:
 1. Follow the Coordinator's implementation plan and review instructions carefully.
-2. Produce complete, accurate, high-quality work.
-3. Respond using ONLY valid JSON matching this schema:
+2. Produce complete, working, self-contained deliverables with zero placeholders or "// TODO" comments.
+3. For HTML/JS/CSS tasks, ensure all JavaScript functions initialize properly on load, use valid standard APIs (e.g. valid IANA timezone strings like "Asia/Tehran", "America/Chicago", "Europe/Dublin" in Intl.DateTimeFormat), and have no syntax or runtime errors.
+4. Respond using ONLY valid JSON matching this schema:
 {
   "action": "continue",
   "message": "Your complete implementation, code, or analysis deliverable",
@@ -771,16 +770,18 @@ func BuildCoordinatorReviewContext(task, plan, latestWorkerResult string, histor
 	sysPrompt := baseSys + `
 
 Your responsibilities:
-1. Evaluate the Worker's deliverable against the original user task and your implementation plan.
-2. Decide whether to:
-   - Accept the result and complete the task ("action": "complete")
-   - Request specific revisions ("action": "revise")
-   - Ask for additional work ("action": "continue")
-3. Respond using ONLY valid JSON matching this schema:
+1. Strictly audit the Worker's deliverable against the original user task and your implementation plan.
+2. If the deliverable contains code (HTML, JavaScript, Go, Python, etc.), mentally trace the execution from start to finish:
+   - Check that all scripts actually run on page load and update the DOM.
+   - Check that API parameters (such as IANA timezones in Intl.DateTimeFormat, DOM IDs, variables, and event listeners) are 100% valid and will not throw runtime exceptions or leave placeholders like "--:--:--".
+   - Check that the code is complete and not truncated.
+3. If you find ANY bug, broken logic, invalid parameter, or missing requirement, you MUST set "action": "revise" and explain the exact fix needed.
+4. Only set "action": "complete" when the deliverable is verified working and complete.
+5. Respond using ONLY valid JSON matching this schema:
 {
   "action": "complete | revise | continue",
-  "message": "Your detailed review, critique, or specific revision instructions",
-  "completion_summary": "Final summary if action is complete, otherwise empty"
+  "message": "Your detailed technical review, bug report, or approval",
+  "completion_summary": "Brief final summary if action is complete, otherwise empty"
 }`
 
 	taskBudget := maxChars / 5
@@ -796,7 +797,7 @@ Your responsibilities:
 		sb.WriteString("\n")
 	}
 	sb.WriteString(fmt.Sprintf("### Latest Worker Result (Round %d of %d):\n%s\n\n", round, maxRounds, truncateText(latestWorkerResult, workerBudget)))
-	sb.WriteString("Review the Worker's deliverable and respond with your decision in the required JSON format.")
+	sb.WriteString("Audit the Worker's deliverable carefully and respond with your decision in the required JSON format.")
 
 	return []provider.Message{
 		{Role: "system", Content: sysPrompt},
