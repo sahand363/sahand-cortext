@@ -53,6 +53,9 @@ const (
 	EventRevisionCompleted   EventType = "revision_completed"
 	EventParticipantFallback EventType = "participant_fallback"
 	EventUserRevision        EventType = "user_revision_requested"
+	EventAuditStarted        EventType = "audit_started"
+	EventAuditCompleted      EventType = "audit_completed"
+	EventAuditApplied        EventType = "audit_applied"
 	EventTaskCompleted       EventType = "task_completed"
 	EventTaskFailed          EventType = "task_failed"
 	EventTaskCancelled       EventType = "task_cancelled"
@@ -62,6 +65,7 @@ const (
 const (
 	RoleCoordinator = "coordinator"
 	RoleWorker      = "worker"
+	RoleAuditor     = "auditor"
 	RoleUser        = "user"
 )
 
@@ -109,7 +113,7 @@ type JobDetails struct {
 type Participant struct {
 	ID           int64     `json:"id"`
 	JobID        string    `json:"job_id"`
-	Role         string    `json:"role"` // "coordinator", "worker", or additional roles
+	Role         string    `json:"role"` // "coordinator", "worker", "auditor", or additional roles
 	Name         string    `json:"name"`
 	Provider     string    `json:"provider"`
 	Model        string    `json:"model"`
