@@ -1146,3 +1146,116 @@ footer b{margin-left:auto;font-weight:500;letter-spacing:1px}
   background:#f7b955;
   box-shadow:0 0 8px #f7b955;
 }
+
+
+/* Independent Second-Opinion AI Auditor Toolbar & Report */
+.orch-audit-toolbar{
+  display:flex;
+  justify-content:space-between;
+  align-items:center;
+  gap:14px;
+  flex-wrap:wrap;
+  padding:13px 16px;
+  margin-bottom:14px;
+  background:#111926;
+  border:1px solid #2d3e58;
+  border-radius:10px;
+}
+.orch-audit-info{
+  display:grid;
+  gap:3px;
+  flex:1;
+  min-width:220px;
+}
+.orch-audit-info b{
+  font-size:14px;
+  color:#d9e8ff;
+}
+.orch-audit-info span{
+  font-size:12.5px;
+  color:#8696b0;
+}
+.orch-audit-controls{
+  display:flex;
+  align-items:center;
+  gap:8px;
+  flex-wrap:wrap;
+}
+.orch-auditor-select{
+  background:#0b1018;
+  border:1px solid #354866;
+  color:#e4ecf7;
+  border-radius:8px;
+  padding:8px 12px;
+  font-size:13px;
+  max-width:320px;
+  outline:none;
+}
+.orch-audit-report{
+  margin-bottom:16px;
+  padding:15px 18px;
+  background:linear-gradient(135deg,#131d2b,#101620);
+  border:1px solid #3c5478;
+  border-radius:10px;
+}
+.orch-audit-report-head{
+  display:flex;
+  justify-content:space-between;
+  align-items:center;
+  gap:12px;
+  flex-wrap:wrap;
+  padding-bottom:10px;
+  border-bottom:1px solid #26364d;
+  margin-bottom:10px;
+}
+.orch-audit-report-head b{
+  font-size:13.5px;
+  color:#d5e4fa;
+  margin-left:8px;
+}
+.orch-audit-report-actions{
+  display:flex;
+  gap:8px;
+  align-items:center;
+  flex-wrap:wrap;
+}
+.orch-audit-summary{
+  font-size:14.5px;
+  line-height:1.7;
+  color:#e3ebf7;
+  white-space:pre-wrap;
+  margin-bottom:10px;
+}
+.orch-audit-details summary{
+  cursor:pointer;
+  font-size:12.5px;
+  font-weight:600;
+  color:#91b8ff;
+  user-select:none;
+}
+.orch-audit-body{
+  margin-top:10px;
+  padding:12px 14px;
+  background:#0b0f16;
+  border:1px solid #253246;
+  border-radius:8px;
+  font-size:14px;
+  line-height:1.75;
+  color:#cfd9e8;
+  white-space:pre-wrap;
+  overflow-wrap:anywhere;
+}
+.orch-msg-card.role-auditor{
+  border-left:3px solid #c792ea;
+  background:#161524;
+}
+.orch-role-tag.auditor{
+  background:#2d203d;
+  color:#e2b8ff;
+}
+.evt-audit_started .orch-event-dot,
+.evt-audit_completed .orch-event-dot,
+.evt-audit_applied .orch-event-dot{
+  background:#c792ea;
+  box-shadow:0 0 8px #c792ea;
+}
