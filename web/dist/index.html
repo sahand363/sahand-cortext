@@ -269,6 +269,30 @@
               <!-- Configured Participants Roster Pill Bar -->
               <div id="orch-detail-roster" class="orch-detail-roster"></div>
 
+              <!-- Collaboration Exchange Telemetry Summary Bar -->
+              <div id="orch-stats-bar" class="orch-stats-bar">
+                <div class="orch-stat-box">
+                  <span>Messages Exchanged</span>
+                  <b id="orch-stat-msgs">0</b>
+                  <small id="orch-stat-msgs-sub">0 Coordinator · 0 Worker</small>
+                </div>
+                <div class="orch-stat-box">
+                  <span>Review Revisions</span>
+                  <b id="orch-stat-revisions">0</b>
+                  <small id="orch-stat-revisions-sub">Rounds completed: 0</small>
+                </div>
+                <div class="orch-stat-box">
+                  <span>Failovers & Retries</span>
+                  <b id="orch-stat-failovers">0</b>
+                  <small id="orch-stat-failovers-sub">Automatic model switches</small>
+                </div>
+                <div class="orch-stat-box">
+                  <span>Total Model Time</span>
+                  <b id="orch-stat-latency">0.0 s</b>
+                  <small id="orch-stat-latency-sub">Combined API compute</small>
+                </div>
+              </div>
+
               <!-- Final Deliverable Card (when completed) -->
               <div id="orch-final-card" class="orch-final-card hidden">
                 <div class="orch-final-head">
@@ -276,7 +300,18 @@
                     <div class="eyebrow">APPROVED DELIVERABLE</div>
                     <h3>Final Collaboration Result</h3>
                   </div>
-                  <button type="button" class="tool-btn" id="orch-copy-result-btn">📋 Copy Result</button>
+                  <div class="orch-final-actions">
+                    <button type="button" class="tool-btn hidden" id="orch-preview-toggle-btn">👁 Live HTML Preview</button>
+                    <button type="button" class="tool-btn" id="orch-download-result-btn">⬇ Download File</button>
+                    <button type="button" class="tool-btn" id="orch-copy-result-btn">📋 Copy Result</button>
+                  </div>
+                </div>
+                <div id="orch-preview-wrap" class="orch-preview-wrap hidden">
+                  <div class="orch-preview-bar">
+                    <span>SANDBOXED LIVE HTML PREVIEW</span>
+                    <button type="button" class="btn-link" id="orch-preview-close-btn">Close preview ×</button>
+                  </div>
+                  <iframe id="orch-preview-frame" class="orch-preview-frame" sandbox="allow-scripts allow-modals"></iframe>
                 </div>
                 <div id="orch-final-body" class="orch-final-body" dir="auto"></div>
               </div>
@@ -378,7 +413,7 @@
         </div>
       </section>
     </div>
-    <footer><span>SAHAND-CORTEXT</span><i>·</i> PRIVATE MULTI-PROVIDER AI WORKSPACE <b>v0.4.4</b></footer>
+    <footer><span>SAHAND-CORTEXT</span><i>·</i> PRIVATE MULTI-PROVIDER AI WORKSPACE <b>v0.4.5</b></footer>
   </main>
 </div>
 <div id="toast" class="toast"></div>
