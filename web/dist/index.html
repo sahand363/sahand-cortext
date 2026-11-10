@@ -327,6 +327,24 @@
                 <div id="orch-final-summary-note" class="orch-msg-summary hidden" dir="auto"></div>
               </div>
 
+              <!-- Human-in-the-Loop Interactive Revision Composer -->
+              <div id="orch-revision-card" class="orch-revision-card hidden">
+                <div class="orch-revision-head">
+                  <div>
+                    <div class="eyebrow">HUMAN-IN-THE-LOOP ITERATION</div>
+                    <h3>Request Changes or Add Features to This Project</h3>
+                    <p>Tell the AI team what to fix, change, or add. They will keep your existing project files and produce an updated version.</p>
+                  </div>
+                </div>
+                <form id="orch-revision-form" class="orch-revision-form">
+                  <textarea id="orch-revision-input" dir="auto" rows="3" placeholder="Describe the changes or new features you want… / تغییرات یا قابلیت‌های جدیدی که می‌خواهید به این پروژه اضافه شود را بنویسید…" required></textarea>
+                  <div class="orch-revision-actions">
+                    <span class="muted-note">Adds +3 collaboration rounds and resumes with full project context.</span>
+                    <button type="submit" class="btn btn-primary btn-small" id="orch-revision-submit">Send Revision to AI Team <span>↗</span></button>
+                  </div>
+                </form>
+              </div>
+
               <!-- Sub-tabs: Collaboration Transcript vs Durable Event Timeline -->
               <div class="orch-Monitor-tabs">
                 <button type="button" class="orch-view-tab active" data-orchview="messages">Collaboration Transcript (<span id="orch-msg-count">0</span>)</button>
@@ -424,7 +442,7 @@
         </div>
       </section>
     </div>
-    <footer><span>SAHAND-CORTEXT</span><i>·</i> PRIVATE MULTI-PROVIDER AI WORKSPACE <b>v0.4.6</b></footer>
+    <footer><span>SAHAND-CORTEXT</span><i>·</i> PRIVATE MULTI-PROVIDER AI WORKSPACE <b>v0.4.7</b></footer>
   </main>
 </div>
 <div id="toast" class="toast"></div>
