@@ -27,7 +27,7 @@
     <nav class="main-nav">
       <button class="nav-link active" data-page="chat"><span class="nav-icon">▤</span>Chat <span class="nav-count" id="chat-count">01</span></button>
       <button class="nav-link" data-page="models"><span class="nav-icon">✳</span>Models & providers</button>
-      <button class="nav-link" data-page="orchestration"><span class="nav-icon">⌘</span>AI orchestration <span class="soon">SOON</span></button>
+      <button class="nav-link" data-page="orchestration"><span class="nav-icon">⌘</span>AI orchestration <span class="nav-count" id="orch-count">00</span></button>
       <button class="nav-link" data-page="memory"><span class="nav-icon">◉</span>Topic memory <span class="soon">SOON</span></button>
       <button class="nav-link" data-page="sessions"><span class="nav-icon">◷</span>Sessions</button>
     </nav>
@@ -64,13 +64,13 @@
           <div class="eyebrow">THINK WITHOUT LIMITS</div>
           <h1>A space for<br><em>what’s next.</em></h1>
           <p>Gemini, OpenRouter & CodeCraft API. One private workspace.</p>
-          <div class="hero-actions"><button class="btn btn-primary" id="hero-start">Start a conversation <span>↗</span></button><button class="btn btn-quiet" data-goto="models">Explore & test models <span>→</span></button></div>
-          <div class="capability-row"><span><i>✳</i> Google Gemini</span><span><i>⇄</i> OpenRouter (Free Models)</span><span><i>⚡</i> CodeCraft API</span></div>
+          <div class="hero-actions"><button class="btn btn-primary" id="hero-start">Start a conversation <span>↗</span></button><button class="btn btn-quiet" data-goto="orchestration">Launch AI Orchestration <span>→</span></button></div>
+          <div class="capability-row"><span><i>✳</i> Google Gemini</span><span><i>⇄</i> OpenRouter (Free Models)</span><span><i>⌘</i> Multi-Model Orchestration</span></div>
         </div>
         <div id="chat-active" class="chat-active hidden">
           <div class="conversation-head">
             <div class="conversation-title-area">
-              <div class="eyebrow">PRIVATE CONVERSATION</div>
+              <div class="eyebrow">ORDINARY CHAT · PERSISTENT CONTEXT</div>
               <div class="title-display-row" id="title-display-row">
                 <span id="pinned-indicator" class="pinned-badge hidden" title="Pinned conversation">📌</span>
                 <h2 id="conversation-title" dir="auto">New conversation</h2>
@@ -90,7 +90,7 @@
           </div>
           <div class="messages" id="messages"></div>
           <div class="composer-area">
-            <div class="composer-context"><span><i class="live-dot"></i> <b id="active-provider-label">Gemini</b> · <span id="active-model-label">gemini-2.0-flash</span></span><span>Responses are routed through your hub</span></div>
+            <div class="composer-context"><span><i class="live-dot"></i> <b id="active-provider-label">Gemini</b> · <span id="active-model-label">gemini-2.0-flash</span></span><span>Multi-turn session context enabled</span></div>
             <form id="chat-form" class="composer">
               <textarea id="message-input" dir="auto" rows="1" placeholder="Ask anything in Persian or English… / پیام خود را بنویسید…" required></textarea>
               <div class="composer-bottom">
@@ -148,7 +148,136 @@
         </div>
       </section>
 
-      <section id="page-orchestration" class="page module-page hidden"><div class="page-heading"><div><div class="eyebrow">MULTI-AGENT WORKSPACE</div><h1>AI orchestration</h1><p>Let specialized models work together on a shared task.</p></div><span class="status-pill planned">IN DEVELOPMENT</span></div><div class="orchestrator-canvas"><div class="orchestrator-center"><div class="orchestrator-node lead">✳<b>Coordinator</b><small>Lead intelligence</small></div><div class="orbit-nodes"><div class="orchestrator-node">G<b>Research</b><small>Information</small></div><div class="orchestrator-node">C<b>Builder</b><small>Code & logic</small></div><div class="orchestrator-node">V<b>Reviewer</b><small>Quality check</small></div></div></div><div class="canvas-caption">A shared context · Multiple perspectives · One coordinated result</div></div><div class="info-note">The orchestration interface is designed now. Agent routing, shared task state and model-to-model handoff will be added in a later release.</div></section>
+      <section id="page-orchestration" class="page module-page hidden">
+        <div class="page-heading">
+          <div>
+            <div class="eyebrow">MULTI-MODEL COLLABORATION ENGINE</div>
+            <h1>AI orchestration</h1>
+            <p>Coordinate multiple AI models across providers to plan, execute, review, and refine complex tasks in the background.</p>
+          </div>
+          <div class="heading-actions">
+            <button type="button" class="btn btn-quiet btn-small" id="orch-refresh-btn">↻ Refresh</button>
+            <button type="button" class="btn btn-primary btn-small" id="orch-new-task-btn">＋ New Collaboration Task</button>
+          </div>
+        </div>
+
+        <div class="orch-workspace-grid">
+          <!-- Left Column: Builder or Active Job Inspector -->
+          <div class="orch-main-col">
+            <!-- 1. New Collaboration Builder Card -->
+            <div id="orch-builder-panel" class="orch-panel">
+              <div class="orch-panel-head">
+                <div>
+                  <div class="eyebrow">TEAM & TASK CONFIGURATION</div>
+                  <h2>Configure Collaboration Team</h2>
+                  <p>Assign at least two participants (Coordinator & Worker). Models never talk directly—Sahand-CorText routes and validates every step.</p>
+                </div>
+              </div>
+
+              <form id="orch-create-form">
+                <div class="orch-participants-header">
+                  <span>PARTICIPANT ROSTER (EXECUTION ORDER)</span>
+                  <button type="button" class="btn btn-quiet btn-small" id="orch-add-participant">＋ Add Participant</button>
+                </div>
+
+                <div id="orch-participants-list" class="orch-participants-list"></div>
+
+                <div class="orch-limits-row">
+                  <label class="orch-limit-field">
+                    <span>Maximum collaboration rounds</span>
+                    <input type="number" id="orch-max-rounds" min="1" max="15" value="5" required>
+                    <small>Plan + Worker/Review cycles (default: 5)</small>
+                  </label>
+                  <label class="orch-limit-field">
+                    <span>Maximum total model calls</span>
+                    <input type="number" id="orch-max-calls" min="2" max="40" value="12" required>
+                    <small>Hard cap on API invocations (default: 12)</small>
+                  </label>
+                </div>
+
+                <div class="orch-task-box">
+                  <label for="orch-task-input">Collaboration Task / Objective</label>
+                  <textarea id="orch-task-input" dir="auto" rows="4" placeholder="Describe the task, architecture, code, or analysis you want the Coordinator and Worker models to collaborate on… / هدف یا تسک مورد نظر را بنویسید…" required></textarea>
+                </div>
+
+                <div id="orch-form-error" class="orch-error-banner hidden"></div>
+
+                <div class="orch-submit-row">
+                  <span class="muted-note">Runs persistently in background workers — safe to close browser or switch tabs.</span>
+                  <button type="submit" class="btn btn-primary" id="orch-submit-btn">Start Collaboration <span>↗</span></button>
+                </div>
+              </form>
+            </div>
+
+            <!-- 2. Live Execution & Historical Job Monitor -->
+            <div id="orch-monitor-panel" class="orch-panel hidden">
+              <div class="orch-monitor-top">
+                <div class="orch-monitor-titles">
+                  <div class="orch-badges-row">
+                    <span class="orch-status-badge" id="orch-detail-status">QUEUED</span>
+                    <span class="orch-stage-badge" id="orch-detail-stage">STAGE: QUEUED</span>
+                    <span class="orch-meta-chip" id="orch-detail-rounds">Round 0 / 5</span>
+                    <span class="orch-meta-chip" id="orch-detail-calls">Calls 0 / 12</span>
+                  </div>
+                  <h2 id="orch-detail-task" dir="auto">Task title</h2>
+                  <div class="orch-detail-sub" id="orch-detail-sub">Job ID: —</div>
+                </div>
+                <div class="orch-monitor-actions">
+                  <button type="button" class="tool-btn danger hidden" id="orch-cancel-btn">⏹ Stop Task</button>
+                  <button type="button" class="tool-btn" id="orch-back-builder-btn">＋ New Task</button>
+                </div>
+              </div>
+
+              <!-- Active Worker Activity Banner -->
+              <div id="orch-active-banner" class="orch-active-banner hidden">
+                <span class="live-dot"></span>
+                <div class="orch-active-copy">
+                  <b id="orch-active-headline">Coordinator is working…</b>
+                  <span id="orch-active-subline">Waiting for model response</span>
+                </div>
+              </div>
+
+              <!-- Error Banner (if failed) -->
+              <div id="orch-detail-error" class="orch-error-banner hidden" dir="auto"></div>
+
+              <!-- Configured Participants Roster Pill Bar -->
+              <div id="orch-detail-roster" class="orch-detail-roster"></div>
+
+              <!-- Final Deliverable Card (when completed) -->
+              <div id="orch-final-card" class="orch-final-card hidden">
+                <div class="orch-final-head">
+                  <div>
+                    <div class="eyebrow">APPROVED DELIVERABLE</div>
+                    <h3>Final Collaboration Result</h3>
+                  </div>
+                  <button type="button" class="tool-btn" id="orch-copy-result-btn">📋 Copy Result</button>
+                </div>
+                <div id="orch-final-body" class="orch-final-body" dir="auto"></div>
+              </div>
+
+              <!-- Sub-tabs: Collaboration Transcript vs Durable Event Timeline -->
+              <div class="orch-Monitor-tabs">
+                <button type="button" class="orch-view-tab active" data-orchview="messages">Collaboration Transcript (<span id="orch-msg-count">0</span>)</button>
+                <button type="button" class="orch-view-tab" data-orchview="events">Live Progress Timeline (<span id="orch-evt-count">0</span>)</button>
+              </div>
+
+              <div id="orch-messages-view" class="orch-stream-list"></div>
+              <div id="orch-events-view" class="orch-events-list hidden"></div>
+            </div>
+          </div>
+
+          <!-- Right Column: Persistent Orchestration Jobs List -->
+          <aside class="orch-history-col">
+            <div class="orch-history-card">
+              <div class="orch-history-head">
+                <b>Collaboration Tasks</b>
+                <span id="orch-jobs-total" class="muted-label">0 TASKS</span>
+              </div>
+              <div id="orch-jobs-list" class="orch-jobs-list"></div>
+            </div>
+          </aside>
+        </div>
+      </section>
 
       <section id="page-memory" class="page module-page hidden"><div class="page-heading"><div><div class="eyebrow">CONTEXT THAT COMPOUNDS</div><h1>Topic memory</h1><p>Keep useful context across conversations without carrying everything.</p></div><span class="status-pill planned">IN DEVELOPMENT</span></div><div class="memory-layout"><div class="memory-card"><div class="memory-card-top"><span>◉</span><span class="soon-pill">PREVIEW</span></div><h3>Relevant by design.</h3><p>Topic summaries, important facts and project context can be retrieved when a new conversation needs them.</p><div class="memory-switch-row"><div><b>Topic memory</b><small>Enable cross-session retrieval</small></div><span class="switch disabled"><i></i></span></div></div><div class="memory-card"><div class="memory-card-top"><span>⌁</span></div><h3>Context selection</h3><p>Only information relevant to the current topic should be added to the model context.</p><div class="memory-tags"><span>Topic summaries</span><span>Key facts</span><span>Project context</span></div></div></div></section>
 
@@ -223,7 +352,7 @@
         </div>
       </section>
     </div>
-    <footer><span>SAHAND-CORTEXT</span><i>·</i> PRIVATE MULTI-PROVIDER AI WORKSPACE <b>v0.3.1</b></footer>
+    <footer><span>SAHAND-CORTEXT</span><i>·</i> PRIVATE MULTI-PROVIDER AI WORKSPACE <b>v0.4.3</b></footer>
   </main>
 </div>
 <div id="toast" class="toast"></div>
