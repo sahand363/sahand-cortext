@@ -21,7 +21,8 @@ type Message struct {
 
 // CallOpts holds optional parameters for model invocations
 type CallOpts struct {
-	MaxTokens int
+	MaxTokens   int
+	DisableRetry bool
 }
 
 // Router handles model calls across Google Gemini, OpenRouter, and CodeCraft API
@@ -67,15 +68,19 @@ func isRetryable(err error) bool {
 	if err == nil {
 		return false
 	}
-	msg := err.Error()
-	return strings.Contains(msg, "HTTP 429") ||
-		strings.Contains(msg, "HTTP 500") ||
-		strings.Contains(msg, "HTTP 502") ||
-		strings.Contains(msg, "HTTP 503") ||
-		strings.Contains(msg, "HTTP 504") ||
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "http 429") ||
+		strings.Contains(msg, "http 500") ||
+		strings.Contains(msg, "http 502") ||
+		strings.Contains(msg, "http 503") ||
+		strings.Contains(msg, "http 504") ||
 		strings.Contains(msg, "timeout") ||
 		strings.Contains(msg, "connection reset") ||
-		strings.Contains(msg, "EOF")
+		strings.Contains(msg, "unexpected end of json") ||
+		strings.Contains(msg, "invalid json response") ||
+		strings.Contains(msg, "empty content") ||
+		strings.Contains(msg, "empty response") ||
+		strings.Contains(msg, "eof")
 }
 
 // Call invokes the appropriate provider with structured history and exponential backoff
@@ -89,6 +94,9 @@ func (r *Router) Call(ctx context.Context, provider, key, model string, messages
 	}
 
 	maxRetries := 2
+	if opts.DisableRetry {
+		maxRetries = 0
+	}
 	var lastErr error
 	var totalLatency int64
 
@@ -175,7 +183,6 @@ func (r *Router) callGemini(ctx context.Context, key, model string, messages []M
 			gemRole = "model"
 		}
 
-		// Merge consecutive turns with the same role (Gemini restriction)
 		if len(contents) > 0 && contents[len(contents)-1].Role == gemRole {
 			contents[len(contents)-1].Parts = append(contents[len(contents)-1].Parts, part{Text: c})
 		} else {
@@ -186,7 +193,6 @@ func (r *Router) callGemini(ctx context.Context, key, model string, messages []M
 		}
 	}
 
-	// Ensure the first content turn in Gemini is always "user"
 	if len(contents) == 0 {
 		contents = append(contents, content{
 			Role:  "user",
@@ -307,7 +313,7 @@ func (r *Router) callOpenAI(ctx context.Context, endpoint, key, model string, me
 	req.Header.Set("Authorization", "Bearer "+key)
 	req.Header.Set("HTTP-Referer", "https://github.com/sahand363/sahand-cortext")
 	req.Header.Set("X-Title", "Sahand-CorText")
-	req.Header.Set("User-Agent", "Sahand-CorText/0.4.0")
+	req.Header.Set("User-Agent", "Sahand-CorText/0.4.4")
 
 	resp, err := r.Client.Do(req)
 	if err != nil {
@@ -320,6 +326,11 @@ func (r *Router) callOpenAI(ctx context.Context, endpoint, key, model string, me
 		return "", fmt.Errorf("%s HTTP %d: %s", label, resp.StatusCode, extractAPIError(raw))
 	}
 
+	trimmedRaw := bytes.TrimSpace(raw)
+	if len(trimmedRaw) == 0 {
+		return "", fmt.Errorf("empty response body from %s model %s", label, model)
+	}
+
 	var parsed struct {
 		Error   any `json:"error"`
 		Choices []struct {
@@ -330,11 +341,11 @@ func (r *Router) callOpenAI(ctx context.Context, endpoint, key, model string, me
 			} `json:"message"`
 		} `json:"choices"`
 	}
-	if err := json.Unmarshal(raw, &parsed); err != nil {
+	if err := json.Unmarshal(trimmedRaw, &parsed); err != nil {
 		return "", fmt.Errorf("invalid JSON response from %s: %w", label, err)
 	}
 	if parsed.Error != nil {
-		return "", fmt.Errorf("%s error: %s", label, extractAPIError(raw))
+		return "", fmt.Errorf("%s error: %s", label, extractAPIError(trimmedRaw))
 	}
 	if len(parsed.Choices) == 0 {
 		return "", fmt.Errorf("no choices returned by %s", label)
