@@ -31,29 +31,30 @@ const (
 type EventType string
 
 const (
-	EventJobCreated         EventType = "job_created"
-	EventJobClaimed         EventType = "job_claimed"
-	EventJobStarted         EventType = "job_started"
-	EventJobWaiting         EventType = "job_waiting"
-	EventRetryScheduled     EventType = "retry_scheduled"
-	EventJobFailed          EventType = "job_failed"
-	EventJobCompleted       EventType = "job_completed"
-	EventJobCancelled       EventType = "job_cancelled"
-	EventWorkerRecovery     EventType = "worker_recovery"
-	EventStepProgress       EventType = "step_progress"
-	EventModelInvoked       EventType = "model_invoked"
-	EventModelResponded     EventType = "model_responded"
-	EventReviewDecision     EventType = "review_decision"
-	EventCoordinatorStarted EventType = "coordinator_started"
-	EventPlanGenerated      EventType = "plan_generated"
-	EventWorkerStarted      EventType = "worker_started"
-	EventWorkerResponded    EventType = "worker_response_received"
-	EventReviewStarted      EventType = "review_started"
-	EventRevisionRequested  EventType = "revision_requested"
-	EventRevisionCompleted  EventType = "revision_completed"
-	EventTaskCompleted      EventType = "task_completed"
-	EventTaskFailed         EventType = "task_failed"
-	EventTaskCancelled      EventType = "task_cancelled"
+	EventJobCreated          EventType = "job_created"
+	EventJobClaimed          EventType = "job_claimed"
+	EventJobStarted          EventType = "job_started"
+	EventJobWaiting          EventType = "job_waiting"
+	EventRetryScheduled      EventType = "retry_scheduled"
+	EventJobFailed           EventType = "job_failed"
+	EventJobCompleted        EventType = "job_completed"
+	EventJobCancelled        EventType = "job_cancelled"
+	EventWorkerRecovery      EventType = "worker_recovery"
+	EventStepProgress        EventType = "step_progress"
+	EventModelInvoked        EventType = "model_invoked"
+	EventModelResponded      EventType = "model_responded"
+	EventReviewDecision      EventType = "review_decision"
+	EventCoordinatorStarted  EventType = "coordinator_started"
+	EventPlanGenerated       EventType = "plan_generated"
+	EventWorkerStarted       EventType = "worker_started"
+	EventWorkerResponded     EventType = "worker_response_received"
+	EventReviewStarted       EventType = "review_started"
+	EventRevisionRequested   EventType = "revision_requested"
+	EventRevisionCompleted   EventType = "revision_completed"
+	EventParticipantFallback EventType = "participant_fallback"
+	EventTaskCompleted       EventType = "task_completed"
+	EventTaskFailed          EventType = "task_failed"
+	EventTaskCancelled       EventType = "task_cancelled"
 )
 
 // Participant Roles
@@ -142,9 +143,12 @@ type StructuredModelResponse struct {
 
 // JobMetadata represents optional configuration stored in Job.Metadata
 type JobMetadata struct {
-	Participants   []Participant `json:"participants,omitempty"`
-	TimeoutSeconds int           `json:"timeout_seconds,omitempty"`
-	MaxContextChar int           `json:"max_context_chars,omitempty"`
+	Participants        []Participant `json:"participants,omitempty"`
+	TimeoutSeconds      int           `json:"timeout_seconds,omitempty"`
+	MaxContextChar      int           `json:"max_context_chars,omitempty"`
+	AutoRetry           *bool         `json:"auto_retry,omitempty"`
+	SwitchParticipant   *bool         `json:"switch_participant,omitempty"`
+	AllowGlobalFallback *bool         `json:"allow_global_fallback,omitempty"`
 }
 
 // Event represents an immutable timestamped execution step
