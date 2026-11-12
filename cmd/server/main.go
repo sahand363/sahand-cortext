@@ -154,8 +154,40 @@ func (a *App) providerKey(p string) string {
 		return os.Getenv("OPENROUTER_API_KEY")
 	case "codecraft":
 		return os.Getenv("CODECRAFT_API_KEY")
+	case "aiprime":
+		return os.Getenv("AIPRIME_API_KEY")
 	default:
 		return os.Getenv("GEMINI_API_KEY")
+	}
+}
+
+func (a *App) loadCustomModels(p string) []string {
+	norm := provider.NormalizeProvider(p)
+	var out []string
+	raw := a.setting(norm + "_custom_models")
+	if raw != "" {
+		_ = json.Unmarshal([]byte(raw), &out)
+	}
+	return out
+}
+
+func (a *App) saveCustomModel(p, modelID string) {
+	norm := provider.NormalizeProvider(p)
+	modelID = strings.TrimSpace(modelID)
+	if modelID == "" {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	list := a.loadCustomModels(norm)
+	for _, existing := range list {
+		if existing == modelID {
+			return
+		}
+	}
+	list = append([]string{modelID}, list...)
+	if data, err := json.Marshal(list); err == nil {
+		_ = a.setSetting(norm+"_custom_models", string(data))
 	}
 }
 
@@ -183,7 +215,7 @@ func (a *App) saveTestRecord(p, model string, rec ModelTestRecord) {
 // verifiedWorkingParticipants returns all models previously verified as working across all configured providers
 func (a *App) verifiedWorkingParticipants() []orchestration.Participant {
 	var out []orchestration.Participant
-	for _, p := range []string{"gemini", "openrouter", "codecraft"} {
+	for _, p := range []string{"gemini", "openrouter", "aiprime", "codecraft"} {
 		if a.providerKey(p) == "" {
 			continue
 		}
@@ -212,6 +244,9 @@ func (a *App) activeProvider() string {
 	}
 	if a.providerKey("openrouter") != "" {
 		return "openrouter"
+	}
+	if a.providerKey("aiprime") != "" {
+		return "aiprime"
 	}
 	if a.providerKey("codecraft") != "" {
 		return "codecraft"
@@ -333,19 +368,22 @@ func (a *App) status(w http.ResponseWriter, r *http.Request) {
 	gCfg := a.providerKey("gemini") != ""
 	oCfg := a.providerKey("openrouter") != ""
 	cCfg := a.providerKey("codecraft") != ""
+	aCfg := a.providerKey("aiprime") != ""
 	jsonOut(w, 200, map[string]any{
 		"status":                "online",
-		"version":               "0.4.4",
+		"version":               "0.5.0",
 		"gemini_configured":     gCfg,
 		"openrouter_configured": oCfg,
 		"codecraft_configured":  cCfg,
-		"any_configured":        gCfg || oCfg || cCfg,
+		"aiprime_configured":    aCfg,
+		"any_configured":        gCfg || oCfg || cCfg || aCfg,
 		"active_provider":       a.activeProvider(),
 		"active_model":          a.activeModel(),
 		"providers": map[string]bool{
 			"gemini":     gCfg,
 			"openrouter": oCfg,
 			"codecraft":  cCfg,
+			"aiprime":    aCfg,
 		},
 	})
 }
@@ -368,7 +406,7 @@ func (a *App) saveProviderKey(w http.ResponseWriter, r *http.Request) {
 	if key == "" {
 		key = a.providerKey(norm)
 	}
-	if len(key) < 10 {
+	if len(key) < 8 {
 		jsonOut(w, 400, map[string]string{"error": "Please enter a valid API key for " + provider.ProviderLabel(norm)})
 		return
 	}
@@ -409,7 +447,7 @@ func (a *App) handleModels(w http.ResponseWriter, r *http.Request) {
 	if q == "all" {
 		all := []ModelInfo{}
 		errorsMap := map[string]string{}
-		for _, p := range []string{"gemini", "openrouter", "codecraft"} {
+		for _, p := range []string{"gemini", "openrouter", "aiprime", "codecraft"} {
 			k := a.providerKey(p)
 			if k == "" {
 				continue
@@ -461,6 +499,73 @@ func (a *App) handleModels(w http.ResponseWriter, r *http.Request) {
 		"active_provider": a.activeProvider(),
 		"active_model":    a.activeModel(),
 	})
+}
+
+// POST /api/models/custom - Allows adding and testing any custom model ID for a provider
+func (a *App) handleAddCustomModel(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", 405)
+		return
+	}
+	var body struct {
+		Provider string `json:"provider"`
+		Model    string `json:"model"`
+	}
+	if json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&body) != nil || strings.TrimSpace(body.Model) == "" {
+		jsonOut(w, 400, map[string]string{"error": "Model ID is required"})
+		return
+	}
+	norm := provider.NormalizeProvider(body.Provider)
+	modelID := strings.TrimSpace(body.Model)
+	if norm == "gemini" {
+		modelID = strings.TrimPrefix(modelID, "models/")
+	}
+
+	key := a.providerKey(norm)
+	if key == "" {
+		jsonOut(w, 400, map[string]string{"error": "Save your " + provider.ProviderLabel(norm) + " API key first"})
+		return
+	}
+
+	a.saveCustomModel(norm, modelID)
+
+	testPrompt := []provider.Message{
+		{Role: "user", Content: "Reply with the single word OK."},
+	}
+	reply, latency, err := a.router.Call(r.Context(), norm, key, modelID, testPrompt, provider.CallOpts{MaxTokens: 16})
+	if err != nil {
+		a.saveTestRecord(norm, modelID, ModelTestRecord{
+			Status:    "failed",
+			LatencyMs: latency,
+			LastError: err.Error(),
+		})
+	} else {
+		a.saveTestRecord(norm, modelID, ModelTestRecord{
+			Status:    "working",
+			LatencyMs: latency,
+		})
+		a.setActiveSelection(norm, modelID)
+	}
+
+	models, _ := a.fetchProviderModels(norm, key)
+	jsonOut(w, 200, map[string]any{
+		"ok":              err == nil,
+		"provider":        norm,
+		"model":           modelID,
+		"latency_ms":      latency,
+		"reply":           strings.TrimSpace(reply),
+		"error":           errString(err),
+		"models":          models,
+		"active_provider": a.activeProvider(),
+		"active_model":    a.activeModel(),
+	})
+}
+
+func errString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 func (a *App) handleTestModel(w http.ResponseWriter, r *http.Request) {
@@ -540,9 +645,109 @@ func (a *App) fetchProviderModels(p, key string) ([]ModelInfo, error) {
 		return a.fetchOpenRouterModels(key)
 	case "codecraft":
 		return a.fetchCodeCraftModels(key)
+	case "aiprime":
+		return a.fetchAIPrimeModels(key)
 	default:
 		return a.fetchGeminiModels(key)
 	}
+}
+
+func (a *App) fetchAIPrimeModels(key string) ([]ModelInfo, error) {
+	req, err := http.NewRequest(http.MethodGet, "https://api.aiprime.shop/v1/models", nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+key)
+	req.Header.Set("Accept", "application/json")
+	client := &http.Client{Timeout: 20 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("network error reaching AIPrime API: %v", err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+
+	if resp.StatusCode == 401 || resp.StatusCode == 403 {
+		return nil, fmt.Errorf("AIPrime API rejected key (HTTP %d)", resp.StatusCode)
+	}
+
+	records := a.loadTestRecords("aiprime")
+	seen := map[string]bool{}
+	out := []ModelInfo{}
+
+	addModel := func(id, disp, desc string, ctxLen int, priceInfo string) {
+		id = strings.TrimSpace(id)
+		if id == "" || seen[id] {
+			return
+		}
+		seen[id] = true
+		if disp == "" {
+			disp = id
+		}
+		rec, exists := records[id]
+		status := "untested"
+		var lat int64
+		var lastErr string
+		if exists {
+			status = rec.Status
+			lat = rec.LatencyMs
+			lastErr = rec.LastError
+		}
+		out = append(out, ModelInfo{
+			Provider:    "aiprime",
+			ID:          id,
+			DisplayName: disp,
+			Description: desc,
+			ContextLen:  ctxLen,
+			IsFree:      false,
+			PriceInfo:   priceInfo,
+			Status:      status,
+			LatencyMs:   lat,
+			LastError:   lastErr,
+		})
+	}
+
+	// Always guarantee featured GLM 5.3 Flash model is present
+	addModel("glm-5.3-flash", "GLM 5.3 Flash", "AIPrime Featured · Reasoning & Vision capable", 128000, "$0.006 in / $0.018 out")
+
+	// Include any user-added custom model IDs for AIPrime
+	for _, customID := range a.loadCustomModels("aiprime") {
+		addModel(customID, customID, "Custom AIPrime model", 0, "AIPrime Wallet Plan")
+	}
+
+	// Parse models returned from /v1/models if available
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		var parsed struct {
+			Data []struct {
+				ID            string `json:"id"`
+				Name          string `json:"name"`
+				Description   string `json:"description"`
+				ContextLength int    `json:"context_length"`
+			} `json:"data"`
+		}
+		if json.Unmarshal(raw, &parsed) == nil {
+			for _, m := range parsed.Data {
+				if m.ID == "" || strings.Contains(strings.ToLower(m.ID), "embed") {
+					continue
+				}
+				addModel(m.ID, m.Name, m.Description, m.ContextLength, "AIPrime Wallet Plan")
+			}
+		}
+	}
+
+	sort.Slice(out, func(i, j int) bool {
+		if statusRank(out[i].Status) != statusRank(out[j].Status) {
+			return statusRank(out[i].Status) < statusRank(out[j].Status)
+		}
+		if out[i].ID == "glm-5.3-flash" {
+			return true
+		}
+		if out[j].ID == "glm-5.3-flash" {
+			return false
+		}
+		return out[i].ID < out[j].ID
+	})
+	return out, nil
 }
 
 func (a *App) fetchGeminiModels(key string) ([]ModelInfo, error) {
@@ -1402,6 +1607,7 @@ func main() {
 	mux.HandleFunc("/api/setup/provider", app.auth(app.saveProviderKey))
 	mux.HandleFunc("/api/models", app.auth(app.handleModels))
 	mux.HandleFunc("/api/models/test", app.auth(app.handleTestModel))
+	mux.HandleFunc("/api/models/custom", app.auth(app.handleAddCustomModel))
 
 	mux.HandleFunc("/api/sessions", app.auth(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
@@ -1460,7 +1666,7 @@ func main() {
 		_ = server.Shutdown(shutdownCtx)
 	}()
 
-	log.Printf("Sahand-CorText v0.4.4 listening on %s", server.Addr)
+	log.Printf("Sahand-CorText v0.5.0 listening on %s", server.Addr)
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}

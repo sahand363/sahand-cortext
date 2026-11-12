@@ -44,6 +44,17 @@ const providerCatalog = {
     helpUrl: "https://openrouter.ai/keys",
     helpBtn: "Open OpenRouter Keys ↗"
   },
+  aiprime: {
+    name: "AIPrime",
+    short: "AIPRIME",
+    icon: "◈",
+    placeholder: "Paste your AIPrime API key (sk-...)",
+    label: "AIPrime API Key (https://api.aiprime.shop/v1)",
+    desc: "Connect AIPrime to use GLM 5.3 Flash (glm-5.3-flash) and any other models available on your AIPrime wallet.",
+    helpText: "Manage your AIPrime keys and models:",
+    helpUrl: "https://aiprime.shop",
+    helpBtn: "Open AIPrime Panel ↗"
+  },
   codecraft: {
     name: "CodeCraft API",
     short: "CODECRAFT",
@@ -57,9 +68,12 @@ const providerCatalog = {
   }
 };
 
+const allProvidersList = ["gemini", "openrouter", "aiprime", "codecraft"];
+
 let providerState = {
   gemini: { configured: false, models: [] },
   openrouter: { configured: false, models: [] },
+  aiprime: { configured: false, models: [] },
   codecraft: { configured: false, models: [] }
 };
 
@@ -142,26 +156,21 @@ function detectCodeLanguageAndFilename(code, hintLang, index) {
     };
   }
 
-  // 1. Check Go FIRST (before checking for embedded <!DOCTYPE html> inside Go strings!)
   if (h === "go" || h === "golang" || /^package\s+[a-zA-Z0-9_]+/m.test(firstLines)) {
     return { filename: index === 0 ? "main.go" : `file_${index + 1}.go`, ext: "go", isHtml: false };
   }
   if (firstLines.startsWith("module ") && firstLines.includes("\ngo ")) {
     return { filename: "go.mod", ext: "mod", isHtml: false };
   }
-  // 2. Check Shell / Bash script
   if (h === "sh" || h === "bash" || h === "shell" || firstLines.startsWith("#!/usr/bin/env bash") || firstLines.startsWith("#!/bin/bash") || firstLines.startsWith("#!/bin/sh")) {
     return { filename: index === 0 ? "install.sh" : `script_${index + 1}.sh`, ext: "sh", isHtml: false };
   }
-  // 3. Check Python
   if (h === "py" || h === "python" || firstLines.startsWith("#!/usr/bin/env python") || /^(import\s+\w+|from\s+\w+\s+import\s+|def\s+\w+\s*\()/m.test(firstLines)) {
     return { filename: index === 0 ? "main.py" : `module_${index + 1}.py`, ext: "py", isHtml: false };
   }
-  // 4. Check standalone HTML (only when the file itself starts with <!DOCTYPE html> or <html)
   if (h === "html" || /^<!doctype\s+html/i.test(firstLines) || /^<html[\s>]/i.test(firstLines)) {
     return { filename: index === 0 ? "index.html" : `page_${index + 1}.html`, ext: "html", isHtml: true };
   }
-  // 5. Check CSS / JS / JSON / YAML / SQL
   if (h === "css") return { filename: index === 0 ? "style.css" : `style_${index + 1}.css`, ext: "css", isHtml: false };
   if (h === "js" || h === "javascript") return { filename: index === 0 ? "app.js" : `script_${index + 1}.js`, ext: "js", isHtml: false };
   if (h === "ts" || h === "typescript") return { filename: index === 0 ? "index.ts" : `module_${index + 1}.ts`, ext: "ts", isHtml: false };
@@ -181,12 +190,10 @@ function stripOuterCodeFence(text) {
   return m ? m[1].trim() : t;
 }
 
-// Unwraps JSON-enveloped deliverables (even when a model produced slightly broken JSON with unescaped quotes)
 function unwrapEnvelopeIfPresent(raw) {
   let s = stripOuterCodeFence(raw);
   if (!s.startsWith("{")) return { text: s, extraFiles: [] };
 
-  // 1. Try standard JSON.parse first
   try {
     const parsed = JSON.parse(s);
     if (parsed && typeof parsed === "object") {
@@ -206,7 +213,6 @@ function unwrapEnvelopeIfPresent(raw) {
     }
   } catch {}
 
-  // 2. Resilient extraction if JSON.parse failed due to unescaped quotes in a huge code response
   const msgMatch = s.match(/"message"\s*:\s*"([\s\S]*)"\s*,\s*"completion_summary"/i) ||
                    s.match(/"message"\s*:\s*"([\s\S]*)"\s*\}/i);
   if (msgMatch && msgMatch[1]) {
@@ -220,7 +226,6 @@ function unwrapEnvelopeIfPresent(raw) {
     return { text: extracted.trim(), extraFiles: [] };
   }
 
-  // 3. If raw string still has literal \n=== FILE: or \n``` inside it, unescape it
   if (s.includes("\\n=== FILE:") || s.includes("\\n```") || s.includes("\\npackage main")) {
     s = s
       .replace(/\\n/g, "\n")
@@ -233,7 +238,6 @@ function unwrapEnvelopeIfPresent(raw) {
   return { text: s, extraFiles: [] };
 }
 
-// Extracts 1 or more project files from a deliverable string
 function extractProjectFiles(rawText, jobId) {
   if (!rawText) return { files: [], summary: "" };
 
@@ -246,7 +250,6 @@ function extractProjectFiles(rawText, jobId) {
     body = body.slice(0, sumIdx).trim();
   }
 
-  // Unwrap outer JSON envelope if the model wrapped its deliverable in {"action":..., "message":...}
   const unwrapped = unwrapEnvelopeIfPresent(body);
   body = unwrapped.text;
 
@@ -278,7 +281,6 @@ function extractProjectFiles(rawText, jobId) {
     });
   }
 
-  // Add any structured files array/map from JSON envelope
   if (unwrapped.extraFiles && unwrapped.extraFiles.length > 0) {
     unwrapped.extraFiles.forEach((ef, i) => {
       const fname = ef.filename || ef.name || ef.path || `file_${i + 1}.txt`;
@@ -290,7 +292,6 @@ function extractProjectFiles(rawText, jobId) {
     });
   }
 
-  // Strategy 1: Explicit === FILE: path/to/file === markers
   if (files.length === 0) {
     const markerRe = /(?:^|\n)===\s*FILE:\s*([^\n=]+?)\s*===[ \t]*\n/gi;
     const matches = [...body.matchAll(markerRe)];
@@ -308,7 +309,6 @@ function extractProjectFiles(rawText, jobId) {
     }
   }
 
-  // Strategy 2: Multiple or single Markdown code fences ```lang ... ```
   if (files.length === 0) {
     const fenceRe = /```([a-zA-Z0-9_./-]*)[ \t]*\n([\s\S]*?)```/g;
     const fenceMatches = [...body.matchAll(fenceRe)];
@@ -333,7 +333,6 @@ function extractProjectFiles(rawText, jobId) {
     }
   }
 
-  // Strategy 3: Raw unfenced code or document
   if (files.length === 0) {
     const info = detectCodeLanguageAndFilename(body, "", 0);
     addUniqueFile(info.filename, body, info.ext, info.isHtml);
@@ -372,7 +371,6 @@ function downloadSingleFileObj(fileObj) {
   toast(`⬇ Downloaded ${fileObj.filename}`);
 }
 
-// Pure-JS Standard ZIP Archive Generator (Zero external dependencies)
 const crc32Table = (() => {
   const table = new Uint32Array(256);
   for (let i = 0; i < 256; i++) {
@@ -513,6 +511,7 @@ function applyStatus(s) {
     providerState.gemini.configured = !!s.providers.gemini;
     providerState.openrouter.configured = !!s.providers.openrouter;
     providerState.codecraft.configured = !!s.providers.codecraft;
+    providerState.aiprime.configured = !!s.providers.aiprime;
   }
   if (s.active_provider && s.active_model) {
     setActiveSelectionUI(s.active_provider, s.active_model);
@@ -546,11 +545,11 @@ function setActiveSelectionUI(provider, modelId) {
 }
 
 function updateProviderBadges() {
-  const anyConn = providerState.gemini.configured || providerState.openrouter.configured || providerState.codecraft.configured;
+  const anyConn = allProvidersList.some(p => providerState[p].configured);
   $("header-provider-state").textContent = anyConn ? "CONNECTED" : "SETUP";
   $("header-provider-state").classList.toggle("connected", anyConn);
 
-  ["gemini", "openrouter", "codecraft"].forEach(p => {
+  allProvidersList.forEach(p => {
     const conn = providerState[p].configured;
     const d1 = $("dot-settings-" + p);
     const d2 = $("dot-models-" + p);
@@ -582,6 +581,12 @@ function switchProviderTab(provider) {
   $("provider-help-text").textContent = meta.helpText;
   $("provider-help-link").href = meta.helpUrl;
   $("provider-help-link").textContent = meta.helpBtn;
+
+  if ($("custom-model-id")) {
+    $("custom-model-id").placeholder = provider === "aiprime"
+      ? "Enter AIPrime model ID (e.g. glm-5.3-flash)"
+      : `Enter custom ${meta.name} model ID`;
+  }
 
   $("models-feature-logo").textContent = meta.icon;
   $("models-feature-title").textContent = meta.name;
@@ -982,7 +987,7 @@ async function refreshStatus() {
 }
 
 async function loadAllConfiguredModels() {
-  for (const p of ["gemini", "openrouter", "codecraft"]) {
+  for (const p of allProvidersList) {
     if (providerState[p].configured) {
       await loadProviderModels(p, false);
     }
@@ -1022,7 +1027,7 @@ function buildUnifiedModelOptions(sel) {
   workingGroup.label = "★ Verified Working Models";
   let hasWorking = false;
 
-  ["gemini", "openrouter", "codecraft"].forEach(p => {
+  allProvidersList.forEach(p => {
     const short = providerCatalog[p].short;
     (providerState[p].models || []).filter(m => m.status === "working").forEach(m => {
       hasWorking = true;
@@ -1034,7 +1039,7 @@ function buildUnifiedModelOptions(sel) {
   });
   if (hasWorking) sel.appendChild(workingGroup);
 
-  ["gemini", "openrouter", "codecraft"].forEach(p => {
+  allProvidersList.forEach(p => {
     const list = providerState[p].models || [];
     if (!list.length) return;
     const grp = document.createElement("optgroup");
@@ -1291,6 +1296,43 @@ $("api-key-form").addEventListener("submit", async e => {
   }
 });
 
+// Add & Test Custom Model ID
+if ($("custom-model-form")) {
+  $("custom-model-form").addEventListener("submit", async e => {
+    e.preventDefault();
+    const provider = selectedProvider;
+    const input = $("custom-model-id");
+    const model = input.value.trim();
+    if (!model) return;
+    const btn = $("add-custom-model-btn");
+    btn.disabled = true;
+    btn.textContent = "Testing…";
+    try {
+      const res = await api("/api/models/custom", {
+        method: "POST",
+        body: JSON.stringify({ provider, model })
+      });
+      input.value = "";
+      providerState[provider].models = res.models || [];
+      if (res.ok && res.active_provider && res.active_model) {
+        setActiveSelectionUI(res.active_provider, res.active_model);
+        toast(`✓ [${providerCatalog[provider].short}] ${model} verified working (${res.latency_ms} ms)!`);
+      } else {
+        toast(`Added ${model}, test returned: ${res.error || "failed"}`);
+      }
+      syncModelDropdown();
+      syncAuditorModelDropdown();
+      renderModelGrids();
+      renderOrchParticipantsBuilder();
+    } catch (err) {
+      toast(err.message);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "＋ Add & Test";
+    }
+  });
+}
+
 $("reload-models-btn").onclick = () => loadProviderModels(selectedProvider, true);
 $("refresh-models-page").onclick = () => loadProviderModels(selectedProvider, true);
 $("test-all-models-btn").onclick = () => testShownModels();
@@ -1313,13 +1355,14 @@ document.querySelectorAll(".settings-tab").forEach(b => b.onclick = () => {
    ============================================================================ */
 
 function getConfiguredProvidersList() {
-  return ["gemini", "openrouter", "codecraft"].filter(p => providerState[p].configured);
+  return allProvidersList.filter(p => providerState[p].configured);
 }
 
 function getDefaultModelForProvider(p) {
   const models = providerState[p]?.models || [];
   const working = models.find(m => m.status === "working");
   if (working) return working.id;
+  if (p === "aiprime") return "glm-5.3-flash";
   if (p === "openrouter") {
     const free = models.find(m => m.is_free);
     if (free) return free.id;
@@ -1462,7 +1505,7 @@ function renderOrchParticipantsBuilder() {
     const provWrap = document.createElement("label");
     provWrap.innerHTML = `<span>Provider</span>`;
     const provSelect = document.createElement("select");
-    ["gemini", "openrouter", "codecraft"].forEach(p => {
+    allProvidersList.forEach(p => {
       const opt = document.createElement("option");
       opt.value = p;
       const isCfg = providerState[p].configured;
@@ -1619,7 +1662,7 @@ $("orch-create-form").addEventListener("submit", async e => {
   }
 
   const maxRounds = parseInt($("orch-max-rounds").value, 10) || 5;
-  const maxCalls = parseInt($("orch-max-calls").value, 10) || 12;
+  const maxCalls = parseInt($("orch-max-calls").value, 10) || 15;
   const autoRetry = $("orch-opt-autoretry") ? $("orch-opt-autoretry").checked : true;
   const switchParticipant = $("orch-opt-switch") ? $("orch-opt-switch").checked : true;
   const allowGlobalFallback = $("orch-opt-global-fallback") ? $("orch-opt-global-fallback").checked : true;
@@ -1783,7 +1826,7 @@ function renderOrchJobDetails(d) {
 
   $("orch-detail-stage").textContent = `STAGE: ${stage.toUpperCase()}`;
   $("orch-detail-rounds").textContent = `Round ${d.current_round || 0} / ${d.max_rounds || 5}`;
-  $("orch-detail-calls").textContent = `Messages ${messages.length} / ${d.max_calls || 12}`;
+  $("orch-detail-calls").textContent = `Messages ${messages.length} / ${d.max_calls || 15}`;
   $("orch-detail-task").textContent = d.task || "";
   $("orch-detail-sub").textContent = `Job ID: ${d.id} · Created ${formatShortTimestamp(d.created_at)}${d.retry_count ? ` · Retries: ${d.retry_count}/${d.max_retries}` : ""}`;
 

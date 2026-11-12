@@ -21,16 +21,17 @@ type Message struct {
 
 // CallOpts holds optional parameters for model invocations
 type CallOpts struct {
-	MaxTokens   int
+	MaxTokens    int
 	DisableRetry bool
 }
 
-// Router handles model calls across Google Gemini, OpenRouter, and CodeCraft API
+// Router handles model calls across Google Gemini, OpenRouter, CodeCraft API, and AIPrime
 type Router struct {
 	Client            *http.Client
 	GeminiBaseURL     string
 	OpenRouterBaseURL string
 	CodeCraftBaseURL  string
+	AIPrimeBaseURL    string
 }
 
 func NewRouter() *Router {
@@ -39,6 +40,7 @@ func NewRouter() *Router {
 		GeminiBaseURL:     "https://generativelanguage.googleapis.com/v1beta/models",
 		OpenRouterBaseURL: "https://openrouter.ai/api/v1/chat/completions",
 		CodeCraftBaseURL:  "https://codecraftapi.com/v1/chat/completions",
+		AIPrimeBaseURL:    "https://api.aiprime.shop/v1/chat/completions",
 	}
 }
 
@@ -48,6 +50,8 @@ func NormalizeProvider(p string) string {
 		return "openrouter"
 	case "codecraft":
 		return "codecraft"
+	case "aiprime":
+		return "aiprime"
 	default:
 		return "gemini"
 	}
@@ -59,6 +63,8 @@ func ProviderLabel(p string) string {
 		return "OpenRouter"
 	case "codecraft":
 		return "CodeCraft API"
+	case "aiprime":
+		return "AIPrime"
 	default:
 		return "Google Gemini"
 	}
@@ -119,6 +125,12 @@ func (r *Router) Call(ctx context.Context, provider, key, model string, messages
 			reply, err = r.callOpenAI(ctx, r.OpenRouterBaseURL, key, model, messages, opts, "OpenRouter")
 		case "codecraft":
 			reply, err = r.callOpenAI(ctx, r.CodeCraftBaseURL, key, model, messages, opts, "CodeCraft")
+		case "aiprime":
+			baseURL := r.AIPrimeBaseURL
+			if baseURL == "" {
+				baseURL = "https://api.aiprime.shop/v1/chat/completions"
+			}
+			reply, err = r.callOpenAI(ctx, baseURL, key, model, messages, opts, "AIPrime")
 		default:
 			reply, err = r.callGemini(ctx, key, model, messages, opts)
 		}
@@ -313,7 +325,7 @@ func (r *Router) callOpenAI(ctx context.Context, endpoint, key, model string, me
 	req.Header.Set("Authorization", "Bearer "+key)
 	req.Header.Set("HTTP-Referer", "https://github.com/sahand363/sahand-cortext")
 	req.Header.Set("X-Title", "Sahand-CorText")
-	req.Header.Set("User-Agent", "Sahand-CorText/0.4.4")
+	req.Header.Set("User-Agent", "Sahand-CorText/0.5.0")
 
 	resp, err := r.Client.Do(req)
 	if err != nil {

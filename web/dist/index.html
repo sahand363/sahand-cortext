@@ -56,16 +56,16 @@
       <section id="page-chat" class="page chat-page">
         <div id="setup-banner" class="setup-banner hidden">
           <div class="setup-icon">✳</div>
-          <div class="setup-copy"><b>Connect your AI providers</b><span>Add your Gemini, OpenRouter, or CodeCraft API keys and click any model to verify it works.</span></div>
+          <div class="setup-copy"><b>Connect your AI providers</b><span>Add your Gemini, OpenRouter, AIPrime, or CodeCraft API keys and click any model to verify it works.</span></div>
           <button class="btn btn-primary btn-small" id="setup-open">Configure Providers <span>↗</span></button>
         </div>
         <div id="chat-empty" class="chat-empty">
           <div class="hero-mark"><span>c.</span><i></i></div>
           <div class="eyebrow">THINK WITHOUT LIMITS</div>
           <h1>A space for<br><em>what’s next.</em></h1>
-          <p>Gemini, OpenRouter & CodeCraft API. One private workspace.</p>
+          <p>Gemini, OpenRouter, AIPrime & CodeCraft API. One private workspace.</p>
           <div class="hero-actions"><button class="btn btn-primary" id="hero-start">Start a conversation <span>↗</span></button><button class="btn btn-quiet" data-goto="orchestration">Launch AI Orchestration <span>→</span></button></div>
-          <div class="capability-row"><span><i>✳</i> Google Gemini</span><span><i>⇄</i> OpenRouter (Free Models)</span><span><i>⌘</i> Multi-Model Orchestration</span></div>
+          <div class="capability-row"><span><i>✳</i> Google Gemini</span><span><i>⇄</i> OpenRouter</span><span><i>◈</i> AIPrime (GLM 5.3 Flash)</span><span><i>⌘</i> Multi-Model Orchestration</span></div>
         </div>
         <div id="chat-active" class="chat-active hidden">
           <div class="conversation-head">
@@ -109,7 +109,7 @@
 
       <section id="page-models" class="page module-page hidden">
         <div class="page-heading">
-          <div><div class="eyebrow">THE INTELLIGENCE LAYER</div><h1>Models & providers</h1><p>Switch between Gemini, OpenRouter, and CodeCraft API to inspect and test every model on your plan.</p></div>
+          <div><div class="eyebrow">THE INTELLIGENCE LAYER</div><h1>Models & providers</h1><p>Switch between Gemini, OpenRouter, AIPrime, and CodeCraft API to inspect and test every model on your plan.</p></div>
           <div class="heading-actions">
             <button class="btn btn-quiet btn-small" id="refresh-models-page">↻ Refresh list</button>
             <button class="btn btn-primary btn-small" id="test-all-models-page">⚡ Test shown models</button>
@@ -119,6 +119,7 @@
         <div class="provider-switcher" id="models-provider-tabs">
           <button type="button" class="provider-tab active" data-provider="gemini"><span>✳</span> Google Gemini <i class="p-dot" id="dot-models-gemini"></i></button>
           <button type="button" class="provider-tab" data-provider="openrouter"><span>⇄</span> OpenRouter <i class="p-dot" id="dot-models-openrouter"></i></button>
+          <button type="button" class="provider-tab" data-provider="aiprime"><span>◈</span> AIPrime <i class="p-dot" id="dot-models-aiprime"></i></button>
           <button type="button" class="provider-tab" data-provider="codecraft"><span>⚡</span> CodeCraft API <i class="p-dot" id="dot-models-codecraft"></i></button>
         </div>
 
@@ -189,8 +190,8 @@
                   </label>
                   <label class="orch-limit-field">
                     <span>Maximum total model calls</span>
-                    <input type="number" id="orch-max-calls" min="2" max="40" value="12" required>
-                    <small>Hard cap on API invocations (default: 12)</small>
+                    <input type="number" id="orch-max-calls" min="2" max="40" value="15" required>
+                    <small>Hard cap on API invocations (default: 15)</small>
                   </label>
                 </div>
 
@@ -242,7 +243,7 @@
                     <span class="orch-status-badge" id="orch-detail-status">QUEUED</span>
                     <span class="orch-stage-badge" id="orch-detail-stage">STAGE: QUEUED</span>
                     <span class="orch-meta-chip" id="orch-detail-rounds">Round 0 / 5</span>
-                    <span class="orch-meta-chip" id="orch-detail-calls">Calls 0 / 12</span>
+                    <span class="orch-meta-chip" id="orch-detail-calls">Calls 0 / 15</span>
                   </div>
                   <h2 id="orch-detail-task" dir="auto">Task title</h2>
                   <div class="orch-detail-sub" id="orch-detail-sub">Job ID: —</div>
@@ -407,7 +408,7 @@
       <section id="page-usage" class="page module-page hidden"><div class="page-heading"><div><div class="eyebrow">OBSERVABILITY</div><h1>Usage & analytics</h1><p>Understand model activity, response times and token usage.</p></div><span class="status-pill planned">IN DEVELOPMENT</span></div><div class="metric-grid"><div class="metric-card"><span>Tokens used</span><b>—</b><small>Waiting for telemetry module</small></div><div class="metric-card"><span>Requests</span><b>—</b><small>Waiting for telemetry module</small></div><div class="metric-card"><span>Average latency</span><b>—</b><small>Response timing will appear here</small></div></div><div class="chart-placeholder"><div class="chart-bars"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div><span>ACTIVITY VISUALIZATION · COMING SOON</span></div></section>
 
       <section id="page-settings" class="page module-page hidden">
-        <div class="page-heading"><div><div class="eyebrow">YOUR HUB, YOUR RULES</div><h1>Settings</h1><p>Configure Google Gemini, OpenRouter, and CodeCraft API keys and test which models respond.</p></div></div>
+        <div class="page-heading"><div><div class="eyebrow">YOUR HUB, YOUR RULES</div><h1>Settings</h1><p>Configure Google Gemini, OpenRouter, AIPrime, and CodeCraft API keys and test which models respond.</p></div></div>
         <div class="settings-layout">
           <div class="settings-nav">
             <button class="settings-tab active" data-tab="provider-settings">AI providers</button>
@@ -419,6 +420,7 @@
               <div class="provider-switcher" id="settings-provider-tabs">
                 <button type="button" class="provider-tab active" data-provider="gemini"><span>✳</span> Google Gemini <i class="p-dot" id="dot-settings-gemini"></i></button>
                 <button type="button" class="provider-tab" data-provider="openrouter"><span>⇄</span> OpenRouter <i class="p-dot" id="dot-settings-openrouter"></i></button>
+                <button type="button" class="provider-tab" data-provider="aiprime"><span>◈</span> AIPrime <i class="p-dot" id="dot-settings-aiprime"></i></button>
                 <button type="button" class="provider-tab" data-provider="codecraft"><span>⚡</span> CodeCraft API <i class="p-dot" id="dot-settings-codecraft"></i></button>
               </div>
 
@@ -445,6 +447,15 @@
                 <div id="key-feedback" class="key-feedback">Select a provider tab above, paste its API key, and click "Save Key & Load Models". This page stays open so you can click and test every model.</div>
               </form>
 
+              <!-- Add Custom Model ID Form (for AIPrime or any OpenAI-compatible provider) -->
+              <form id="custom-model-form" class="api-key-box" style="padding-top:16px;margin-top:16px;border-top:1px solid #29313e">
+                <label for="custom-model-id">Add & Test Custom Model ID (e.g. <code>glm-5.3-flash</code>)</label>
+                <div class="key-input-wrap">
+                  <input id="custom-model-id" type="text" placeholder="Enter exact model ID (e.g. glm-5.3-flash)" autocomplete="off">
+                  <button type="submit" class="btn btn-primary btn-small" id="add-custom-model-btn" style="border-radius:0">＋ Add & Test</button>
+                </div>
+              </form>
+
               <div class="models-explorer">
                 <div class="models-explorer-head">
                   <div class="filter-bar">
@@ -467,13 +478,13 @@
               </div>
             </div>
 
-            <div id="general-settings" class="settings-panel hidden"><div class="settings-section-head"><div><h2>Workspace preferences</h2><p>Personalize how your workspace behaves.</p></div></div><div class="setting-row"><div><b>Persian & BiDi typography</b><small>Vazirmatn font + automatic RTL/LTR mixed sentence alignment.</small></div><span class="status-pill connected">Enabled</span></div><div class="setting-row"><div><b>Multi-provider gateway</b><small>Gemini, OpenRouter, and CodeCraft API unified in one hub.</small></div><span class="status-pill connected">Active</span></div><div class="setting-row"><div><b>Interface scale</b><small>Optimized 130% readable typography and layout.</small></div><span class="status-pill connected">130% Comfort</span></div></div>
+            <div id="general-settings" class="settings-panel hidden"><div class="settings-section-head"><div><h2>Workspace preferences</h2><p>Personalize how your workspace behaves.</p></div></div><div class="setting-row"><div><b>Persian & BiDi typography</b><small>Vazirmatn font + automatic RTL/LTR mixed sentence alignment.</small></div><span class="status-pill connected">Enabled</span></div><div class="setting-row"><div><b>Multi-provider gateway</b><small>Gemini, OpenRouter, AIPrime, and CodeCraft API unified in one hub.</small></div><span class="status-pill connected">Active</span></div><div class="setting-row"><div><b>Interface scale</b><small>Optimized 130% readable typography and layout.</small></div><span class="status-pill connected">130% Comfort</span></div></div>
             <div id="security-settings" class="settings-panel hidden"><div class="settings-section-head"><div><h2>Security & access</h2><p>Controls for your private, single-user installation.</p></div></div><div class="setting-row"><div><b>Single-user authentication</b><small>Login protected with a bcrypt password hash and persistent SQLite session.</small></div><span class="status-pill connected">Enabled</span></div><div class="setting-row"><div><b>Server-side provider keys</b><small>API credentials are never stored in browser storage.</small></div><span class="status-pill connected">Enabled</span></div><div class="setting-row"><div><b>Change login credentials</b><small>Use the SSH control center: <code>sudo cortext</code></small></div><span class="status-pill">SSH menu</span></div></div>
           </div>
         </div>
       </section>
     </div>
-    <footer><span>SAHAND-CORTEXT</span><i>·</i> PRIVATE MULTI-PROVIDER AI WORKSPACE <b>v0.4.8</b></footer>
+    <footer><span>SAHAND-CORTEXT</span><i>·</i> PRIVATE MULTI-PROVIDER AI WORKSPACE <b>v0.5.0</b></footer>
   </main>
 </div>
 <div id="toast" class="toast"></div>
