@@ -1,9 +1,9 @@
 package provider
 
 import (
-	"bufio"
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -41,21 +41,25 @@ func NewRouter() *Router {
 		Timeout:   15 * time.Second,
 		KeepAlive: 30 * time.Second,
 	}
+	// Force IPv4 (tcp4) + HTTP/1.1 (disabling HTTP/2 connection multiplexing)
+	// so a slow/stalled upstream request on Cloudflare never poisons subsequent requests.
 	transport := &http.Transport{
 		Proxy: http.ProxyFromEnvironment,
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			return dialer.DialContext(ctx, "tcp4", addr)
 		},
-		ForceAttemptHTTP2:     true,
-		MaxIdleConns:          100,
-		IdleConnTimeout:       90 * time.Second,
+		ForceAttemptHTTP2:     false,
+		TLSNextProto:          make(map[string]func(authority string, c *tls.Conn) http.RoundTripper),
+		DisableKeepAlives:     true,
+		MaxIdleConns:          10,
+		IdleConnTimeout:       30 * time.Second,
 		TLSHandshakeTimeout:   15 * time.Second,
-		ResponseHeaderTimeout: 60 * time.Second,
+		ResponseHeaderTimeout: 120 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
 	}
 
 	return &Router{
-		Client:            &http.Client{Transport: transport, Timeout: 5 * time.Minute},
+		Client:            &http.Client{Transport: transport, Timeout: 180 * time.Second},
 		GeminiBaseURL:     "https://generativelanguage.googleapis.com/v1beta/models",
 		OpenRouterBaseURL: "https://openrouter.ai/api/v1/chat/completions",
 		CodeCraftBaseURL:  "https://codecraftapi.com/v1/chat/completions",
@@ -118,7 +122,7 @@ func (r *Router) Call(ctx context.Context, provider, key, model string, messages
 		return "", 0, errors.New("empty message history")
 	}
 
-	maxRetries := 2
+	maxRetries := 1
 	if opts.DisableRetry {
 		maxRetries = 0
 	}
@@ -127,7 +131,7 @@ func (r *Router) Call(ctx context.Context, provider, key, model string, messages
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
-			backoff := time.Duration(math.Pow(2, float64(attempt))) * 400 * time.Millisecond
+			backoff := time.Duration(math.Pow(2, float64(attempt))) * 500 * time.Millisecond
 			select {
 			case <-time.After(backoff):
 			case <-ctx.Done():
@@ -141,16 +145,18 @@ func (r *Router) Call(ctx context.Context, provider, key, model string, messages
 
 		switch provider {
 		case "openrouter":
-			reply, err = r.callOpenAI(ctx, r.OpenRouterBaseURL, key, model, messages, opts, "OpenRouter", true, false)
+			reply, err = r.callOpenAI(ctx, r.OpenRouterBaseURL, key, model, messages, opts, "OpenRouter", true)
 		case "codecraft":
-			reply, err = r.callOpenAI(ctx, r.CodeCraftBaseURL, key, model, messages, opts, "CodeCraft", false, false)
+			reply, err = r.callOpenAI(ctx, r.CodeCraftBaseURL, key, model, messages, opts, "CodeCraft", false)
 		case "aiprime":
 			baseURL := r.AIPrimeBaseURL
 			if baseURL == "" {
 				baseURL = "https://api.aiprime.shop/v1/chat/completions"
 			}
-			// Use SSE streaming for AIPrime so reasoning models return headers immediately and never stall
-			reply, err = r.callOpenAI(ctx, baseURL, key, model, messages, opts, "AIPrime", false, true)
+			// Do not send max_tokens cap to AIPrime so reasoning models (glm-5.3-flash) never get starved
+			aiPrimeOpts := opts
+			aiPrimeOpts.MaxTokens = 0
+			reply, err = r.callOpenAI(ctx, baseURL, key, model, messages, aiPrimeOpts, "AIPrime", false)
 		default:
 			reply, err = r.callGemini(ctx, key, model, messages, opts)
 		}
@@ -299,8 +305,8 @@ func (r *Router) callGemini(ctx context.Context, key, model string, messages []M
 	return out, nil
 }
 
-// callOpenAI formats standard messages array for OpenAI-compatible gateways (supporting both standard and SSE streaming modes)
-func (r *Router) callOpenAI(ctx context.Context, endpoint, key, model string, messages []Message, opts CallOpts, label string, openRouterHeaders bool, stream bool) (string, error) {
+// callOpenAI formats standard messages array for OpenAI-compatible gateways
+func (r *Router) callOpenAI(ctx context.Context, endpoint, key, model string, messages []Message, opts CallOpts, label string, openRouterHeaders bool) (string, error) {
 	type oaMsg struct {
 		Role    string `json:"role"`
 		Content string `json:"content"`
@@ -309,7 +315,6 @@ func (r *Router) callOpenAI(ctx context.Context, endpoint, key, model string, me
 		Model     string  `json:"model"`
 		Messages  []oaMsg `json:"messages"`
 		MaxTokens int     `json:"max_tokens,omitempty"`
-		Stream    bool    `json:"stream,omitempty"`
 	}
 
 	formatted := make([]oaMsg, 0, len(messages))
@@ -327,7 +332,6 @@ func (r *Router) callOpenAI(ctx context.Context, endpoint, key, model string, me
 	body := oaPayload{
 		Model:    model,
 		Messages: formatted,
-		Stream:   stream,
 	}
 	if opts.MaxTokens > 0 {
 		body.MaxTokens = opts.MaxTokens
@@ -343,15 +347,15 @@ func (r *Router) callOpenAI(ctx context.Context, endpoint, key, model string, me
 		return "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if stream {
-		req.Header.Set("Accept", "text/event-stream, application/json")
-	} else {
-		req.Header.Set("Accept", "application/json")
-	}
+	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Authorization", "Bearer "+key)
+	req.Header.Set("Connection", "close")
 	if openRouterHeaders {
 		req.Header.Set("HTTP-Referer", "https://github.com/sahand363/sahand-cortext")
 		req.Header.Set("X-Title", "Sahand-CorText")
+		req.Header.Set("User-Agent", "Sahand-CorText/0.5.0")
+	} else {
+		req.Header.Set("User-Agent", "curl/8.5.0")
 	}
 
 	resp, err := r.Client.Do(req)
@@ -360,26 +364,14 @@ func (r *Router) callOpenAI(ctx context.Context, endpoint, key, model string, me
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		rawErr, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		return "", fmt.Errorf("%s HTTP %d: %s", label, resp.StatusCode, extractAPIError(rawErr))
-	}
-
-	// If SSE streaming was requested and server responded with event-stream, assemble deltas incrementally
-	contentType := strings.ToLower(resp.Header.Get("Content-Type"))
-	if stream && strings.Contains(contentType, "text/event-stream") {
-		return parseOpenAISSEStream(resp.Body, label, model)
-	}
-
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 5<<20))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("%s HTTP %d: %s", label, resp.StatusCode, extractAPIError(raw))
+	}
+
 	trimmedRaw := bytes.TrimSpace(raw)
 	if len(trimmedRaw) == 0 {
 		return "", fmt.Errorf("empty response body from %s model %s", label, model)
-	}
-
-	// Handle gateways that return SSE lines even without setting text/event-stream header
-	if bytes.HasPrefix(trimmedRaw, []byte("data:")) {
-		return parseOpenAISSEStream(bytes.NewReader(trimmedRaw), label, model)
 	}
 
 	var parsed struct {
@@ -409,79 +401,6 @@ func (r *Router) callOpenAI(ctx context.Context, endpoint, key, model string, me
 	}
 	if out == "" {
 		out = strings.TrimSpace(msg.Reasoning)
-	}
-	if out == "" {
-		return "", fmt.Errorf("empty content returned by %s model %s", label, model)
-	}
-	return out, nil
-}
-
-func parseOpenAISSEStream(r io.Reader, label, model string) (string, error) {
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
-
-	var contentSB strings.Builder
-	var reasoningSB strings.Builder
-
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, ":") {
-			continue
-		}
-		if !strings.HasPrefix(line, "data:") {
-			// Check if gateway returned a raw JSON error object
-			if strings.HasPrefix(line, "{") && strings.Contains(line, `"error"`) {
-				return "", fmt.Errorf("%s error: %s", label, extractAPIError([]byte(line)))
-			}
-			continue
-		}
-		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-		if payload == "[DONE]" {
-			break
-		}
-
-		var chunk struct {
-			Error   any `json:"error"`
-			Choices []struct {
-				Delta struct {
-					Content          string `json:"content"`
-					Reasoning        string `json:"reasoning"`
-					ReasoningContent string `json:"reasoning_content"`
-				} `json:"delta"`
-				Message struct {
-					Content          string `json:"content"`
-					Reasoning        string `json:"reasoning"`
-					ReasoningContent string `json:"reasoning_content"`
-				} `json:"message"`
-			} `json:"choices"`
-		}
-		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
-			continue
-		}
-		if chunk.Error != nil {
-			return "", fmt.Errorf("%s error: %s", label, extractAPIError([]byte(payload)))
-		}
-		for _, ch := range chunk.Choices {
-			if ch.Delta.Content != "" {
-				contentSB.WriteString(ch.Delta.Content)
-			} else if ch.Message.Content != "" {
-				contentSB.WriteString(ch.Message.Content)
-			}
-			if ch.Delta.ReasoningContent != "" {
-				reasoningSB.WriteString(ch.Delta.ReasoningContent)
-			} else if ch.Delta.Reasoning != "" {
-				reasoningSB.WriteString(ch.Delta.Reasoning)
-			}
-		}
-	}
-
-	if err := scanner.Err(); err != nil {
-		return "", fmt.Errorf("%s stream error: %w", label, err)
-	}
-
-	out := strings.TrimSpace(contentSB.String())
-	if out == "" {
-		out = strings.TrimSpace(reasoningSB.String())
 	}
 	if out == "" {
 		return "", fmt.Errorf("empty content returned by %s model %s", label, model)
