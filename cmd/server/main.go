@@ -532,7 +532,7 @@ func (a *App) handleAddCustomModel(w http.ResponseWriter, r *http.Request) {
 	testPrompt := []provider.Message{
 		{Role: "user", Content: "Reply with the single word OK."},
 	}
-	reply, latency, err := a.router.Call(r.Context(), norm, key, modelID, testPrompt, provider.CallOpts{MaxTokens: 16})
+	reply, latency, err := a.router.Call(r.Context(), norm, key, modelID, testPrompt, provider.CallOpts{MaxTokens: 512})
 	if err != nil {
 		a.saveTestRecord(norm, modelID, ModelTestRecord{
 			Status:    "failed",
@@ -597,7 +597,7 @@ func (a *App) handleTestModel(w http.ResponseWriter, r *http.Request) {
 	testPrompt := []provider.Message{
 		{Role: "user", Content: "Reply with the single word OK."},
 	}
-	reply, latency, err := a.router.Call(r.Context(), norm, key, model, testPrompt, provider.CallOpts{MaxTokens: 16})
+	reply, latency, err := a.router.Call(r.Context(), norm, key, model, testPrompt, provider.CallOpts{MaxTokens: 512})
 	if err != nil {
 		a.saveTestRecord(norm, model, ModelTestRecord{
 			Status:    "failed",

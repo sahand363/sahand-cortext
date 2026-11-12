@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -35,8 +36,25 @@ type Router struct {
 }
 
 func NewRouter() *Router {
+	dialer := &net.Dialer{
+		Timeout:   15 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}
+	transport := &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			// Force IPv4 (tcp4) to prevent hangs on VPS environments with broken IPv6 routing
+			return dialer.DialContext(ctx, "tcp4", addr)
+		},
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          100,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   15 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	}
+
 	return &Router{
-		Client:            &http.Client{Timeout: 90 * time.Second},
+		Client:            &http.Client{Transport: transport, Timeout: 90 * time.Second},
 		GeminiBaseURL:     "https://generativelanguage.googleapis.com/v1beta/models",
 		OpenRouterBaseURL: "https://openrouter.ai/api/v1/chat/completions",
 		CodeCraftBaseURL:  "https://codecraftapi.com/v1/chat/completions",
@@ -122,15 +140,15 @@ func (r *Router) Call(ctx context.Context, provider, key, model string, messages
 
 		switch provider {
 		case "openrouter":
-			reply, err = r.callOpenAI(ctx, r.OpenRouterBaseURL, key, model, messages, opts, "OpenRouter")
+			reply, err = r.callOpenAI(ctx, r.OpenRouterBaseURL, key, model, messages, opts, "OpenRouter", true)
 		case "codecraft":
-			reply, err = r.callOpenAI(ctx, r.CodeCraftBaseURL, key, model, messages, opts, "CodeCraft")
+			reply, err = r.callOpenAI(ctx, r.CodeCraftBaseURL, key, model, messages, opts, "CodeCraft", false)
 		case "aiprime":
 			baseURL := r.AIPrimeBaseURL
 			if baseURL == "" {
 				baseURL = "https://api.aiprime.shop/v1/chat/completions"
 			}
-			reply, err = r.callOpenAI(ctx, baseURL, key, model, messages, opts, "AIPrime")
+			reply, err = r.callOpenAI(ctx, baseURL, key, model, messages, opts, "AIPrime", false)
 		default:
 			reply, err = r.callGemini(ctx, key, model, messages, opts)
 		}
@@ -280,7 +298,7 @@ func (r *Router) callGemini(ctx context.Context, key, model string, messages []M
 }
 
 // callOpenAI formats standard messages array for OpenAI-compatible gateways
-func (r *Router) callOpenAI(ctx context.Context, endpoint, key, model string, messages []Message, opts CallOpts, label string) (string, error) {
+func (r *Router) callOpenAI(ctx context.Context, endpoint, key, model string, messages []Message, opts CallOpts, label string, openRouterHeaders bool) (string, error) {
 	type oaMsg struct {
 		Role    string `json:"role"`
 		Content string `json:"content"`
@@ -323,9 +341,10 @@ func (r *Router) callOpenAI(ctx context.Context, endpoint, key, model string, me
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Authorization", "Bearer "+key)
-	req.Header.Set("HTTP-Referer", "https://github.com/sahand363/sahand-cortext")
-	req.Header.Set("X-Title", "Sahand-CorText")
-	req.Header.Set("User-Agent", "Sahand-CorText/0.5.0")
+	if openRouterHeaders {
+		req.Header.Set("HTTP-Referer", "https://github.com/sahand363/sahand-cortext")
+		req.Header.Set("X-Title", "Sahand-CorText")
+	}
 
 	resp, err := r.Client.Do(req)
 	if err != nil {
