@@ -78,8 +78,8 @@ func TestMultiModelCollaborationWorkflowWithRevisions(t *testing.T) {
 	}
 
 	router := provider.NewRouter()
-	router.GeminiBaseURL = ts.URL
-	router.OpenRouterBaseURL = ts.URL
+	_ = router.SetProviderBaseURL("gemini", ts.URL)
+	_ = router.SetProviderBaseURL("openrouter", ts.URL)
 
 	keyResolver := func(p string) string {
 		if p == "gemini" {
@@ -156,7 +156,7 @@ func TestCollaborationMidRoundRecoveryWithoutDuplicateCalls(t *testing.T) {
 	_ = storage.InitSchema()
 
 	router := provider.NewRouter()
-	router.OpenRouterBaseURL = ts.URL
+	_ = router.SetProviderBaseURL("openrouter", ts.URL)
 
 	engine := NewCollaborationEngine(storage, router, func(string) string { return "key" }, nil, DefaultCollaborationConfig())
 
@@ -222,7 +222,7 @@ func TestCollaborationMaxRoundsEnforcement(t *testing.T) {
 	_ = storage.InitSchema()
 
 	router := provider.NewRouter()
-	router.OpenRouterBaseURL = ts.URL
+	_ = router.SetProviderBaseURL("openrouter", ts.URL)
 
 	engine := NewCollaborationEngine(storage, router, func(string) string { return "key" }, nil, DefaultCollaborationConfig())
 
@@ -245,5 +245,110 @@ func TestCollaborationMaxRoundsEnforcement(t *testing.T) {
 	}
 	if atomic.LoadInt32(&calls) != 5 {
 		t.Errorf("expected exactly 5 model calls for 2 rounds, got %d", atomic.LoadInt32(&calls))
+	}
+}
+
+func TestOrchestrationWithDynamicProviderAndCrossAdapterFailover(t *testing.T) {
+	// Primary Worker uses native Gemini adapter (configured to return HTTP 503).
+	// Backup Worker uses a dynamically registered 5th OpenAI-compatible provider ("custom-groq")
+	// and must take over automatically via failover, then Coordinator approves.
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.Contains(r.URL.Path, "gemini-failing:generateContent"):
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"error":{"message":"Gemini overloaded"}}`))
+
+		case strings.Contains(r.URL.Path, "gemini-coord:generateContent"):
+			// Handles both initial planning and final review
+			w.Header().Set("Content-Type", "application/json")
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			rawBytes, _ := json.Marshal(body)
+			if strings.Contains(string(rawBytes), "Latest Worker Result") {
+				_, _ = w.Write([]byte(`{"candidates":[{"content":{"parts":[{"text":"{\"action\":\"complete\",\"message\":\"Approved dynamic worker output.\",\"completion_summary\":\"Cross-adapter failover succeeded.\"}"}]}}]}`))
+			} else {
+				_, _ = w.Write([]byte(`{"candidates":[{"content":{"parts":[{"text":"{\"action\":\"continue\",\"message\":\"Build the service.\",\"completion_summary\":\"\"}"}]}}]}`))
+			}
+
+		case r.URL.Path == "/dynamic-v1/chat/completions":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"SUMMARY: Built via dynamic OpenAI-compat provider\n=== FILE: app.go ===\npackage main\n"}}]}`))
+
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer ts.Close()
+
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	db.SetMaxOpenConns(1)
+	defer db.Close()
+
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);`); err != nil {
+		t.Fatalf("create settings: %v", err)
+	}
+
+	storage := NewStorage(db)
+	if err := storage.InitSchema(); err != nil {
+		t.Fatalf("init schema: %v", err)
+	}
+
+	router := provider.NewRouter()
+	if err := router.AttachDB(context.Background(), db); err != nil {
+		t.Fatalf("AttachDB: %v", err)
+	}
+	_ = router.SetProviderBaseURL("gemini", ts.URL)
+
+	// Register a 5th dynamic OpenAI-compatible provider purely via Store configuration
+	_, err = router.Store().SaveDynamicProvider(context.Background(), router.Registry(), router.Client, provider.DynamicProviderInput{
+		ID:           "custom-groq",
+		Name:         "Custom Groq",
+		BaseURL:      ts.URL + "/dynamic-v1",
+		AuthType:     "bearer",
+		APIKey:       "gsk-dynamic-test",
+		ManualModels: []string{"llama-3.3-70b"},
+	})
+	if err != nil {
+		t.Fatalf("SaveDynamicProvider: %v", err)
+	}
+
+	keyResolver := func(p string) string {
+		if p == "gemini" {
+			return "test-gemini-key"
+		}
+		if _, cfg, err := router.Registry().Get(p); err == nil {
+			return cfg.APIKey
+		}
+		return ""
+	}
+
+	engine := NewCollaborationEngine(storage, router, keyResolver, nil, DefaultCollaborationConfig())
+	engine.SetProviderConfiguredChecker(func(p string) bool {
+		return router.Registry().IsConfigured(p) || keyResolver(p) != ""
+	})
+
+	ctx := context.Background()
+	participants := []Participant{
+		{Role: RoleCoordinator, Name: "Architect", Provider: "gemini", Model: "gemini-coord"},
+		{Role: RoleWorker, Name: "Primary Gemini Worker", Provider: "gemini", Model: "gemini-failing"},
+		{Role: RoleWorker, Name: "Backup Dynamic Worker", Provider: "custom-groq", Model: "llama-3.3-70b"},
+	}
+	metaBytes, _ := json.Marshal(JobMetadata{Participants: participants})
+	job, err := storage.CreateJob(ctx, "Test cross-adapter failover", 3, 10, string(metaBytes))
+	if err != nil {
+		t.Fatalf("CreateJob: %v", err)
+	}
+	_ = storage.SaveParticipants(ctx, job.ID, participants)
+
+	helper := &executionHelperImpl{workerID: "w-failover", jobID: job.ID, storage: storage, ctx: ctx}
+	result, err := engine.ProcessJob(ctx, job, helper)
+	if err != nil {
+		t.Fatalf("ProcessJob failed: %v", err)
+	}
+	if !strings.Contains(result, "Cross-adapter failover succeeded.") || !strings.Contains(result, "=== FILE: app.go ===") {
+		t.Fatalf("unexpected final deliverable after cross-adapter failover: %s", result)
 	}
 }

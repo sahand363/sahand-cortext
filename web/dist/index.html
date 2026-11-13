@@ -357,7 +357,7 @@
               <textarea id="message-input" dir="auto" rows="1" placeholder="Ask anything in Persian or English… / پیام خود را بنویسید…" required></textarea>
               <div class="composer-bottom">
                 <div class="composer-left">
-                  <div class="model-picker"><span class="gemini-glyph">✳</span><select id="model"><option value="gemini::gemini-2.0-flash">gemini-2.0-flash</option></select><span class="select-arrow">⌄</span></div>
+                  <div class="model-picker"><span class="gemini-glyph">✳</span><select id="model"></select><span class="select-arrow">⌄</span></div>
                   <button type="button" class="btn-link" data-goto="models" title="Check which models work">Test models ↗</button>
                   <span class="composer-hint">↵ to send · Shift + ↵ for new line</span>
                 </div>
@@ -380,12 +380,7 @@
           </div>
         </div>
 
-        <div class="provider-switcher" id="models-provider-tabs">
-          <button type="button" class="provider-tab active" data-provider="gemini"><span>✳</span> Google Gemini <i class="p-dot" id="dot-models-gemini"></i></button>
-          <button type="button" class="provider-tab" data-provider="openrouter"><span>⇄</span> OpenRouter <i class="p-dot" id="dot-models-openrouter"></i></button>
-          <button type="button" class="provider-tab" data-provider="aiprime"><span>◈</span> AIPrime <i class="p-dot" id="dot-models-aiprime"></i></button>
-          <button type="button" class="provider-tab" data-provider="codecraft"><span>⚡</span> CodeCraft API <i class="p-dot" id="dot-models-codecraft"></i></button>
-        </div>
+        <div class="provider-switcher" id="models-provider-tabs"></div>
 
         <div class="provider-feature">
           <div class="provider-feature-head">
@@ -705,76 +700,142 @@
           </div>
           <div class="settings-content">
             <div id="provider-settings" class="settings-panel">
-              <div class="provider-switcher" id="settings-provider-tabs">
-                <button type="button" class="provider-tab active" data-provider="gemini"><span>✳</span> Google Gemini <i class="p-dot" id="dot-settings-gemini"></i></button>
-                <button type="button" class="provider-tab" data-provider="openrouter"><span>⇄</span> OpenRouter <i class="p-dot" id="dot-settings-openrouter"></i></button>
-                <button type="button" class="provider-tab" data-provider="aiprime"><span>◈</span> AIPrime <i class="p-dot" id="dot-settings-aiprime"></i></button>
-                <button type="button" class="provider-tab" data-provider="codecraft"><span>⚡</span> CodeCraft API <i class="p-dot" id="dot-settings-codecraft"></i></button>
-              </div>
+              <div class="provider-switcher" id="settings-provider-tabs"></div>
 
-              <div class="settings-section-head">
-                <div>
-                  <h2 id="settings-provider-title">Google Gemini Connection</h2>
-                  <p id="settings-provider-desc">Save your Google AI Studio key to fetch all Gemini models and test which ones respond.</p>
+              <!-- Dynamic OpenAI-Compatible Provider Builder / Editor -->
+              <form id="custom-provider-form" class="api-key-box hidden" style="margin-bottom:20px;padding-bottom:20px;border-bottom:1px solid #29313e">
+                <div class="settings-section-head" style="padding-bottom:14px;margin-bottom:14px">
+                  <div>
+                    <h2 id="custom-provider-form-title">Add OpenAI-Compatible Provider</h2>
+                    <p>Connect Groq, Together, Mistral, DeepSeek, Ollama, LM Studio, or any OpenAI-compatible <code>/v1</code> endpoint without code changes.</p>
+                  </div>
+                  <button type="button" id="cancel-custom-provider-btn" class="btn btn-quiet btn-small">Cancel</button>
                 </div>
-                <span class="status-pill" id="settings-provider-state">Not connected</span>
-              </div>
 
-              <form id="api-key-form" class="api-key-box">
-                <label for="api-key" id="api-key-label">Google AI Studio API Key</label>
-                <div class="key-input-wrap">
-                  <input id="api-key" type="password" placeholder="Paste your Gemini API key (AIzaSy...)" autocomplete="off">
-                  <button type="button" id="toggle-key" class="key-toggle">Show</button>
+                <div class="orch-part-grid" style="margin-bottom:12px">
+                  <label>
+                    <span>Display Name</span>
+                    <input id="cp-name" type="text" placeholder="e.g. Groq Cloud or Local Ollama" required style="padding:10px 12px;border:1px solid #343f4e;background:#0d121a;border-radius:8px;color:#edf1f8">
+                  </label>
+                  <label>
+                    <span>Provider ID (lowercase slug)</span>
+                    <input id="cp-id" type="text" placeholder="e.g. groq or ollama" required pattern="[a-z0-9][a-z0-9_-]{1,39}" style="padding:10px 12px;border:1px solid #343f4e;background:#0d121a;border-radius:8px;color:#edf1f8">
+                  </label>
                 </div>
+
+                <div class="orch-part-grid" style="margin-bottom:12px">
+                  <label>
+                    <span>Base URL (including <code>/v1</code> if used)</span>
+                    <input id="cp-base-url" type="url" placeholder="https://api.groq.com/openai/v1 or http://127.0.0.1:11434/v1" required style="padding:10px 12px;border:1px solid #343f4e;background:#0d121a;border-radius:8px;color:#edf1f8">
+                  </label>
+                  <label>
+                    <span>Authentication Scheme</span>
+                    <select id="cp-auth-type" style="padding:10px 12px;border:1px solid #343f4e;background:#0d121a;border-radius:8px;color:#edf1f8">
+                      <option value="bearer">Bearer Token (Authorization: Bearer ...)</option>
+                      <option value="header">Custom Header (e.g. x-api-key)</option>
+                      <option value="none">None (Local / No API Key Required)</option>
+                    </select>
+                  </label>
+                </div>
+
+                <div class="orch-part-grid" style="margin-bottom:12px">
+                  <label id="cp-auth-header-wrap" class="hidden">
+                    <span>Custom Auth Header Name</span>
+                    <input id="cp-auth-header" type="text" placeholder="x-api-key" style="padding:10px 12px;border:1px solid #343f4e;background:#0d121a;border-radius:8px;color:#edf1f8">
+                  </label>
+                  <label id="cp-api-key-wrap">
+                    <span>API Key</span>
+                    <input id="cp-api-key" type="password" placeholder="Paste API key (optional if None)" autocomplete="off" style="padding:10px 12px;border:1px solid #343f4e;background:#0d121a;border-radius:8px;color:#edf1f8">
+                  </label>
+                  <label>
+                    <span>Manual / Default Model IDs (comma-separated)</span>
+                    <input id="cp-manual-models" type="text" placeholder="e.g. llama-3.3-70b-versatile, qwen2.5-coder" style="padding:10px 12px;border:1px solid #343f4e;background:#0d121a;border-radius:8px;color:#edf1f8">
+                  </label>
+                </div>
+
+                <label class="orch-check-row" style="margin:10px 0 14px">
+                  <input type="checkbox" id="cp-enable-discovery" checked>
+                  <div>
+                    <b>Auto-discover models via <code>/models</code></b>
+                    <small>Uncheck if this endpoint does not expose a <code>/models</code> list and relies solely on manual model IDs.</small>
+                  </div>
+                </label>
+
                 <div class="key-actions">
-                  <button type="submit" class="btn btn-primary btn-small" id="save-key-btn">Save Key &amp; Load Models <span>↗</span></button>
-                  <button type="button" class="btn btn-quiet btn-small" id="check-all-models-btn">✓ Check All</button>
-                  <button type="button" class="btn btn-quiet btn-small" id="uncheck-all-models-btn">☐ Uncheck All</button>
-                  <button type="button" class="btn btn-quiet btn-small" id="reload-models-btn">↻ Reload Models</button>
-                  <button type="button" class="btn btn-quiet btn-small" id="test-all-models-btn">⚡ Test Shown Models</button>
-                  <button type="button" class="btn btn-quiet btn-small" data-goto="chat">Go to Chat <span>→</span></button>
-                </div>
-                <div id="key-feedback" class="key-feedback">Select a provider tab above, paste its API key, and click "Save Key &amp; Load Models".</div>
-              </form>
-
-              <!-- Add Custom Model ID Form -->
-              <form id="custom-model-form" class="api-key-box" style="padding-top:16px;margin-top:16px;border-top:1px solid #29313e">
-                <label for="custom-model-id">Add &amp; Test Custom Model ID (e.g. <code>glm-5.3-flash</code>)</label>
-                <div class="key-input-wrap">
-                  <input id="custom-model-id" type="text" placeholder="Enter exact model ID (e.g. glm-5.3-flash)" autocomplete="off">
-                  <button type="submit" class="btn btn-primary btn-small" id="add-custom-model-btn" style="border-radius:0">＋ Add &amp; Test</button>
+                  <button type="submit" class="btn btn-primary btn-small" id="save-custom-provider-btn">Save &amp; Register Provider <span>↗</span></button>
                 </div>
               </form>
 
-              <div class="models-explorer">
-                <div class="models-explorer-head">
-                  <div class="filter-bar">
-                    <div>
-                      <h3 id="settings-explorer-title">Available Models</h3>
-                      <p id="settings-models-summary">Click any model card below to test whether it works. Toggle "Enabled" to include or exclude it from Chat &amp; Orchestration.</p>
-                    </div>
-                    <label class="free-filter-wrap" id="settings-free-filter-wrap">
-                      <input type="checkbox" id="settings-free-only">
-                      <span>Show free models only (<code>:free</code>)</span>
-                    </label>
+              <div id="existing-provider-config-wrap">
+                <div class="settings-section-head">
+                  <div>
+                    <h2 id="settings-provider-title">Provider Connection</h2>
+                    <p id="settings-provider-desc">Select a provider tab above to configure credentials and test models.</p>
+                  </div>
+                  <div style="display:flex;gap:8px;align-items:center">
+                    <button type="button" class="btn btn-quiet btn-small hidden" id="edit-custom-provider-btn">✎ Edit Endpoint</button>
+                    <button type="button" class="tool-btn danger small hidden" id="delete-custom-provider-btn">🗑 Delete Provider</button>
+                    <span class="status-pill" id="settings-provider-state">Not connected</span>
                   </div>
                 </div>
-                <div id="settings-models-grid" class="api-models-grid"></div>
-              </div>
 
-              <div class="help-row">
-                <span id="provider-help-text">Need an API key for this provider?</span>
-                <a id="provider-help-link" href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener">Open Google AI Studio ↗</a>
+                <form id="api-key-form" class="api-key-box">
+                  <div id="api-key-input-section">
+                    <label for="api-key" id="api-key-label">API Key</label>
+                    <div class="key-input-wrap">
+                      <input id="api-key" type="password" placeholder="Paste your API key…" autocomplete="off">
+                      <button type="button" id="toggle-key" class="key-toggle">Show</button>
+                    </div>
+                  </div>
+                  <div class="key-actions">
+                    <button type="submit" class="btn btn-primary btn-small" id="save-key-btn">Save Key &amp; Load Models <span>↗</span></button>
+                    <button type="button" class="btn btn-quiet btn-small" id="check-all-models-btn">✓ Check All</button>
+                    <button type="button" class="btn btn-quiet btn-small" id="uncheck-all-models-btn">☐ Uncheck All</button>
+                    <button type="button" class="btn btn-quiet btn-small" id="reload-models-btn">↻ Reload Models</button>
+                    <button type="button" class="btn btn-quiet btn-small" id="test-all-models-btn">⚡ Test Shown Models</button>
+                    <button type="button" class="btn btn-quiet btn-small" data-goto="chat">Go to Chat <span>→</span></button>
+                  </div>
+                  <div id="key-feedback" class="key-feedback">Select a provider tab above, configure its connection, and click "Save Key &amp; Load Models".</div>
+                </form>
+
+                <!-- Add Custom Model ID Form -->
+                <form id="custom-model-form" class="api-key-box" style="padding-top:16px;margin-top:16px;border-top:1px solid #29313e">
+                  <label for="custom-model-id">Add &amp; Test Custom Model ID</label>
+                  <div class="key-input-wrap">
+                    <input id="custom-model-id" type="text" placeholder="Enter exact model ID" autocomplete="off">
+                    <button type="submit" class="btn btn-primary btn-small" id="add-custom-model-btn" style="border-radius:0">＋ Add &amp; Test</button>
+                  </div>
+                </form>
+
+                <div class="models-explorer">
+                  <div class="models-explorer-head">
+                    <div class="filter-bar">
+                      <div>
+                        <h3 id="settings-explorer-title">Available Models</h3>
+                        <p id="settings-models-summary">Click any model card below to test whether it works. Toggle "Enabled" to include or exclude it from Chat &amp; Orchestration.</p>
+                      </div>
+                      <label class="free-filter-wrap hidden" id="settings-free-filter-wrap">
+                        <input type="checkbox" id="settings-free-only">
+                        <span>Show free models only (<code>:free</code>)</span>
+                      </label>
+                    </div>
+                  </div>
+                  <div id="settings-models-grid" class="api-models-grid"></div>
+                </div>
+
+                <div class="help-row" id="provider-help-row">
+                  <span id="provider-help-text">Need an API key for this provider?</span>
+                  <a id="provider-help-link" href="#" target="_blank" rel="noopener">Open Provider Console ↗</a>
+                </div>
               </div>
             </div>
-
             <div id="general-settings" class="settings-panel hidden"><div class="settings-section-head"><div><h2>Workspace preferences</h2><p>Personalize how your workspace behaves.</p></div></div><div class="setting-row"><div><b>Persian &amp; BiDi typography</b><small>Vazirmatn font + automatic RTL/LTR mixed sentence alignment.</small></div><span class="status-pill connected">Enabled</span></div><div class="setting-row"><div><b>Multi-provider gateway</b><small>Gemini, OpenRouter, AIPrime, and CodeCraft API unified in one hub.</small></div><span class="status-pill connected">Active</span></div><div class="setting-row"><div><b>Interface scale</b><small>Optimized 130% readable typography and layout.</small></div><span class="status-pill connected">130% Comfort</span></div></div>
             <div id="security-settings" class="settings-panel hidden"><div class="settings-section-head"><div><h2>Security &amp; access</h2><p>Controls for your private, single-user installation.</p></div></div><div class="setting-row"><div><b>Single-user authentication</b><small>Login protected with a bcrypt password hash and persistent SQLite session.</small></div><span class="status-pill connected">Enabled</span></div><div class="setting-row"><div><b>Server-side provider keys</b><small>API credentials are never stored in browser storage.</small></div><span class="status-pill connected">Enabled</span></div><div class="setting-row"><div><b>Change login credentials</b><small>Use the SSH control center: <code>sudo cortext</code></small></div><span class="status-pill">SSH menu</span></div></div>
           </div>
         </div>
       </section>
     </div>
-    <footer><span>SAHAND-CORTEXT</span><i>·</i> PRIVATE MULTI-PROVIDER AI WORKSPACE <b>v0.5.2</b></footer>
+    <footer><span>SAHAND-CORTEXT</span><i>·</i> PRIVATE MULTI-PROVIDER AI WORKSPACE <b>v0.6.0</b></footer>
   </main>
 </div>
 <div id="toast" class="toast"></div>

@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"os"
@@ -27,6 +26,8 @@ import (
 	"golang.org/x/crypto/bcrypt"
 	_ "modernc.org/sqlite"
 )
+
+const AppVersion = "0.6.0"
 
 type App struct {
 	db          *sql.DB
@@ -132,7 +133,10 @@ func (a *App) initDB() error {
 		}
 	}
 	_, _ = a.db.Exec(`ALTER TABLE sessions ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;`)
-	return a.orchStorage.InitSchema()
+	if err := a.orchStorage.InitSchema(); err != nil {
+		return err
+	}
+	return a.router.AttachDB(context.Background(), a.db)
 }
 
 func (a *App) setting(key string) string {
@@ -147,54 +151,26 @@ func (a *App) setSetting(key, value string) error {
 }
 
 func (a *App) providerKey(p string) string {
-	norm := provider.NormalizeProvider(p)
+	if _, cfg, err := a.router.Registry().Get(p); err == nil && strings.TrimSpace(cfg.APIKey) != "" {
+		return cfg.APIKey
+	}
+	norm := provider.CanonicalID(p)
 	if v := a.setting(norm + "_api_key"); v != "" {
 		return v
 	}
-	switch norm {
-	case "openrouter":
-		return os.Getenv("OPENROUTER_API_KEY")
-	case "codecraft":
-		return os.Getenv("CODECRAFT_API_KEY")
-	case "aiprime":
-		return os.Getenv("AIPRIME_API_KEY")
-	default:
-		return os.Getenv("GEMINI_API_KEY")
-	}
+	envName := strings.ToUpper(strings.ReplaceAll(norm, "-", "_")) + "_API_KEY"
+	return os.Getenv(envName)
 }
 
-func (a *App) loadCustomModels(p string) []string {
-	norm := provider.NormalizeProvider(p)
-	var out []string
-	raw := a.setting(norm + "_custom_models")
-	if raw != "" {
-		_ = json.Unmarshal([]byte(raw), &out)
+func (a *App) isProviderConfigured(p string) bool {
+	if a.router.Registry().IsConfigured(p) {
+		return true
 	}
-	return out
-}
-
-func (a *App) saveCustomModel(p, modelID string) {
-	norm := provider.NormalizeProvider(p)
-	modelID = strings.TrimSpace(modelID)
-	if modelID == "" {
-		return
-	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	list := a.loadCustomModels(norm)
-	for _, existing := range list {
-		if existing == modelID {
-			return
-		}
-	}
-	list = append([]string{modelID}, list...)
-	if data, err := json.Marshal(list); err == nil {
-		_ = a.setSetting(norm+"_custom_models", string(data))
-	}
+	return strings.TrimSpace(a.providerKey(p)) != ""
 }
 
 func (a *App) loadTestRecords(p string) map[string]ModelTestRecord {
-	norm := provider.NormalizeProvider(p)
+	norm := provider.CanonicalID(p)
 	out := map[string]ModelTestRecord{}
 	raw := a.setting(norm + "_model_tests")
 	if raw != "" {
@@ -204,15 +180,12 @@ func (a *App) loadTestRecords(p string) map[string]ModelTestRecord {
 }
 
 func (a *App) setModelsEnabledBatch(p string, models []string, enabled bool) {
-	norm := provider.NormalizeProvider(p)
+	norm := provider.CanonicalID(p)
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	records := a.loadTestRecords(norm)
 	for _, m := range models {
-		modelID := strings.TrimSpace(m)
-		if norm == "gemini" {
-			modelID = strings.TrimPrefix(modelID, "models/")
-		}
+		modelID := a.router.Registry().NormalizeModelID(norm, m)
 		if modelID == "" {
 			continue
 		}
@@ -233,14 +206,15 @@ func (a *App) setModelEnabled(p, model string, enabled bool) {
 }
 
 func (a *App) saveTestRecord(p, model string, rec ModelTestRecord) {
-	norm := provider.NormalizeProvider(p)
+	norm := provider.CanonicalID(p)
+	modelID := a.router.Registry().NormalizeModelID(norm, model)
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	records := a.loadTestRecords(norm)
-	if prev, ok := records[model]; ok {
+	if prev, ok := records[modelID]; ok {
 		rec.Disabled = prev.Disabled
 	}
-	records[model] = rec
+	records[modelID] = rec
 	if data, err := json.Marshal(records); err == nil {
 		_ = a.setSetting(norm+"_model_tests", string(data))
 	}
@@ -248,15 +222,15 @@ func (a *App) saveTestRecord(p, model string, rec ModelTestRecord) {
 
 func (a *App) verifiedWorkingParticipants() []orchestration.Participant {
 	var out []orchestration.Participant
-	for _, p := range []string{"gemini", "openrouter", "aiprime", "codecraft"} {
-		if a.providerKey(p) == "" {
+	for _, prov := range a.router.Registry().List() {
+		if !prov.Configured {
 			continue
 		}
-		records := a.loadTestRecords(p)
+		records := a.loadTestRecords(prov.ID)
 		for modelID, rec := range records {
 			if rec.Status == "working" && !rec.Disabled {
 				out = append(out, orchestration.Participant{
-					Provider: p,
+					Provider: prov.ID,
 					Model:    modelID,
 				})
 			}
@@ -266,39 +240,62 @@ func (a *App) verifiedWorkingParticipants() []orchestration.Participant {
 }
 
 func (a *App) activeProvider() string {
-	if p := a.setting("active_provider"); p != "" {
-		return provider.NormalizeProvider(p)
+	registered := a.router.Registry().List()
+	if p := provider.CanonicalID(a.setting("active_provider")); p != "" {
+		if _, _, err := a.router.Registry().Get(p); err == nil {
+			if a.isProviderConfigured(p) {
+				return p
+			}
+			anyConfigured := false
+			for _, item := range registered {
+				if item.Configured {
+					anyConfigured = true
+					break
+				}
+			}
+			if !anyConfigured {
+				return p
+			}
+		}
 	}
-	if a.providerKey("gemini") != "" {
-		return "gemini"
+	for _, item := range registered {
+		if item.Configured {
+			return item.ID
+		}
 	}
-	if a.providerKey("openrouter") != "" {
-		return "openrouter"
+	if len(registered) > 0 {
+		return registered[0].ID
 	}
-	if a.providerKey("aiprime") != "" {
-		return "aiprime"
-	}
-	if a.providerKey("codecraft") != "" {
-		return "codecraft"
-	}
-	return "gemini"
+	return ""
 }
 
 func (a *App) activeModel() string {
-	if m := a.setting("active_model"); m != "" {
-		return m
+	prov := a.activeProvider()
+	if m := strings.TrimSpace(a.setting("active_model")); m != "" {
+		if storedProv := provider.CanonicalID(a.setting("active_provider")); storedProv == "" || storedProv == prov {
+			return a.router.Registry().NormalizeModelID(prov, m)
+		}
 	}
-	if m := a.setting("gemini_active_model"); m != "" {
-		return m
+	if m := strings.TrimSpace(a.setting(prov + "_active_model")); m != "" {
+		return a.router.Registry().NormalizeModelID(prov, m)
 	}
-	return "gemini-2.0-flash"
+	if p, cfg, err := a.router.Registry().Get(prov); err == nil {
+		if p.Metadata().DefaultModel != "" {
+			return p.Metadata().DefaultModel
+		}
+		if len(cfg.ManualModels) > 0 {
+			return cfg.ManualModels[0]
+		}
+	}
+	return ""
 }
 
 func (a *App) setActiveSelection(p, model string) {
-	norm := provider.NormalizeProvider(p)
+	norm := provider.CanonicalID(p)
+	cleanModel := a.router.Registry().NormalizeModelID(norm, model)
 	_ = a.setSetting("active_provider", norm)
-	_ = a.setSetting("active_model", model)
-	_ = a.setSetting(norm+"_active_model", model)
+	_ = a.setSetting("active_model", cleanModel)
+	_ = a.setSetting(norm+"_active_model", cleanModel)
 }
 
 func (a *App) authenticated(r *http.Request) bool {
@@ -395,26 +392,109 @@ func (a *App) logout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) status(w http.ResponseWriter, r *http.Request) {
-	gCfg := a.providerKey("gemini") != ""
-	oCfg := a.providerKey("openrouter") != ""
-	cCfg := a.providerKey("codecraft") != ""
-	aCfg := a.providerKey("aiprime") != ""
+	registered := a.router.Registry().List()
+	provMap := make(map[string]bool, len(registered))
+	anyConfigured := false
+	for _, p := range registered {
+		provMap[p.ID] = p.Configured
+		if p.Configured {
+			anyConfigured = true
+		}
+	}
 	jsonOut(w, 200, map[string]any{
 		"status":                "online",
-		"version":               "0.5.6",
-		"gemini_configured":     gCfg,
-		"openrouter_configured": oCfg,
-		"codecraft_configured":  cCfg,
-		"aiprime_configured":    aCfg,
-		"any_configured":        gCfg || oCfg || cCfg || aCfg,
+		"version":               AppVersion,
+		"gemini_configured":     provMap["gemini"],
+		"openrouter_configured": provMap["openrouter"],
+		"codecraft_configured":  provMap["codecraft"],
+		"aiprime_configured":    provMap["aiprime"],
+		"any_configured":        anyConfigured,
 		"active_provider":       a.activeProvider(),
 		"active_model":          a.activeModel(),
-		"providers": map[string]bool{
-			"gemini":     gCfg,
-			"openrouter": oCfg,
-			"codecraft":  cCfg,
-			"aiprime":    aCfg,
-		},
+		"providers":             provMap,
+		"providers_list":        registered,
+	})
+}
+
+// GET /api/providers & POST /api/providers
+func (a *App) handleProviders(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		jsonOut(w, 200, map[string]any{
+			"providers":       a.router.Registry().List(),
+			"active_provider": a.activeProvider(),
+			"active_model":    a.activeModel(),
+		})
+	case http.MethodPost:
+		var input provider.DynamicProviderInput
+		if json.NewDecoder(http.MaxBytesReader(w, r.Body, 64*1024)).Decode(&input) != nil {
+			jsonOut(w, 400, map[string]string{"error": "Invalid provider configuration payload"})
+			return
+		}
+		if a.router.Store() == nil {
+			jsonOut(w, 500, map[string]string{"error": "Provider store is not initialized"})
+			return
+		}
+		created, err := a.router.Store().SaveDynamicProvider(r.Context(), a.router.Registry(), a.router.Client, input)
+		if err != nil {
+			jsonOut(w, 400, map[string]string{"error": err.Error()})
+			return
+		}
+
+		models, listErr := a.fetchProviderModels(r.Context(), created.ID, "")
+		if len(models) > 0 && (a.setting("active_model") == "" || a.activeProvider() == created.ID) {
+			a.setActiveSelection(created.ID, models[0].ID)
+		}
+
+		jsonOut(w, 201, map[string]any{
+			"ok":              true,
+			"provider":        created,
+			"providers":       a.router.Registry().List(),
+			"models":          models,
+			"discovery_error": errString(listErr),
+			"active_provider": a.activeProvider(),
+			"active_model":    a.activeModel(),
+		})
+	default:
+		http.Error(w, "method not allowed", 405)
+	}
+}
+
+// DELETE /api/providers/{id}
+func (a *App) handleProviderByID(w http.ResponseWriter, r *http.Request) {
+	id := provider.CanonicalID(strings.TrimPrefix(r.URL.Path, "/api/providers/"))
+	if id == "" {
+		jsonOut(w, 400, map[string]string{"error": "Provider ID is required"})
+		return
+	}
+	if r.Method != http.MethodDelete {
+		http.Error(w, "method not allowed", 405)
+		return
+	}
+	if a.router.Store() == nil {
+		jsonOut(w, 500, map[string]string{"error": "Provider store is not initialized"})
+		return
+	}
+	if err := a.router.Store().DeleteDynamicProvider(r.Context(), a.router.Registry(), id); err != nil {
+		status := 400
+		if errors.Is(err, provider.ErrUnknownProvider) {
+			status = 404
+		}
+		jsonOut(w, status, map[string]string{"error": err.Error()})
+		return
+	}
+
+	if provider.CanonicalID(a.setting("active_provider")) == id {
+		_ = a.setSetting("active_provider", "")
+		_ = a.setSetting("active_model", "")
+	}
+
+	jsonOut(w, 200, map[string]any{
+		"ok":              true,
+		"deleted":         id,
+		"providers":       a.router.Registry().List(),
+		"active_provider": a.activeProvider(),
+		"active_model":    a.activeModel(),
 	})
 }
 
@@ -431,27 +511,36 @@ func (a *App) saveProviderKey(w http.ResponseWriter, r *http.Request) {
 		jsonOut(w, 400, map[string]string{"error": "Invalid request payload"})
 		return
 	}
-	norm := provider.NormalizeProvider(body.Provider)
+	norm := provider.CanonicalID(body.Provider)
+	p, cfg, err := a.router.Registry().Get(norm)
+	if err != nil {
+		jsonOut(w, 400, map[string]string{"error": err.Error()})
+		return
+	}
+
+	requiresKey := p.Metadata().RequiresAPIKey && !strings.EqualFold(cfg.AuthType, "none")
 	key := strings.TrimSpace(body.APIKey)
 	if key == "" {
 		key = a.providerKey(norm)
 	}
-	if len(key) < 8 {
-		jsonOut(w, 400, map[string]string{"error": "Please enter a valid API key for " + provider.ProviderLabel(norm)})
+	if requiresKey && len(key) < 8 {
+		jsonOut(w, 400, map[string]string{"error": "Please enter a valid API key for " + p.Metadata().Name})
 		return
 	}
 
 	start := time.Now()
-	models, err := a.fetchProviderModels(norm, key)
+	models, err := a.fetchProviderModels(r.Context(), norm, key)
 	latency := time.Since(start).Milliseconds()
 	if err != nil {
 		jsonOut(w, 400, map[string]any{"error": err.Error()})
 		return
 	}
 
-	if err := a.setSetting(norm+"_api_key", key); err != nil {
-		jsonOut(w, 500, map[string]string{"error": "Failed to store API key in database"})
-		return
+	if key != "" && a.router.Store() != nil {
+		if err := a.router.Store().SaveAPIKey(r.Context(), a.router.Registry(), norm, key); err != nil {
+			jsonOut(w, 500, map[string]string{"error": "Failed to store API key in database"})
+			return
+		}
 	}
 
 	if len(models) > 0 && (a.setting("active_model") == "" || a.activeProvider() == norm) {
@@ -463,6 +552,7 @@ func (a *App) saveProviderKey(w http.ResponseWriter, r *http.Request) {
 		"provider":        norm,
 		"latency_ms":      latency,
 		"models":          models,
+		"providers":       a.router.Registry().List(),
 		"active_provider": a.activeProvider(),
 		"active_model":    a.activeModel(),
 	})
@@ -473,18 +563,17 @@ func (a *App) handleModels(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", 405)
 		return
 	}
-	q := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("provider")))
+	q := provider.CanonicalID(r.URL.Query().Get("provider"))
 	if q == "all" {
 		all := []ModelInfo{}
 		errorsMap := map[string]string{}
-		for _, p := range []string{"gemini", "openrouter", "aiprime", "codecraft"} {
-			k := a.providerKey(p)
-			if k == "" {
+		for _, prov := range a.router.Registry().List() {
+			if !prov.Configured {
 				continue
 			}
-			ms, err := a.fetchProviderModels(p, k)
+			ms, err := a.fetchProviderModels(r.Context(), prov.ID, "")
 			if err != nil {
-				errorsMap[p] = err.Error()
+				errorsMap[prov.ID] = err.Error()
 				continue
 			}
 			all = append(all, ms...)
@@ -498,11 +587,10 @@ func (a *App) handleModels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	norm := provider.NormalizeProvider(q)
-	key := a.providerKey(norm)
-	if key == "" {
-		jsonOut(w, 200, map[string]any{
-			"provider":        norm,
+	if _, _, err := a.router.Registry().Get(q); err != nil {
+		jsonOut(w, 400, map[string]any{
+			"provider":        q,
+			"error":           err.Error(),
 			"models":          []ModelInfo{},
 			"configured":      false,
 			"active_provider": a.activeProvider(),
@@ -510,10 +598,21 @@ func (a *App) handleModels(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	models, err := a.fetchProviderModels(norm, key)
+
+	if !a.isProviderConfigured(q) {
+		jsonOut(w, 200, map[string]any{
+			"provider":        q,
+			"models":          []ModelInfo{},
+			"configured":      false,
+			"active_provider": a.activeProvider(),
+			"active_model":    a.activeModel(),
+		})
+		return
+	}
+	models, err := a.fetchProviderModels(r.Context(), q, "")
 	if err != nil {
 		jsonOut(w, 400, map[string]any{
-			"provider":        norm,
+			"provider":        q,
 			"error":           err.Error(),
 			"models":          []ModelInfo{},
 			"configured":      true,
@@ -523,7 +622,7 @@ func (a *App) handleModels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonOut(w, 200, map[string]any{
-		"provider":        norm,
+		"provider":        q,
 		"models":          models,
 		"configured":      true,
 		"active_provider": a.activeProvider(),
@@ -531,7 +630,6 @@ func (a *App) handleModels(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// POST /api/models/toggle - Enables or disables one or multiple models in Chat, Orchestration pickers, and Failover pools
 func (a *App) handleToggleModel(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", 405)
@@ -547,7 +645,11 @@ func (a *App) handleToggleModel(w http.ResponseWriter, r *http.Request) {
 		jsonOut(w, 400, map[string]string{"error": "Invalid request payload"})
 		return
 	}
-	norm := provider.NormalizeProvider(body.Provider)
+	norm := provider.CanonicalID(body.Provider)
+	if _, _, err := a.router.Registry().Get(norm); err != nil {
+		jsonOut(w, 400, map[string]string{"error": err.Error()})
+		return
+	}
 	targets := body.Models
 	if strings.TrimSpace(body.Model) != "" {
 		targets = append(targets, strings.TrimSpace(body.Model))
@@ -579,29 +681,32 @@ func (a *App) handleAddCustomModel(w http.ResponseWriter, r *http.Request) {
 		jsonOut(w, 400, map[string]string{"error": "Model ID is required"})
 		return
 	}
-	norm := provider.NormalizeProvider(body.Provider)
-	modelID := strings.TrimSpace(body.Model)
-	if norm == "gemini" {
-		modelID = strings.TrimPrefix(modelID, "models/")
+	norm := provider.CanonicalID(body.Provider)
+	p, _, err := a.router.Registry().Get(norm)
+	if err != nil {
+		jsonOut(w, 400, map[string]string{"error": err.Error()})
+		return
 	}
+	modelID := p.NormalizeModelID(body.Model)
 
-	key := a.providerKey(norm)
-	if key == "" {
-		jsonOut(w, 400, map[string]string{"error": "Save your " + provider.ProviderLabel(norm) + " API key first"})
+	if !a.isProviderConfigured(norm) {
+		jsonOut(w, 400, map[string]string{"error": "Configure your " + p.Metadata().Name + " connection first"})
 		return
 	}
 
-	a.saveCustomModel(norm, modelID)
+	if a.router.Store() != nil {
+		_ = a.router.Store().SaveManualModel(r.Context(), a.router.Registry(), norm, modelID)
+	}
 
 	testPrompt := []provider.Message{
 		{Role: "user", Content: "Reply with the single word OK."},
 	}
-	reply, latency, err := a.router.Call(r.Context(), norm, key, modelID, testPrompt, provider.CallOpts{MaxTokens: 512})
-	if err != nil {
+	reply, latency, callErr := a.router.Call(r.Context(), norm, a.providerKey(norm), modelID, testPrompt, provider.CallOpts{MaxTokens: 512})
+	if callErr != nil {
 		a.saveTestRecord(norm, modelID, ModelTestRecord{
 			Status:    "failed",
 			LatencyMs: latency,
-			LastError: err.Error(),
+			LastError: callErr.Error(),
 		})
 	} else {
 		a.saveTestRecord(norm, modelID, ModelTestRecord{
@@ -612,14 +717,14 @@ func (a *App) handleAddCustomModel(w http.ResponseWriter, r *http.Request) {
 		a.setActiveSelection(norm, modelID)
 	}
 
-	models, _ := a.fetchProviderModels(norm, key)
+	models, _ := a.fetchProviderModels(r.Context(), norm, "")
 	jsonOut(w, 200, map[string]any{
-		"ok":              err == nil,
+		"ok":              callErr == nil,
 		"provider":        norm,
 		"model":           modelID,
 		"latency_ms":      latency,
 		"reply":           strings.TrimSpace(reply),
-		"error":           errString(err),
+		"error":           errString(callErr),
 		"models":          models,
 		"active_provider": a.activeProvider(),
 		"active_model":    a.activeModel(),
@@ -647,27 +752,28 @@ func (a *App) handleTestModel(w http.ResponseWriter, r *http.Request) {
 		jsonOut(w, 400, map[string]string{"error": "Model ID is required"})
 		return
 	}
-	norm := provider.NormalizeProvider(body.Provider)
-	model := strings.TrimSpace(body.Model)
-	if norm == "gemini" {
-		model = strings.TrimPrefix(model, "models/")
+	norm := provider.CanonicalID(body.Provider)
+	p, _, err := a.router.Registry().Get(norm)
+	if err != nil {
+		jsonOut(w, 400, map[string]string{"error": err.Error()})
+		return
 	}
+	model := p.NormalizeModelID(body.Model)
 
-	key := a.providerKey(norm)
-	if key == "" {
-		jsonOut(w, 400, map[string]string{"error": "Save your " + provider.ProviderLabel(norm) + " API key first"})
+	if !a.isProviderConfigured(norm) {
+		jsonOut(w, 400, map[string]string{"error": "Configure your " + p.Metadata().Name + " connection first"})
 		return
 	}
 
 	testPrompt := []provider.Message{
 		{Role: "user", Content: "Reply with the single word OK."},
 	}
-	reply, latency, err := a.router.Call(r.Context(), norm, key, model, testPrompt, provider.CallOpts{MaxTokens: 512})
-	if err != nil {
+	reply, latency, callErr := a.router.Call(r.Context(), norm, a.providerKey(norm), model, testPrompt, provider.CallOpts{MaxTokens: 512})
+	if callErr != nil {
 		a.saveTestRecord(norm, model, ModelTestRecord{
 			Status:    "failed",
 			LatencyMs: latency,
-			LastError: err.Error(),
+			LastError: callErr.Error(),
 		})
 		jsonOut(w, 200, map[string]any{
 			"ok":              false,
@@ -675,7 +781,7 @@ func (a *App) handleTestModel(w http.ResponseWriter, r *http.Request) {
 			"model":           model,
 			"status":          "failed",
 			"latency_ms":      latency,
-			"error":           err.Error(),
+			"error":           callErr.Error(),
 			"active_provider": a.activeProvider(),
 			"active_model":    a.activeModel(),
 		})
@@ -705,257 +811,16 @@ func (a *App) handleTestModel(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (a *App) fetchProviderModels(p, key string) ([]ModelInfo, error) {
-	norm := provider.NormalizeProvider(p)
-	switch norm {
-	case "openrouter":
-		return a.fetchOpenRouterModels(key)
-	case "codecraft":
-		return a.fetchCodeCraftModels(key)
-	case "aiprime":
-		return a.fetchAIPrimeModels(key)
-	default:
-		return a.fetchGeminiModels(key)
-	}
-}
-
-func (a *App) fetchAIPrimeModels(key string) ([]ModelInfo, error) {
-	req, err := http.NewRequest(http.MethodGet, "https://api.aiprime.shop/v1/models", nil)
+func (a *App) fetchProviderModels(ctx context.Context, p, keyOverride string) ([]ModelInfo, error) {
+	norm := provider.CanonicalID(p)
+	discovered, err := a.router.ListModels(ctx, norm, keyOverride)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+key)
-	req.Header.Set("Accept", "application/json")
-	client := &http.Client{Timeout: 20 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("network error reaching AIPrime API: %v", err)
-	}
-	defer resp.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 
-	if resp.StatusCode == 401 || resp.StatusCode == 403 {
-		return nil, fmt.Errorf("AIPrime API rejected key (HTTP %d)", resp.StatusCode)
-	}
-
-	records := a.loadTestRecords("aiprime")
-	seen := map[string]bool{}
-	out := []ModelInfo{}
-
-	addModel := func(id, disp, desc string, ctxLen int, priceInfo string) {
-		id = strings.TrimSpace(id)
-		if id == "" || seen[id] {
-			return
-		}
-		seen[id] = true
-		if disp == "" {
-			disp = id
-		}
-		rec, exists := records[id]
-		status := "untested"
-		var lat int64
-		var lastErr string
-		enabled := true
-		if exists {
-			status = rec.Status
-			lat = rec.LatencyMs
-			lastErr = rec.LastError
-			enabled = !rec.Disabled
-		}
-		out = append(out, ModelInfo{
-			Provider:    "aiprime",
-			ID:          id,
-			DisplayName: disp,
-			Description: desc,
-			ContextLen:  ctxLen,
-			IsFree:      false,
-			PriceInfo:   priceInfo,
-			Status:      status,
-			LatencyMs:   lat,
-			LastError:   lastErr,
-			Enabled:     enabled,
-		})
-	}
-
-	addModel("glm-5.3-flash", "GLM 5.3 Flash", "AIPrime Featured · Reasoning & Vision capable", 128000, "$0.006 in / $0.018 out")
-
-	for _, customID := range a.loadCustomModels("aiprime") {
-		addModel(customID, customID, "Custom AIPrime model", 0, "AIPrime Wallet Plan")
-	}
-
-	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		var parsed struct {
-			Data []struct {
-				ID            string `json:"id"`
-				Name          string `json:"name"`
-				Description   string `json:"description"`
-				ContextLength int    `json:"context_length"`
-			} `json:"data"`
-		}
-		if json.Unmarshal(raw, &parsed) == nil {
-			for _, m := range parsed.Data {
-				if m.ID == "" || strings.Contains(strings.ToLower(m.ID), "embed") {
-					continue
-				}
-				addModel(m.ID, m.Name, m.Description, m.ContextLength, "AIPrime Wallet Plan")
-			}
-		}
-	}
-
-	sort.Slice(out, func(i, j int) bool {
-		if statusRank(out[i].Status) != statusRank(out[j].Status) {
-			return statusRank(out[i].Status) < statusRank(out[j].Status)
-		}
-		if out[i].ID == "glm-5.3-flash" {
-			return true
-		}
-		if out[j].ID == "glm-5.3-flash" {
-			return false
-		}
-		return out[i].ID < out[j].ID
-	})
-	return out, nil
-}
-
-func (a *App) fetchGeminiModels(key string) ([]ModelInfo, error) {
-	endpoint := "https://generativelanguage.googleapis.com/v1beta/models?pageSize=100"
-	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("x-goog-api-key", key)
-	client := &http.Client{Timeout: 20 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("network error reaching Google Gemini API: %v", err)
-	}
-	defer resp.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("Google Gemini API HTTP %d", resp.StatusCode)
-	}
-
-	var parsed struct {
-		Models []struct {
-			Name                       string   `json:"name"`
-			DisplayName                string   `json:"displayName"`
-			Description                string   `json:"description"`
-			InputTokenLimit            int      `json:"inputTokenLimit"`
-			SupportedGenerationMethods []string `json:"supportedGenerationMethods"`
-		} `json:"models"`
-	}
-	if err := json.Unmarshal(raw, &parsed); err != nil {
-		return nil, err
-	}
-
-	records := a.loadTestRecords("gemini")
-	out := []ModelInfo{}
-	for _, m := range parsed.Models {
-		supportsGen := false
-		for _, method := range m.SupportedGenerationMethods {
-			if method == "generateContent" {
-				supportsGen = true
-				break
-			}
-		}
-		if !supportsGen {
-			continue
-		}
-		id := strings.TrimPrefix(m.Name, "models/")
-		if !strings.HasPrefix(id, "gemini") && !strings.HasPrefix(id, "gemma") && !strings.HasPrefix(id, "learnlm") {
-			continue
-		}
-		rec, exists := records[id]
-		status := "untested"
-		var lat int64
-		var lastErr string
-		enabled := true
-		if exists {
-			status = rec.Status
-			lat = rec.LatencyMs
-			lastErr = rec.LastError
-			enabled = !rec.Disabled
-		}
-		disp := m.DisplayName
-		if disp == "" {
-			disp = id
-		}
-		out = append(out, ModelInfo{
-			Provider:    "gemini",
-			ID:          id,
-			DisplayName: disp,
-			Description: m.Description,
-			ContextLen:  m.InputTokenLimit,
-			IsFree:      true,
-			PriceInfo:   "Google AI Studio Plan",
-			Status:      status,
-			LatencyMs:   lat,
-			LastError:   lastErr,
-			Enabled:     enabled,
-		})
-	}
-
-	sort.Slice(out, func(i, j int) bool {
-		if statusRank(out[i].Status) != statusRank(out[j].Status) {
-			return statusRank(out[i].Status) < statusRank(out[j].Status)
-		}
-		return out[i].ID > out[j].ID
-	})
-	return out, nil
-}
-
-func (a *App) fetchOpenRouterModels(key string) ([]ModelInfo, error) {
-	req, err := http.NewRequest(http.MethodGet, "https://openrouter.ai/api/v1/models", nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", "Bearer "+key)
-	client := &http.Client{Timeout: 25 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("network error reaching OpenRouter: %v", err)
-	}
-	defer resp.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 5<<20))
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("OpenRouter HTTP %d", resp.StatusCode)
-	}
-
-	var parsed struct {
-		Data []struct {
-			ID            string `json:"id"`
-			Name          string `json:"name"`
-			Description   string `json:"description"`
-			ContextLength int    `json:"context_length"`
-			Pricing       struct {
-				Prompt     string `json:"prompt"`
-				Completion string `json:"completion"`
-			} `json:"pricing"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(raw, &parsed); err != nil {
-		return nil, err
-	}
-
-	records := a.loadTestRecords("openrouter")
-	out := []ModelInfo{}
-	for _, m := range parsed.Data {
-		if m.ID == "" {
-			continue
-		}
-		pPrompt, _ := strconv.ParseFloat(m.Pricing.Prompt, 64)
-		pComp, _ := strconv.ParseFloat(m.Pricing.Completion, 64)
-		isFree := strings.HasSuffix(m.ID, ":free") || (m.Pricing.Prompt != "" && pPrompt == 0 && pComp == 0)
-
-		priceInfo := "Paid model"
-		if isFree {
-			priceInfo = "FREE ($0 / 1M tokens)"
-		} else if pPrompt > 0 {
-			priceInfo = fmt.Sprintf("$%.2f / 1M in", pPrompt*1000000)
-		}
-
+	records := a.loadTestRecords(norm)
+	out := make([]ModelInfo, 0, len(discovered))
+	for _, m := range discovered {
 		rec, exists := records[m.ID]
 		status := "untested"
 		var lat int64
@@ -967,19 +832,15 @@ func (a *App) fetchOpenRouterModels(key string) ([]ModelInfo, error) {
 			lastErr = rec.LastError
 			enabled = !rec.Disabled
 		}
-		disp := m.Name
-		if disp == "" {
-			disp = m.ID
-		}
 		out = append(out, ModelInfo{
-			Provider:    "openrouter",
+			Provider:    norm,
 			ID:          m.ID,
-			DisplayName: disp,
+			DisplayName: m.DisplayName,
 			Description: m.Description,
-			ContextLen:  m.ContextLength,
-			IsFree:      isFree,
-			PriceInfo:   priceInfo,
-			SortPrice:   pPrompt,
+			ContextLen:  m.ContextLen,
+			IsFree:      m.IsFree,
+			PriceInfo:   m.PriceInfo,
+			SortPrice:   m.SortPrice,
 			Status:      status,
 			LatencyMs:   lat,
 			LastError:   lastErr,
@@ -987,105 +848,8 @@ func (a *App) fetchOpenRouterModels(key string) ([]ModelInfo, error) {
 		})
 	}
 
-	sort.Slice(out, func(i, j int) bool {
-		if statusRank(out[i].Status) != statusRank(out[j].Status) {
-			return statusRank(out[i].Status) < statusRank(out[j].Status)
-		}
-		if out[i].IsFree != out[j].IsFree {
-			return out[i].IsFree
-		}
-		return out[i].ID < out[j].ID
-	})
-	return out, nil
-}
-
-func (a *App) fetchCodeCraftModels(key string) ([]ModelInfo, error) {
-	req, err := http.NewRequest(http.MethodGet, "https://codecraftapi.com/v1/models", nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", "Bearer "+key)
-	req.Header.Set("Accept", "application/json")
-	client := &http.Client{Timeout: 25 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("network error reaching CodeCraft API: %v", err)
-	}
-	defer resp.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("CodeCraft API HTTP %d", resp.StatusCode)
-	}
-
-	var parsed struct {
-		Data []struct {
-			ID            string   `json:"id"`
-			Name          string   `json:"name"`
-			Description   string   `json:"description"`
-			Type          string   `json:"type"`
-			ContextWindow int      `json:"context_window"`
-			Capabilities  []string `json:"capabilities"`
-			Pricing       struct {
-				InputPer1K  float64 `json:"input_per_1k"`
-				OutputPer1K float64 `json:"output_per_1k"`
-			} `json:"pricing"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(raw, &parsed); err != nil {
-		return nil, err
-	}
-
-	records := a.loadTestRecords("codecraft")
-	out := []ModelInfo{}
-	for _, m := range parsed.Data {
-		if m.ID == "" || strings.EqualFold(m.Type, "embedding") || strings.Contains(strings.ToLower(m.ID), "embed") {
-			continue
-		}
-		rec, exists := records[m.ID]
-		status := "untested"
-		var lat int64
-		var lastErr string
-		enabled := true
-		if exists {
-			status = rec.Status
-			lat = rec.LatencyMs
-			lastErr = rec.LastError
-			enabled = !rec.Disabled
-		}
-		disp := m.Name
-		if disp == "" {
-			disp = m.ID
-		}
-		inPer1M := m.Pricing.InputPer1K * 1000
-		priceInfo := "Free Starter Credits"
-		if inPer1M > 0 {
-			priceInfo = fmt.Sprintf("$%.2f / 1M tokens", inPer1M)
-		}
-		out = append(out, ModelInfo{
-			Provider:    "codecraft",
-			ID:          m.ID,
-			DisplayName: disp,
-			Description: m.Description,
-			ContextLen:  m.ContextWindow,
-			IsFree:      true,
-			PriceInfo:   priceInfo,
-			SortPrice:   inPer1M,
-			Status:      status,
-			LatencyMs:   lat,
-			LastError:   lastErr,
-			Enabled:     enabled,
-		})
-	}
-
-	sort.Slice(out, func(i, j int) bool {
-		if statusRank(out[i].Status) != statusRank(out[j].Status) {
-			return statusRank(out[i].Status) < statusRank(out[j].Status)
-		}
-		if out[i].SortPrice != out[j].SortPrice {
-			return out[i].SortPrice < out[j].SortPrice
-		}
-		return out[i].ID < out[j].ID
+	sort.SliceStable(out, func(i, j int) bool {
+		return statusRank(out[i].Status) < statusRank(out[j].Status)
 	})
 	return out, nil
 }
@@ -1230,7 +994,7 @@ func (a *App) sendMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	normProvider := body.Provider
+	normProvider := strings.TrimSpace(body.Provider)
 	chosenModel := strings.TrimSpace(body.Model)
 	if strings.Contains(chosenModel, "::") {
 		parts := strings.SplitN(chosenModel, "::", 2)
@@ -1240,17 +1004,20 @@ func (a *App) sendMessage(w http.ResponseWriter, r *http.Request) {
 	if normProvider == "" {
 		normProvider = a.activeProvider()
 	}
-	normProvider = provider.NormalizeProvider(normProvider)
+	normProvider = provider.CanonicalID(normProvider)
+
+	p, _, regErr := a.router.Registry().Get(normProvider)
+	if regErr != nil {
+		jsonOut(w, 400, map[string]string{"error": regErr.Error()})
+		return
+	}
 	if chosenModel == "" {
 		chosenModel = a.activeModel()
 	}
-	if normProvider == "gemini" {
-		chosenModel = strings.TrimPrefix(chosenModel, "models/")
-	}
+	chosenModel = p.NormalizeModelID(chosenModel)
 
-	key := a.providerKey(normProvider)
-	if key == "" {
-		jsonOut(w, 503, map[string]string{"error": "Please save your " + provider.ProviderLabel(normProvider) + " API key in Settings first."})
+	if !a.isProviderConfigured(normProvider) {
+		jsonOut(w, 503, map[string]string{"error": "Please configure " + p.Metadata().Name + " in Settings first."})
 		return
 	}
 
@@ -1276,10 +1043,10 @@ func (a *App) sendMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	promptMessages := chat.TruncateHistory(history, chat.DefaultConfig())
 
-	answer, elapsed, err := a.router.Call(r.Context(), normProvider, key, chosenModel, promptMessages, provider.CallOpts{})
+	answer, elapsed, err := a.router.Call(r.Context(), normProvider, a.providerKey(normProvider), chosenModel, promptMessages, provider.CallOpts{})
 	if err != nil {
 		a.saveTestRecord(normProvider, chosenModel, ModelTestRecord{Status: "failed", LatencyMs: elapsed, LastError: err.Error()})
-		jsonOut(w, 502, map[string]string{"error": fmt.Sprintf("[%s · %s] %s", provider.ProviderLabel(normProvider), chosenModel, err.Error())})
+		jsonOut(w, 502, map[string]string{"error": fmt.Sprintf("[%s · %s] %s", p.Metadata().Name, chosenModel, err.Error())})
 		return
 	}
 
@@ -1362,13 +1129,19 @@ func (a *App) orchCreateJob(w http.ResponseWriter, r *http.Request) {
 				p = parts[0]
 				m = parts[1]
 			}
-			normProv := provider.NormalizeProvider(p)
+			normProv := provider.CanonicalID(p)
+			regProv, _, regErr := a.router.Registry().Get(normProv)
+			if regErr != nil {
+				jsonOut(w, 400, map[string]string{"error": regErr.Error()})
+				return
+			}
+			m = regProv.NormalizeModelID(m)
 			if m == "" {
 				jsonOut(w, 400, map[string]string{"error": "Participant model ID cannot be empty"})
 				return
 			}
-			if a.providerKey(normProv) == "" {
-				jsonOut(w, 400, map[string]string{"error": "Provider " + provider.ProviderLabel(normProv) + " does not have a configured API key"})
+			if !a.isProviderConfigured(normProv) {
+				jsonOut(w, 400, map[string]string{"error": "Provider " + regProv.Metadata().Name + " is not configured or disabled"})
 				return
 			}
 			req.Participants[i].Provider = normProv
@@ -1489,9 +1262,15 @@ func (a *App) orchGetJob(w http.ResponseWriter, r *http.Request) {
 					p = parts[0]
 					m = parts[1]
 				}
-				normProv := provider.NormalizeProvider(p)
-				if m == "" || a.providerKey(normProv) == "" {
-					jsonOut(w, 400, map[string]string{"error": "Invalid participant provider or model"})
+				normProv := provider.CanonicalID(p)
+				regProv, _, regErr := a.router.Registry().Get(normProv)
+				if regErr != nil {
+					jsonOut(w, 400, map[string]string{"error": regErr.Error()})
+					return
+				}
+				m = regProv.NormalizeModelID(m)
+				if m == "" || !a.isProviderConfigured(normProv) {
+					jsonOut(w, 400, map[string]string{"error": "Invalid or unconfigured participant provider/model"})
 					return
 				}
 				body.Participants[i].Provider = normProv
@@ -1723,6 +1502,7 @@ func main() {
 		func() (string, string) { return app.activeProvider(), app.activeModel() },
 		orchestration.DefaultCollaborationConfig(),
 	)
+	collabEngine.SetProviderConfiguredChecker(app.isProviderConfigured)
 	collabEngine.SetFallbackCandidatesProvider(app.verifiedWorkingParticipants)
 
 	orchPool := orchestration.NewWorkerPool(orchStorage, collabEngine, envInt("ORCHESTRATION_WORKERS", 2))
@@ -1740,6 +1520,8 @@ func main() {
 	mux.HandleFunc("/api/login", app.login)
 	mux.HandleFunc("/api/logout", app.auth(app.logout))
 	mux.HandleFunc("/api/status", app.auth(app.status))
+	mux.HandleFunc("/api/providers", app.auth(app.handleProviders))
+	mux.HandleFunc("/api/providers/", app.auth(app.handleProviderByID))
 	mux.HandleFunc("/api/setup/gemini", app.auth(app.saveProviderKey))
 	mux.HandleFunc("/api/setup/provider", app.auth(app.saveProviderKey))
 	mux.HandleFunc("/api/models", app.auth(app.handleModels))
@@ -1804,7 +1586,7 @@ func main() {
 		_ = server.Shutdown(shutdownCtx)
 	}()
 
-	log.Printf("Sahand-CorText v0.5.2 listening on %s", server.Addr)
+	log.Printf("Sahand-CorText v%s listening on %s", AppVersion, server.Addr)
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}

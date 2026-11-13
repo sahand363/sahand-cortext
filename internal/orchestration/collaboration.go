@@ -12,6 +12,7 @@ import (
 )
 
 type KeyResolverFunc func(providerID string) string
+type ProviderConfiguredFunc func(providerID string) bool
 type DefaultCollaboratorFunc func() (providerID, modelID string)
 type FallbackCandidatesFunc func() []Participant
 
@@ -36,6 +37,12 @@ func IsRetryableProviderError(err error) bool {
 		return false
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, ErrJobCancelled) {
+		return false
+	}
+	if errors.Is(err, provider.ErrUnknownProvider) ||
+		errors.Is(err, provider.ErrInvalidConfig) ||
+		errors.Is(err, provider.ErrProviderDisabled) ||
+		errors.Is(err, provider.ErrUnsupportedCapability) {
 		return false
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
@@ -75,6 +82,7 @@ type CollaborationEngine struct {
 	storage            *Storage
 	router             *provider.Router
 	keyResolver        KeyResolverFunc
+	isConfigured       ProviderConfiguredFunc
 	defaultProvider    DefaultCollaboratorFunc
 	fallbackCandidates FallbackCandidatesFunc
 	config             CollaborationConfig
@@ -110,6 +118,20 @@ func NewCollaborationEngine(
 
 func (e *CollaborationEngine) SetFallbackCandidatesProvider(fn FallbackCandidatesFunc) {
 	e.fallbackCandidates = fn
+}
+
+func (e *CollaborationEngine) SetProviderConfiguredChecker(fn ProviderConfiguredFunc) {
+	e.isConfigured = fn
+}
+
+func (e *CollaborationEngine) providerConfigured(providerID string) bool {
+	if e.isConfigured != nil {
+		return e.isConfigured(providerID)
+	}
+	if e.keyResolver != nil {
+		return strings.TrimSpace(e.keyResolver(providerID)) != ""
+	}
+	return false
 }
 
 func (e *CollaborationEngine) checkCancelledOrPaused(ctx context.Context, jobID string, helper ExecutionHelper) (bool, bool) {
@@ -183,8 +205,8 @@ func (e *CollaborationEngine) ProcessJob(ctx context.Context, job *Job, helper E
 	allCheck := append(append([]Participant{}, coordinators...), workers...)
 	allCheck = append(allCheck, auditors...)
 	for _, p := range allCheck {
-		if strings.TrimSpace(e.keyResolver(p.Provider)) == "" {
-			return "", fmt.Errorf("missing API key for participant %s (%s / %s)", p.Role, p.Provider, p.Model)
+		if !e.providerConfigured(p.Provider) {
+			return "", fmt.Errorf("provider %s is not configured or disabled for participant %s (%s)", p.Provider, p.Role, p.Model)
 		}
 	}
 
@@ -651,7 +673,7 @@ func (e *CollaborationEngine) buildCandidateRoster(
 		if p.Model == "" || seen[key] {
 			return
 		}
-		if strings.TrimSpace(e.keyResolver(p.Provider)) == "" {
+		if !e.providerConfigured(p.Provider) {
 			return
 		}
 		seen[key] = true
@@ -785,9 +807,12 @@ func (e *CollaborationEngine) invokeParticipant(
 		return StructuredModelResponse{}, "", 0, ErrJobCancelled
 	}
 
-	key := e.keyResolver(participant.Provider)
-	if strings.TrimSpace(key) == "" {
-		return StructuredModelResponse{}, "", 0, fmt.Errorf("missing API key for provider %s", participant.Provider)
+	if !e.providerConfigured(participant.Provider) {
+		return StructuredModelResponse{}, "", 0, fmt.Errorf("provider %s is not configured or disabled", participant.Provider)
+	}
+	var key string
+	if e.keyResolver != nil {
+		key = e.keyResolver(participant.Provider)
 	}
 
 	invokePayload := marshalPayload(map[string]any{
@@ -855,7 +880,7 @@ func (e *CollaborationEngine) resolveParticipants(ctx context.Context, job *Job)
 
 	if len(parts) == 0 && e.defaultProvider != nil {
 		prov, mod := e.defaultProvider()
-		if prov != "" && mod != "" && strings.TrimSpace(e.keyResolver(prov)) != "" {
+		if prov != "" && mod != "" && e.providerConfigured(prov) {
 			defaultParts := []Participant{
 				{JobID: job.ID, Role: RoleCoordinator, Name: "Coordinator", Provider: prov, Model: mod, SortOrder: 0},
 				{JobID: job.ID, Role: RoleWorker, Name: "Worker", Provider: prov, Model: mod, SortOrder: 1},
@@ -1314,14 +1339,17 @@ func (e *CollaborationEngine) AuditDeliverable(ctx context.Context, jobID, provi
 	if e.router == nil {
 		return nil, errors.New("provider router is not initialized")
 	}
-	normProv := provider.NormalizeProvider(providerID)
+	normProv := provider.CanonicalID(providerID)
 	modelID = strings.TrimSpace(modelID)
 	if modelID == "" {
 		return nil, errors.New("auditor model ID is required")
 	}
-	key := strings.TrimSpace(e.keyResolver(normProv))
-	if key == "" {
-		return nil, fmt.Errorf("missing API key for auditor provider %s", provider.ProviderLabel(normProv))
+	if !e.providerConfigured(normProv) {
+		return nil, fmt.Errorf("auditor provider %s is not configured or disabled", normProv)
+	}
+	var key string
+	if e.keyResolver != nil {
+		key = strings.TrimSpace(e.keyResolver(normProv))
 	}
 
 	job, err := e.storage.GetJob(ctx, jobID)

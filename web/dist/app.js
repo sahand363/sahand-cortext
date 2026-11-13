@@ -2,10 +2,13 @@ const $ = id => document.getElementById(id);
 let currentSession = null, toastTimer, deleteConfirmTimer;
 let sessionsCache = [];
 
-let selectedProvider = "gemini";
-let activeProvider = "gemini";
-let activeModel = "gemini-2.0-flash";
-let freeOnlyOpenRouter = true;
+let providersList = [];
+let providerMap = {};
+let selectedProvider = "";
+let activeProvider = "";
+let activeModel = "";
+let freeOnlyFilter = true;
+let editingCustomProviderId = null;
 let deleteArmed = false;
 
 let orchParticipantsDraft = [
@@ -30,61 +33,491 @@ const contribPalette = [
   "#2dd4bf"
 ];
 
-const providerCatalog = {
-  gemini: {
-    name: "Google Gemini",
-    short: "GEMINI",
-    icon: "✳",
-    placeholder: "Paste your Gemini API key (AIzaSy...)",
-    label: "Google AI Studio API Key",
-    desc: "Save your Google AI Studio key to list all Gemini models and test which ones respond.",
-    helpText: "Get a Gemini API key from Google AI Studio:",
-    helpUrl: "https://aistudio.google.com/app/apikey",
-    helpBtn: "Open Google AI Studio ↗"
-  },
-  openrouter: {
-    name: "OpenRouter",
-    short: "OPENROUTER",
-    icon: "⇄",
-    placeholder: "Paste your OpenRouter API key (sk-or-v1-...)",
-    label: "OpenRouter API Key",
-    desc: "Connect OpenRouter to access free (:free) and open-weight models. Free models are filtered at the top automatically.",
-    helpText: "Get a free OpenRouter API key:",
-    helpUrl: "https://openrouter.ai/keys",
-    helpBtn: "Open OpenRouter Keys ↗"
-  },
-  aiprime: {
-    name: "AIPrime",
-    short: "AIPRIME",
-    icon: "◈",
-    placeholder: "Paste your AIPrime API key (sk-...)",
-    label: "AIPrime API Key (https://api.aiprime.shop/v1)",
-    desc: "Connect AIPrime to use GLM 5.3 Flash (glm-5.3-flash) and any other models enabled on your AIPrime wallet.",
-    helpText: "Manage your AIPrime keys and models:",
-    helpUrl: "https://aiprime.shop",
-    helpBtn: "Open AIPrime Panel ↗"
-  },
-  codecraft: {
-    name: "CodeCraft API",
-    short: "CODECRAFT",
+function getProviderMeta(id) {
+  return providerMap[id] || {
+    id: id || "unknown",
+    name: id || "Unknown Provider",
+    short_name: (id || "AI").toUpperCase(),
     icon: "⚡",
-    placeholder: "Paste your CodeCraft API key (cc_...)",
-    label: "CodeCraft API Key (https://codecraftapi.com/v1)",
-    desc: "Connect CodeCraft API to test which of their hosted models respond on your plan.",
-    helpText: "Get a CodeCraft API key:",
-    helpUrl: "https://codecraftapi.com/docs/getting-started",
-    helpBtn: "Open CodeCraft Docs ↗"
+    description: "",
+    key_label: "API Key",
+    key_placeholder: "Paste API key…",
+    built_in: false,
+    requires_api_key: true,
+    supports_free_badge: false,
+    configured: false,
+    models: []
+  };
+}
+
+function hydrateProvidersFromRegistry(list) {
+  if (!Array.isArray(list)) return;
+  const prevModels = {};
+  Object.keys(providerMap).forEach(k => {
+    prevModels[k] = providerMap[k].models || [];
+  });
+  providersList = list.map(p => ({
+    ...p,
+    models: prevModels[p.id] || []
+  }));
+  providerMap = {};
+  providersList.forEach(p => {
+    providerMap[p.id] = p;
+  });
+
+  if (!selectedProvider || !providerMap[selectedProvider]) {
+    selectedProvider = providersList[0]?.id || "";
   }
-};
+  renderProviderTabs();
+}
 
-const allProvidersList = ["gemini", "openrouter", "aiprime", "codecraft"];
+function renderProviderTabs() {
+  const containers = [
+    { el: $("models-provider-tabs"), allowAdd: false },
+    { el: $("settings-provider-tabs"), allowAdd: true }
+  ];
 
-let providerState = {
-  gemini: { configured: false, models: [] },
-  openrouter: { configured: false, models: [] },
-  aiprime: { configured: false, models: [] },
-  codecraft: { configured: false, models: [] }
-};
+  containers.forEach(({ el, allowAdd }) => {
+    if (!el) return;
+    el.innerHTML = "";
+    providersList.forEach(p => {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "provider-tab" + (!editingCustomProviderId && p.id === selectedProvider ? " active" : "");
+      btn.dataset.provider = p.id;
+
+      const iconSpan = document.createElement("span");
+      iconSpan.textContent = p.icon || "⚡";
+
+      const nameNode = document.createTextNode(" " + p.name + " ");
+
+      const dot = document.createElement("i");
+      dot.className = "p-dot" + (p.configured ? " on" : "");
+
+      btn.append(iconSpan, nameNode, dot);
+      btn.onclick = () => {
+        closeCustomProviderForm();
+        switchProviderTab(p.id);
+      };
+      el.appendChild(btn);
+    });
+
+    if (allowAdd) {
+      const addBtn = document.createElement("button");
+      addBtn.type = "button";
+      addBtn.className = "provider-tab" + (editingCustomProviderId === "__new__" ? " active" : "");
+      addBtn.textContent = "＋ Add OpenAI-Compatible Provider";
+      addBtn.onclick = () => openCustomProviderForm(null);
+      el.appendChild(addBtn);
+    }
+  });
+}
+
+function openCustomProviderForm(existingMeta) {
+  editingCustomProviderId = existingMeta ? existingMeta.id : "__new__";
+  renderProviderTabs();
+  $("existing-provider-config-wrap").classList.add("hidden");
+  $("custom-provider-form").classList.remove("hidden");
+
+  if (existingMeta) {
+    $("custom-provider-form-title").textContent = `Edit Provider · ${existingMeta.name}`;
+    $("cp-name").value = existingMeta.name || "";
+    $("cp-id").value = existingMeta.id || "";
+    $("cp-id").disabled = true;
+    $("cp-base-url").value = existingMeta.base_url || "";
+    $("cp-auth-type").value = existingMeta.auth_type || "bearer";
+    $("cp-auth-header").value = existingMeta.auth_header || "";
+    $("cp-api-key").value = "";
+    $("cp-manual-models").value = (existingMeta.manual_models || []).join(", ");
+    $("cp-enable-discovery").checked = existingMeta.models_path !== "";
+  } else {
+    $("custom-provider-form-title").textContent = "Add OpenAI-Compatible Provider";
+    $("cp-name").value = "";
+    $("cp-id").value = "";
+    $("cp-id").disabled = false;
+    $("cp-base-url").value = "";
+    $("cp-auth-type").value = "bearer";
+    $("cp-auth-header").value = "";
+    $("cp-api-key").value = "";
+    $("cp-manual-models").value = "";
+    $("cp-enable-discovery").checked = true;
+  }
+  syncCustomProviderAuthFields();
+}
+
+function closeCustomProviderForm() {
+  editingCustomProviderId = null;
+  if ($("custom-provider-form")) $("custom-provider-form").classList.add("hidden");
+  if ($("existing-provider-config-wrap")) $("existing-provider-config-wrap").classList.remove("hidden");
+  renderProviderTabs();
+}
+
+function syncCustomProviderAuthFields() {
+  const auth = $("cp-auth-type")?.value || "bearer";
+  if ($("cp-auth-header-wrap")) $("cp-auth-header-wrap").classList.toggle("hidden", auth !== "header");
+  if ($("cp-api-key-wrap")) $("cp-api-key-wrap").classList.toggle("hidden", auth === "none");
+}
+
+if ($("cp-auth-type")) {
+  $("cp-auth-type").addEventListener("change", syncCustomProviderAuthFields);
+}
+if ($("cp-name")) {
+  $("cp-name").addEventListener("input", () => {
+    if (editingCustomProviderId === "__new__" && !$("cp-id").dataset.touched) {
+      $("cp-id").value = $("cp-name").value.toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 36);
+    }
+  });
+}
+if ($("cp-id")) {
+  $("cp-id").addEventListener("input", () => { $("cp-id").dataset.touched = "1"; });
+}
+if ($("cancel-custom-provider-btn")) {
+  $("cancel-custom-provider-btn").onclick = () => {
+    closeCustomProviderForm();
+    if (selectedProvider) switchProviderTab(selectedProvider);
+  };
+}
+
+if ($("custom-provider-form")) {
+  $("custom-provider-form").addEventListener("submit", async e => {
+    e.preventDefault();
+    const btn = $("save-custom-provider-btn");
+    btn.disabled = true;
+    btn.textContent = "Saving & Discovering Models…";
+
+    const manualModels = ($("cp-manual-models").value || "")
+      .split(",")
+      .map(s => s.trim())
+      .filter(Boolean);
+
+    try {
+      const res = await api("/api/providers", {
+        method: "POST",
+        body: JSON.stringify({
+          id: $("cp-id").value.trim().toLowerCase(),
+          name: $("cp-name").value.trim(),
+          base_url: $("cp-base-url").value.trim(),
+          auth_type: $("cp-auth-type").value,
+          auth_header: $("cp-auth-header").value.trim(),
+          api_key: $("cp-api-key").value.trim(),
+          disable_discovery: !$("cp-enable-discovery").checked,
+          manual_models: manualModels
+        })
+      });
+
+      hydrateProvidersFromRegistry(res.providers || []);
+      const newId = res.provider.id;
+      if (providerMap[newId]) {
+        providerMap[newId].models = res.models || [];
+      }
+      if (res.active_provider && res.active_model) {
+        setActiveSelectionUI(res.active_provider, res.active_model);
+      }
+      closeCustomProviderForm();
+      switchProviderTab(newId);
+      syncModelDropdown();
+      syncAuditorModelDropdown();
+      ensureDefaultOrchParticipants();
+      renderOrchParticipantsBuilder();
+      $("setup-banner").classList.add("hidden");
+      toast(`✓ Registered ${res.provider.name} (${(res.models || []).length} models)`);
+    } catch (err) {
+      toast("Provider error: " + err.message);
+    } finally {
+      btn.disabled = false;
+      btn.innerHTML = 'Save & Register Provider <span>↗</span>';
+    }
+  });
+}
+
+if ($("edit-custom-provider-btn")) {
+  $("edit-custom-provider-btn").onclick = () => {
+    const meta = getProviderMeta(selectedProvider);
+    if (!meta.built_in) openCustomProviderForm(meta);
+  };
+}
+
+if ($("delete-custom-provider-btn")) {
+  $("delete-custom-provider-btn").onclick = async () => {
+    const meta = getProviderMeta(selectedProvider);
+    if (meta.built_in) return;
+    try {
+      const res = await api(`/api/providers/${encodeURIComponent(meta.id)}`, { method: "DELETE" });
+      hydrateProvidersFromRegistry(res.providers || []);
+      if (res.active_provider && res.active_model) {
+        setActiveSelectionUI(res.active_provider, res.active_model);
+      }
+      if (selectedProvider) switchProviderTab(selectedProvider);
+      syncModelDropdown();
+      syncAuditorModelDropdown();
+      renderOrchParticipantsBuilder();
+      toast(`🗑 Removed ${meta.name}`);
+    } catch (err) {
+      toast("Delete failed: " + err.message);
+    }
+  };
+}
+
+async function checkAuth() {
+  try {
+    const s = await api("/api/status");
+    showApp();
+    applyStatus(s);
+    await loadSessions();
+    await loadAllConfiguredModels();
+    await loadOrchJobsList();
+    if (!s.any_configured) {
+      $("setup-banner").classList.remove("hidden");
+      showSetupNudge();
+    }
+    const savedPage = localStorage.getItem("cortext_active_page");
+    if (savedPage && pageNames[savedPage]) {
+      switchPage(savedPage);
+    }
+  } catch {
+    showLogin();
+  }
+}
+
+function applyStatus(s) {
+  if (Array.isArray(s.providers_list)) {
+    hydrateProvidersFromRegistry(s.providers_list);
+  } else if (s.providers) {
+    Object.keys(s.providers).forEach(pid => {
+      if (providerMap[pid]) providerMap[pid].configured = !!s.providers[pid];
+    });
+  }
+  if (s.active_provider && s.active_model) {
+    setActiveSelectionUI(s.active_provider, s.active_model);
+  }
+  updateProviderBadges();
+  if (s.any_configured) {
+    $("setup-banner").classList.add("hidden");
+  }
+}
+
+function setActiveSelectionUI(provider, modelId) {
+  if (!provider || !modelId) return;
+  activeProvider = provider;
+  activeModel = modelId;
+  const info = getProviderMeta(provider);
+  if ($("active-provider-label")) $("active-provider-label").textContent = info.name;
+  if ($("active-model-label")) $("active-model-label").textContent = modelId;
+  if ($("header-provider-name")) $("header-provider-name").textContent = info.short_name;
+
+  const sel = $("model");
+  const composite = `${provider}::${modelId}`;
+  if (sel) {
+    if (![...sel.options].some(o => o.value === composite)) {
+      const opt = document.createElement("option");
+      opt.value = composite;
+      opt.textContent = `✓ [${info.short_name}] ${modelId}`;
+      sel.prepend(opt);
+    }
+    sel.value = composite;
+  }
+}
+
+function updateProviderBadges() {
+  const anyConn = providersList.some(p => p.configured);
+  $("header-provider-state").textContent = anyConn ? "CONNECTED" : "SETUP";
+  $("header-provider-state").classList.toggle("connected", anyConn);
+  renderProviderTabs();
+
+  const cur = getProviderMeta(selectedProvider);
+  const curConn = !!cur.configured;
+  $("models-provider-status").textContent = curConn ? "CONNECTED" : "NEEDS SETUP";
+  $("models-provider-status").classList.toggle("connected", curConn);
+  $("settings-provider-state").textContent = curConn ? "Connected" : "Not connected";
+  $("settings-provider-state").classList.toggle("connected", curConn);
+}
+
+function switchProviderTab(provider) {
+  if (!provider && providersList.length > 0) provider = providersList[0].id;
+  selectedProvider = provider;
+  const meta = getProviderMeta(provider);
+
+  $("settings-provider-title").textContent = `${meta.name} Connection`;
+  $("settings-provider-desc").textContent = meta.description || `Configure ${meta.name} (${meta.base_url || ""})`;
+
+  const needsKey = meta.requires_api_key !== false && meta.auth_type !== "none";
+  $("api-key-input-section").classList.toggle("hidden", !needsKey);
+  $("api-key-label").textContent = meta.key_label || "API Key";
+  $("api-key").placeholder = meta.key_placeholder || "Paste API key…";
+  $("api-key").value = "";
+  $("save-key-btn").textContent = needsKey ? "Save Key & Load Models ↗" : "Connect & Load Models ↗";
+
+  $("edit-custom-provider-btn")?.classList.toggle("hidden", !!meta.built_in);
+  $("delete-custom-provider-btn")?.classList.toggle("hidden", !!meta.built_in);
+
+  $("settings-explorer-title").textContent = `Available Models · ${meta.name}`;
+  const hasHelp = Boolean(meta.help_url);
+  $("provider-help-row").classList.toggle("hidden", !hasHelp);
+  if (hasHelp) {
+    $("provider-help-text").textContent = meta.help_text || "Manage API keys:";
+    $("provider-help-link").href = meta.help_url;
+    $("provider-help-link").textContent = meta.help_button || "Open Provider Console ↗";
+  }
+
+  if ($("custom-model-id")) {
+    $("custom-model-id").placeholder = meta.default_model
+      ? `Enter ${meta.name} model ID (e.g. ${meta.default_model})`
+      : `Enter custom ${meta.name} model ID`;
+  }
+
+  $("models-feature-logo").textContent = meta.icon || "⚡";
+  $("models-feature-title").textContent = meta.name;
+  $("models-feature-desc").textContent = meta.description || "";
+
+  const showFreeToggle = !!meta.supports_free_badge;
+  $("settings-free-filter-wrap").classList.toggle("hidden", !showFreeToggle);
+  $("models-free-filter-wrap").classList.toggle("hidden", !showFreeToggle);
+  $("settings-free-only").checked = freeOnlyFilter;
+  $("models-free-only").checked = freeOnlyFilter;
+
+  updateProviderBadges();
+
+  if (meta.configured && (!meta.models || !meta.models.length)) {
+    loadProviderModels(provider, false);
+  } else {
+    renderModelGrids();
+  }
+}
+
+$("settings-free-only").addEventListener("change", e => {
+  freeOnlyFilter = e.target.checked;
+  $("models-free-only").checked = freeOnlyFilter;
+  renderModelGrids();
+});
+
+$("models-free-only").addEventListener("change", e => {
+  freeOnlyFilter = e.target.checked;
+  $("settings-free-only").checked = freeOnlyFilter;
+  renderModelGrids();
+});
+
+async function loadAllConfiguredModels() {
+  for (const p of providersList) {
+    if (p.configured) {
+      await loadProviderModels(p.id, false);
+    }
+  }
+  syncModelDropdown();
+  syncAuditorModelDropdown();
+  renderModelGrids();
+  ensureDefaultOrchParticipants();
+}
+
+async function loadProviderModels(provider, showToastMsg = false) {
+  if (!provider) return;
+  try {
+    const res = await api("/api/models?provider=" + encodeURIComponent(provider));
+    if (providerMap[provider]) {
+      providerMap[provider].configured = !!res.configured;
+      providerMap[provider].models = res.models || [];
+    }
+    if (res.active_provider && res.active_model) {
+      setActiveSelectionUI(res.active_provider, res.active_model);
+    }
+    updateProviderBadges();
+    syncModelDropdown();
+    syncAuditorModelDropdown();
+    renderModelGrids();
+    if (showToastMsg) {
+      toast(`Loaded ${(providerMap[provider]?.models || []).length} models from ${getProviderMeta(provider).name}`);
+    }
+  } catch (err) {
+    if (showToastMsg) toast(`Failed to load ${getProviderMeta(provider).name} models: ` + err.message);
+  }
+}
+
+function buildUnifiedModelOptions(sel) {
+  if (!sel) return;
+  const prevVal = sel.value;
+  sel.innerHTML = "";
+
+  const workingGroup = document.createElement("optgroup");
+  workingGroup.label = "★ Verified & Enabled Working Models";
+  let hasWorking = false;
+
+  providersList.forEach(p => {
+    const short = p.short_name || p.id.toUpperCase();
+    (p.models || []).filter(m => m.status === "working" && m.enabled !== false).forEach(m => {
+      hasWorking = true;
+      const opt = document.createElement("option");
+      opt.value = `${p.id}::${m.id}`;
+      opt.textContent = `✓ [${short}] ${m.display_name} (${m.latency_ms} ms)`;
+      workingGroup.appendChild(opt);
+    });
+  });
+  if (hasWorking) sel.appendChild(workingGroup);
+
+  providersList.forEach(p => {
+    const list = (p.models || []).filter(m => m.enabled !== false);
+    if (!list.length) return;
+    const grp = document.createElement("optgroup");
+    grp.label = p.name;
+    const filtered = p.supports_free_badge ? list.filter((m, idx) => m.status === "working" || m.is_free || idx < 25) : list;
+    filtered.forEach(m => {
+      const opt = document.createElement("option");
+      opt.value = `${p.id}::${m.id}`;
+      const prefix = m.status === "working" ? "✓ " : m.status === "failed" ? "✗ " : "";
+      const freeTag = (p.supports_free_badge && m.is_free) ? " [FREE]" : "";
+      opt.textContent = `${prefix}[${p.short_name}] ${m.display_name}${freeTag} (${m.id})`;
+      grp.appendChild(opt);
+    });
+    sel.appendChild(grp);
+  });
+
+  if (prevVal && [...sel.options].some(o => o.value === prevVal)) {
+    sel.value = prevVal;
+  }
+}
+
+function getDisplayedModels(provider) {
+  const meta = getProviderMeta(provider);
+  const all = meta.models || [];
+  if (meta.supports_free_badge && freeOnlyFilter) {
+    return all.filter(m => m.is_free || m.status === "working");
+  }
+  return all;
+}
+
+function getConfiguredProvidersList() {
+  return providersList.filter(p => p.configured).map(p => p.id);
+}
+
+function getDefaultModelForProvider(p) {
+  const meta = getProviderMeta(p);
+  const models = (meta.models || []).filter(m => m.enabled !== false);
+  const working = models.find(m => m.status === "working");
+  if (working) return working.id;
+  if (meta.default_model) return meta.default_model;
+  if (meta.supports_free_badge) {
+    const free = models.find(m => m.is_free);
+    if (free) return free.id;
+  }
+  if (models.length > 0) return models[0].id;
+  return "";
+}
+
+function ensureDefaultOrchParticipants() {
+  const configured = getConfiguredProvidersList();
+  const fallbackProv = configured[0] || activeProvider || providersList[0]?.id || "";
+  const fallbackMod = getDefaultModelForProvider(fallbackProv) || activeModel || "";
+
+  orchParticipantsDraft.forEach(p => {
+    if ((!p.provider || !providerMap[p.provider]?.configured) && configured.length > 0) {
+      p.provider = fallbackProv;
+      p.model = fallbackMod;
+    } else if (!providerMap[p.provider]) {
+      p.provider = fallbackProv;
+      p.model = fallbackMod;
+    } else if (!p.model) {
+      p.model = getDefaultModelForProvider(p.provider) || fallbackMod;
+    }
+  });
+}
 
 const pageNames = {
   chat: "Chat",
@@ -504,142 +937,8 @@ function showApp() {
   $("app").classList.remove("hidden");
 }
 
-async function checkAuth() {
-  try {
-    const s = await api("/api/status");
-    showApp();
-    applyStatus(s);
-    await loadSessions();
-    await loadAllConfiguredModels();
-    await loadOrchJobsList();
-    if (!s.any_configured) {
-      $("setup-banner").classList.remove("hidden");
-      showSetupNudge();
-    }
-    const savedPage = localStorage.getItem("cortext_active_page");
-    if (savedPage && pageNames[savedPage]) {
-      switchPage(savedPage);
-    }
-  } catch {
-    showLogin();
-  }
-}
-
-function applyStatus(s) {
-  if (s.providers) {
-    providerState.gemini.configured = !!s.providers.gemini;
-    providerState.openrouter.configured = !!s.providers.openrouter;
-    providerState.codecraft.configured = !!s.providers.codecraft;
-    providerState.aiprime.configured = !!s.providers.aiprime;
-  }
-  if (s.active_provider && s.active_model) {
-    setActiveSelectionUI(s.active_provider, s.active_model);
-  }
-  updateProviderBadges();
-  if (s.any_configured) {
-    $("setup-banner").classList.add("hidden");
-  }
-}
-
-function setActiveSelectionUI(provider, modelId) {
-  if (!provider || !modelId) return;
-  activeProvider = provider;
-  activeModel = modelId;
-  const info = providerCatalog[provider] || providerCatalog.gemini;
-  if ($("active-provider-label")) $("active-provider-label").textContent = info.name;
-  if ($("active-model-label")) $("active-model-label").textContent = modelId;
-  if ($("header-provider-name")) $("header-provider-name").textContent = info.short;
-
-  const sel = $("model");
-  const composite = `${provider}::${modelId}`;
-  if (sel) {
-    if (![...sel.options].some(o => o.value === composite)) {
-      const opt = document.createElement("option");
-      opt.value = composite;
-      opt.textContent = `✓ [${info.short}] ${modelId}`;
-      sel.prepend(opt);
-    }
-    sel.value = composite;
-  }
-}
-
-function updateProviderBadges() {
-  const anyConn = allProvidersList.some(p => providerState[p].configured);
-  $("header-provider-state").textContent = anyConn ? "CONNECTED" : "SETUP";
-  $("header-provider-state").classList.toggle("connected", anyConn);
-
-  allProvidersList.forEach(p => {
-    const conn = providerState[p].configured;
-    const d1 = $("dot-settings-" + p);
-    const d2 = $("dot-models-" + p);
-    if (d1) d1.classList.toggle("on", conn);
-    if (d2) d2.classList.toggle("on", conn);
-  });
-
-  const curConn = providerState[selectedProvider].configured;
-  $("models-provider-status").textContent = curConn ? "CONNECTED" : "NEEDS SETUP";
-  $("models-provider-status").classList.toggle("connected", curConn);
-  $("settings-provider-state").textContent = curConn ? "Connected" : "Not connected";
-  $("settings-provider-state").classList.toggle("connected", curConn);
-}
-
-function switchProviderTab(provider) {
-  selectedProvider = provider;
-  const meta = providerCatalog[provider];
-
-  document.querySelectorAll(".provider-tab").forEach(b => {
-    b.classList.toggle("active", b.dataset.provider === provider);
-  });
-
-  $("settings-provider-title").textContent = `${meta.name} Connection`;
-  $("settings-provider-desc").textContent = meta.desc;
-  $("api-key-label").textContent = meta.label;
-  $("api-key").placeholder = meta.placeholder;
-  $("api-key").value = "";
-  $("settings-explorer-title").textContent = `Available Models · ${meta.name}`;
-  $("provider-help-text").textContent = meta.helpText;
-  $("provider-help-link").href = meta.helpUrl;
-  $("provider-help-link").textContent = meta.helpBtn;
-
-  if ($("custom-model-id")) {
-    $("custom-model-id").placeholder = provider === "aiprime"
-      ? "Enter AIPrime model ID (e.g. glm-5.3-flash)"
-      : `Enter custom ${meta.name} model ID`;
-  }
-
-  $("models-feature-logo").textContent = meta.icon;
-  $("models-feature-title").textContent = meta.name;
-  $("models-feature-desc").textContent = meta.desc;
-
-  const showFreeToggle = provider === "openrouter";
-  $("settings-free-filter-wrap").classList.toggle("hidden", !showFreeToggle);
-  $("models-free-filter-wrap").classList.toggle("hidden", !showFreeToggle);
-  $("settings-free-only").checked = freeOnlyOpenRouter;
-  $("models-free-only").checked = freeOnlyOpenRouter;
-
-  updateProviderBadges();
-
-  if (providerState[provider].configured && !providerState[provider].models.length) {
-    loadProviderModels(provider, false);
-  } else {
-    renderModelGrids();
-  }
-}
-
 document.querySelectorAll(".provider-tab").forEach(btn => {
   btn.addEventListener("click", () => switchProviderTab(btn.dataset.provider));
-});
-
-$("settings-free-only").addEventListener("change", e => {
-  freeOnlyOpenRouter = e.target.checked;
-  $("models-free-only").checked = freeOnlyOpenRouter;
-  renderModelGrids();
-});
-
-$("models-free-only").addEventListener("change", e => {
-  freeOnlyOpenRouter = e.target.checked;
-  $("settings-free-only").checked = freeOnlyOpenRouter;
-  renderModelGrids();
 });
 
 function showSetupNudge() {
@@ -1005,81 +1304,6 @@ async function refreshStatus() {
   } catch {}
 }
 
-async function loadAllConfiguredModels() {
-  for (const p of allProvidersList) {
-    if (providerState[p].configured) {
-      await loadProviderModels(p, false);
-    }
-  }
-  syncModelDropdown();
-  syncAuditorModelDropdown();
-  renderModelGrids();
-  ensureDefaultOrchParticipants();
-}
-
-async function loadProviderModels(provider, showToastMsg = false) {
-  try {
-    const res = await api("/api/models?provider=" + encodeURIComponent(provider));
-    providerState[provider].configured = !!res.configured;
-    providerState[provider].models = res.models || [];
-    if (res.active_provider && res.active_model) {
-      setActiveSelectionUI(res.active_provider, res.active_model);
-    }
-    updateProviderBadges();
-    syncModelDropdown();
-    syncAuditorModelDropdown();
-    renderModelGrids();
-    if (showToastMsg) {
-      toast(`Loaded ${providerState[provider].models.length} models from ${providerCatalog[provider].name}`);
-    }
-  } catch (err) {
-    if (showToastMsg) toast(`Failed to load ${providerCatalog[provider].name} models: ` + err.message);
-  }
-}
-
-function buildUnifiedModelOptions(sel) {
-  if (!sel) return;
-  const prevVal = sel.value;
-  sel.innerHTML = "";
-
-  const workingGroup = document.createElement("optgroup");
-  workingGroup.label = "★ Verified & Enabled Working Models";
-  let hasWorking = false;
-
-  allProvidersList.forEach(p => {
-    const short = providerCatalog[p].short;
-    (providerState[p].models || []).filter(m => m.status === "working" && m.enabled !== false).forEach(m => {
-      hasWorking = true;
-      const opt = document.createElement("option");
-      opt.value = `${p}::${m.id}`;
-      opt.textContent = `✓ [${short}] ${m.display_name} (${m.latency_ms} ms)`;
-      workingGroup.appendChild(opt);
-    });
-  });
-  if (hasWorking) sel.appendChild(workingGroup);
-
-  allProvidersList.forEach(p => {
-    const list = (providerState[p].models || []).filter(m => m.enabled !== false);
-    if (!list.length) return;
-    const grp = document.createElement("optgroup");
-    grp.label = providerCatalog[p].name;
-    const filtered = p === "openrouter" ? list.filter((m, idx) => m.status === "working" || m.is_free || idx < 25) : list;
-    filtered.forEach(m => {
-      const opt = document.createElement("option");
-      opt.value = `${p}::${m.id}`;
-      const prefix = m.status === "working" ? "✓ " : m.status === "failed" ? "✗ " : "";
-      const freeTag = (p === "openrouter" && m.is_free) ? " [FREE]" : "";
-      opt.textContent = `${prefix}[${providerCatalog[p].short}] ${m.display_name}${freeTag} (${m.id})`;
-      grp.appendChild(opt);
-    });
-    sel.appendChild(grp);
-  });
-
-  if (prevVal && [...sel.options].some(o => o.value === prevVal)) {
-    sel.value = prevVal;
-  }
-}
-
 function syncModelDropdown() {
   const sel = $("model");
   if (!sel) return;
@@ -1108,16 +1332,8 @@ function syncAuditorModelDropdown() {
   }
 }
 
-function getDisplayedModels(provider) {
-  const all = providerState[provider]?.models || [];
-  if (provider === "openrouter" && freeOnlyOpenRouter) {
-    return all.filter(m => m.is_free || m.status === "working");
-  }
-  return all;
-}
-
 async function toggleModelEnabledState(provider, modelId, enabled) {
-  const list = providerState[provider]?.models || [];
+  const list = providerMap[provider]?.models || [];
   const item = list.find(x => x.id === modelId);
   if (item) {
     item.enabled = enabled;
@@ -1143,7 +1359,7 @@ async function batchToggleShownModels(enabled) {
   const provider = selectedProvider;
   const shown = getDisplayedModels(provider);
   if (!shown.length) {
-    toast(`No models loaded for ${providerCatalog[provider].name} yet.`);
+    toast(`No models loaded for ${getProviderMeta(provider).name} yet.`);
     return;
   }
   const ids = shown.map(m => m.id);
@@ -1155,8 +1371,8 @@ async function batchToggleShownModels(enabled) {
       body: JSON.stringify({ provider, models: ids, enabled })
     });
     toast(enabled
-      ? `✓ Checked all ${ids.length} shown models on ${providerCatalog[provider].name}`
-      : `☐ Unchecked all ${ids.length} shown models on ${providerCatalog[provider].name}`);
+      ? `✓ Checked all ${ids.length} shown models on ${getProviderMeta(provider).name}`
+      : `☐ Unchecked all ${ids.length} shown models on ${getProviderMeta(provider).name}`);
   } catch (err) {
     toast("Batch toggle failed: " + err.message);
   }
@@ -1168,8 +1384,8 @@ async function batchToggleShownModels(enabled) {
 
 function renderModelGrids() {
   const provider = selectedProvider;
-  const meta = providerCatalog[provider];
-  const allModels = providerState[provider]?.models || [];
+  const meta = getProviderMeta(provider);
+  const allModels = providerMap[provider]?.models || [];
   const shownModels = getDisplayedModels(provider);
 
   const workingCount = allModels.filter(m => m.status === "working" && m.enabled !== false).length;
@@ -1291,7 +1507,7 @@ function renderModelGrids() {
 }
 
 async function testSingleModel(provider, modelId, setActive = true) {
-  const list = providerState[provider]?.models || [];
+  const list = providerMap[provider]?.models || [];
   const item = list.find(x => x.id === modelId);
   if (item) {
     item.status = "testing";
@@ -1311,9 +1527,9 @@ async function testSingleModel(provider, modelId, setActive = true) {
       if (setActive && (!item || item.enabled !== false)) {
         setActiveSelectionUI(provider, modelId);
       }
-      toast(`✓ [${providerCatalog[provider].short}] ${modelId} works! (${res.latency_ms} ms)`);
+      toast(`✓ [${getProviderMeta(provider).short}] ${modelId} works! (${res.latency_ms} ms)`);
     } else {
-      toast(`✗ ${modelId} failed on ${providerCatalog[provider].short}`);
+      toast(`✗ ${modelId} failed on ${getProviderMeta(provider).short}`);
     }
   } catch (err) {
     if (item) {
@@ -1331,27 +1547,27 @@ async function testShownModels() {
   const provider = selectedProvider;
   const shown = getDisplayedModels(provider).filter(m => m.enabled !== false);
   if (!shown.length) {
-    toast(`No enabled models shown on ${providerCatalog[provider].name}. Check the models you want to test first.`);
+    toast(`No enabled models shown on ${getProviderMeta(provider).name}. Check the models you want to test first.`);
     return;
   }
-  toast(`Testing ${shown.length} enabled models on ${providerCatalog[provider].name}…`);
+  toast(`Testing ${shown.length} enabled models on ${getProviderMeta(provider).name}…`);
   let foundWorking = false;
   for (const m of shown) {
     const activate = !foundWorking;
     await testSingleModel(provider, m.id, activate);
-    const updated = (providerState[provider].models || []).find(x => x.id === m.id);
+    const updated = (providerMap[provider].models || []).find(x => x.id === m.id);
     if (updated && updated.status === "working" && !foundWorking) {
       foundWorking = true;
     }
   }
-  const workingCount = (providerState[provider].models || []).filter(m => m.status === "working" && m.enabled !== false).length;
-  toast(`Done! ${workingCount} enabled working models found on ${providerCatalog[provider].name}.`);
+  const workingCount = (providerMap[provider].models || []).filter(m => m.status === "working" && m.enabled !== false).length;
+  toast(`Done! ${workingCount} enabled working models found on ${getProviderMeta(provider).name}.`);
 }
 
 $("api-key-form").addEventListener("submit", async e => {
   e.preventDefault();
   const provider = selectedProvider;
-  const meta = providerCatalog[provider];
+  const meta = getProviderMeta(provider);
   const key = $("api-key").value.trim();
   const fb = $("key-feedback");
   const btn = $("save-key-btn");
@@ -1366,8 +1582,8 @@ $("api-key-form").addEventListener("submit", async e => {
       body: JSON.stringify({ provider, api_key: key })
     });
     $("api-key").value = "";
-    providerState[provider].configured = true;
-    providerState[provider].models = res.models || [];
+    providerMap[provider].configured = true;
+    providerMap[provider].models = res.models || [];
     if (res.active_provider && res.active_model) {
       setActiveSelectionUI(res.active_provider, res.active_model);
     }
@@ -1379,11 +1595,14 @@ $("api-key-form").addEventListener("submit", async e => {
     $("setup-banner").classList.add("hidden");
 
     fb.className = "key-feedback ok";
-    fb.innerHTML = `✓ <b>${meta.name} API key saved (${res.latency_ms} ms)!</b> Loaded <b>${providerState[provider].models.length}</b> models below.`;
-    toast(`${meta.name} connected! (${providerState[provider].models.length} models)`);
+    fb.innerHTML = `✓ <b>${meta.name} API key saved (${res.latency_ms} ms)!</b> Loaded <b>${providerMap[provider].models.length}</b> models below.`;
+    toast(`${meta.name} connected! (${providerMap[provider].models.length} models)`);
   } catch (err) {
     fb.className = "key-feedback err";
-    fb.innerHTML = `✗ <b>${meta.name} error:</b> ${err.message}`;
+    fb.textContent = "";
+    const errBold = document.createElement("b");
+    errBold.textContent = `✗ ${meta.name} error:`;
+    fb.append(errBold, document.createTextNode(" " + err.message));
   } finally {
     btn.disabled = false;
     btn.innerHTML = 'Save Key & Load Models <span>↗</span>';
@@ -1406,10 +1625,10 @@ if ($("custom-model-form")) {
         body: JSON.stringify({ provider, model })
       });
       input.value = "";
-      providerState[provider].models = res.models || [];
+      providerMap[provider].models = res.models || [];
       if (res.ok && res.active_provider && res.active_model) {
         setActiveSelectionUI(res.active_provider, res.active_model);
-        toast(`✓ [${providerCatalog[provider].short}] ${model} verified working (${res.latency_ms} ms)!`);
+        toast(`✓ [${getProviderMeta(provider).short}] ${model} verified working (${res.latency_ms} ms)!`);
       } else {
         toast(`Added ${model}, test returned: ${res.error || "failed"}`);
       }
@@ -1450,38 +1669,6 @@ document.querySelectorAll(".settings-tab").forEach(b => b.onclick = () => {
 /* ============================================================================
    PHASE 3.3 — AI ORCHESTRATION FRONTEND INTEGRATION
    ============================================================================ */
-
-function getConfiguredProvidersList() {
-  return allProvidersList.filter(p => providerState[p].configured);
-}
-
-function getDefaultModelForProvider(p) {
-  const models = (providerState[p]?.models || []).filter(m => m.enabled !== false);
-  const working = models.find(m => m.status === "working");
-  if (working) return working.id;
-  if (p === "aiprime") return "glm-5.3-flash";
-  if (p === "openrouter") {
-    const free = models.find(m => m.is_free);
-    if (free) return free.id;
-  }
-  if (models.length > 0) return models[0].id;
-  return p === "gemini" ? "gemini-2.0-flash" : "";
-}
-
-function ensureDefaultOrchParticipants() {
-  const configured = getConfiguredProvidersList();
-  const fallbackProv = configured[0] || activeProvider || "gemini";
-  const fallbackMod = getDefaultModelForProvider(fallbackProv) || activeModel || "gemini-2.0-flash";
-
-  orchParticipantsDraft.forEach(p => {
-    if (!providerState[p.provider]?.configured && configured.length > 0) {
-      p.provider = fallbackProv;
-      p.model = fallbackMod;
-    } else if (!p.model) {
-      p.model = getDefaultModelForProvider(p.provider) || fallbackMod;
-    }
-  });
-}
 
 async function initOrchestrationPage() {
   ensureDefaultOrchParticipants();
@@ -1602,12 +1789,11 @@ function renderOrchParticipantsBuilder() {
     const provWrap = document.createElement("label");
     provWrap.innerHTML = `<span>Provider</span>`;
     const provSelect = document.createElement("select");
-    allProvidersList.forEach(p => {
+    providersList.forEach(provObj => {
       const opt = document.createElement("option");
-      opt.value = p;
-      const isCfg = providerState[p].configured;
-      opt.textContent = `${providerCatalog[p].name}${isCfg ? " (Connected)" : " (Needs API Key)"}`;
-      if (part.provider === p) opt.selected = true;
+      opt.value = provObj.id;
+      opt.textContent = `${provObj.name}${provObj.configured ? " (Connected)" : " (Needs Setup)"}`;
+      if (part.provider === provObj.id) opt.selected = true;
       provSelect.appendChild(opt);
     });
 
@@ -1618,7 +1804,7 @@ function renderOrchParticipantsBuilder() {
     function populateModelsForPart() {
       modSelect.innerHTML = "";
       const p = part.provider;
-      const list = (providerState[p]?.models || []).filter(m => m.enabled !== false);
+      const list = (providerMap[p]?.models || []).filter(m => m.enabled !== false);
       if (!list.length) {
         const fallbackOpt = document.createElement("option");
         fallbackOpt.value = part.model || "";
@@ -1745,8 +1931,8 @@ $("orch-create-form").addEventListener("submit", async e => {
 
   for (let i = 0; i < orchParticipantsDraft.length; i++) {
     const p = orchParticipantsDraft[i];
-    if (!providerState[p.provider]?.configured) {
-      errBanner.textContent = `Participant #${i + 1} uses ${providerCatalog[p.provider]?.name || p.provider}, which does not have a saved API key yet. Configure it in Settings first.`;
+    if (!providerMap[p.provider]?.configured) {
+      errBanner.textContent = `Participant #${i + 1} uses ${getProviderMeta(p.provider).name || p.provider}, which does not have a saved API key yet. Configure it in Settings first.`;
       errBanner.classList.remove("hidden");
       return;
     }
@@ -2020,7 +2206,7 @@ function renderAIContributionBar(participants, messages, events) {
     dot.style.background = e.chars > 0 ? e.color : "#ef4444";
 
     const roleShort = e.role === "coordinator" ? "Coord" : e.role === "auditor" ? "Auditor" : "Worker";
-    const provShort = providerCatalog[e.provider]?.short || e.provider;
+    const provShort = getProviderMeta(e.provider).short_name || e.provider;
     const label = document.createElement("span");
     label.innerHTML = `<b>${e.model}</b> <small style="color:#94a3b8">(${provShort} · ${roleShort})</small> <span style="color:#cbd5e1;font-weight:700">${pctStr}</span>`;
 
@@ -2055,7 +2241,7 @@ async function swapParticipantModelMidJob(jobId, participants, slotIdx, newCompo
       method: "POST",
       body: JSON.stringify({ participants: updated })
     });
-    toast(`✓ Updated Participant #${slotIdx + 1} to ${providerCatalog[newProv]?.short || newProv} · ${newMod}`);
+    toast(`✓ Updated Participant #${slotIdx + 1} to ${getProviderMeta(newProv).short_name || newProv} · ${newMod}`);
     await fetchAndRenderOrchJob(jobId);
   } catch (err) {
     toast("Could not swap participant model: " + err.message);
@@ -2155,7 +2341,7 @@ function renderOrchJobDetails(d) {
 
   if (isActive || isPaused) {
     activeBanner.classList.remove("hidden");
-    const activeProvName = invokeMeta.provider ? (providerCatalog[invokeMeta.provider]?.name || invokeMeta.provider) : "";
+    const activeProvName = invokeMeta.provider ? (getProviderMeta(invokeMeta.provider).name || invokeMeta.provider) : "";
     const activeModelLabel = invokeMeta.model ? `${activeProvName} · ${invokeMeta.model}` : "";
 
     if (isPausing) {
@@ -2171,16 +2357,16 @@ function renderOrchJobDetails(d) {
       $("orch-active-headline").textContent = "Waiting to retry after temporary provider error…";
       $("orch-active-subline").textContent = d.error_message || "Scheduled for automatic retry.";
     } else if (stage === "planning") {
-      $("orch-active-headline").textContent = `Coordinator (${activeModelLabel || (coordPart ? `${providerCatalog[coordPart.provider]?.name || coordPart.provider} · ${coordPart.model}` : "Architect")}) is creating the implementation plan…`;
+      $("orch-active-headline").textContent = `Coordinator (${activeModelLabel || (coordPart ? `${getProviderMeta(coordPart.provider).name || coordPart.provider} · ${coordPart.model}` : "Architect")}) is creating the implementation plan…`;
       $("orch-active-subline").textContent = "Analyzing task and preparing instructions for Worker.";
     } else if (stage === "working") {
-      $("orch-active-headline").textContent = `Worker (${activeModelLabel || (scheduledWorker ? `${providerCatalog[scheduledWorker.provider]?.name || scheduledWorker.provider} · ${scheduledWorker.model}` : "Developer")}) is executing round ${curRound}…`;
+      $("orch-active-headline").textContent = `Worker (${activeModelLabel || (scheduledWorker ? `${getProviderMeta(scheduledWorker.provider).name || scheduledWorker.provider} · ${scheduledWorker.model}` : "Developer")}) is executing round ${curRound}…`;
       $("orch-active-subline").textContent = "Producing deliverable based on Coordinator, QA Auditor, and User instructions.";
     } else if (stage === "auditing") {
-      $("orch-active-headline").textContent = `QA Auditor (${activeModelLabel || (auditorPart ? `${providerCatalog[auditorPart.provider]?.name || auditorPart.provider} · ${auditorPart.model}` : "Auditor")}) is inspecting round ${curRound}…`;
+      $("orch-active-headline").textContent = `QA Auditor (${activeModelLabel || (auditorPart ? `${getProviderMeta(auditorPart.provider).name || auditorPart.provider} · ${auditorPart.model}` : "Auditor")}) is inspecting round ${curRound}…`;
       $("orch-active-subline").textContent = "Testing Worker deliverable for runtime bugs, missing files, and edge cases before Coordinator review.";
     } else if (stage === "reviewing") {
-      $("orch-active-headline").textContent = `Coordinator (${activeModelLabel || (coordPart ? `${providerCatalog[coordPart.provider]?.name || coordPart.provider} · ${coordPart.model}` : "Architect")}) is reviewing round ${curRound}…`;
+      $("orch-active-headline").textContent = `Coordinator (${activeModelLabel || (coordPart ? `${getProviderMeta(coordPart.provider).name || coordPart.provider} · ${coordPart.model}` : "Architect")}) is reviewing round ${curRound}…`;
       $("orch-active-subline").textContent = "Evaluating Worker deliverable and QA Auditor report for final approval.";
     } else {
       $("orch-active-headline").textContent = "Collaboration in progress…";
@@ -2242,7 +2428,7 @@ function renderOrchJobDetails(d) {
     let roleLabel = "Worker / Developer";
     if (p.role === "coordinator") roleLabel = "Coordinator / Architect";
     if (p.role === "auditor") roleLabel = "Quality Assurance / Auditor";
-    const provName = providerCatalog[p.provider]?.name || p.provider;
+    const provName = getProviderMeta(p.provider).name || p.provider;
     const modelMsgs = messages.filter(m => m.provider === p.provider && m.model === p.model && m.sender_role === p.role).length;
     const failCount = slotFailures[`slot_${i}`] || slotFailures[`${p.provider}::${p.model}`] || 0;
 
@@ -2253,7 +2439,12 @@ function renderOrchJobDetails(d) {
         : "";
 
     const headerDiv = document.createElement("div");
-    headerDiv.innerHTML = `<span class="roster-role">#${i + 1} ${roleLabel} · ${modelMsgs} msg${modelMsgs === 1 ? "" : "s"}${stateTag}</span><b>${provName} · ${p.model}</b>`;
+    const roleSpan = document.createElement("span");
+    roleSpan.className = "roster-role";
+    roleSpan.innerHTML = `#${i + 1} ${roleLabel} · ${modelMsgs} msg${modelMsgs === 1 ? "" : "s"}${stateTag}`;
+    const provBold = document.createElement("b");
+    provBold.textContent = `${provName} · ${p.model}`;
+    headerDiv.append(roleSpan, provBold);
     pill.appendChild(headerDiv);
 
     // Mid-Job Model Switcher (locks the model that answered the last turn)
@@ -2319,7 +2510,7 @@ function renderOrchJobDetails(d) {
         verdictBadge.className = `orch-status-badge ${isApproved ? "status-completed" : "status-waiting"}`;
         verdictBadge.textContent = isApproved ? "✓ APPROVED BY AUDITOR" : "⚠ ISSUES FOUND & FIXED";
 
-        const provShort = providerCatalog[latestAuditMsg.provider]?.name || latestAuditMsg.provider;
+        const provShort = getProviderMeta(latestAuditMsg.provider).name || latestAuditMsg.provider;
         $("orch-audit-model-title").textContent = `${provShort} · ${latestAuditMsg.model} (${latestAuditMsg.latency_ms || 0} ms)`;
         $("orch-audit-summary").textContent = latestAuditMsg.completion_summary || "See full auditor report below.";
         $("orch-audit-body").textContent = latestAuditMsg.content || "";
@@ -2360,7 +2551,11 @@ function renderOrchJobDetails(d) {
         selectBtn.type = "button";
         selectBtn.className = "orch-file-select";
         const sizeKb = Math.max(0.1, (new Blob([f.content]).size / 1024)).toFixed(1);
-        selectBtn.innerHTML = `<b>📄 ${f.filename}</b> <small>${sizeKb} KB</small>`;
+        const fileBold = document.createElement("b");
+        fileBold.textContent = `📄 ${f.filename}`;
+        const sizeSmall = document.createElement("small");
+        sizeSmall.textContent = `${sizeKb} KB`;
+        selectBtn.append(fileBold, document.createTextNode(" "), sizeSmall);
         selectBtn.onclick = () => {
           selectedDeliverableFileIdx = idx;
           renderOrchJobDetails(d);
@@ -2480,7 +2675,7 @@ function renderOrchJobDetails(d) {
 
       const provShort = m.sender_role === "user"
         ? "HUMAN FEEDBACK"
-        : (providerCatalog[m.provider]?.short || (m.provider || "").toUpperCase());
+        : (getProviderMeta(m.provider).short_name || (m.provider || "").toUpperCase());
       const modelLabel = m.sender_role === "user" ? "Interactive Revision" : `${provShort} · ${m.model}`;
       left.innerHTML = `<span class="orch-role-tag ${m.sender_role}">#${idx + 1} · ${roleTitle}</span> <b>${modelLabel}</b>`;
 
@@ -2508,6 +2703,7 @@ function renderOrchJobDetails(d) {
       const copyTurnBtn = document.createElement("button");
       copyTurnBtn.type = "button";
       copyTurnBtn.className = "mini-turn-btn";
+      copyTurnBtn.textContent = "📋 Copy Turn";
       copyTurnBtn.onclick = async () => {
         const ok = await copyTextToClipboard(displayContent);
         toast(ok ? `✓ Turn #${idx + 1} copied` : "Copy failed");
@@ -2582,9 +2778,9 @@ function renderOrchJobDetails(d) {
 
 function buildDetailedTimelineNarrative(ev) {
   const p = parseEventJSON(ev);
-  const provName = p.provider ? (providerCatalog[p.provider]?.name || p.provider) : "";
-  const fromProv = p.from_provider ? (providerCatalog[p.from_provider]?.name || p.from_provider) : "";
-  const toProv = p.to_provider ? (providerCatalog[p.to_provider]?.name || p.to_provider) : "";
+  const provName = p.provider ? (getProviderMeta(p.provider).name || p.provider) : "";
+  const fromProv = p.from_provider ? (getProviderMeta(p.from_provider).name || p.from_provider) : "";
+  const toProv = p.to_provider ? (getProviderMeta(p.to_provider).name || p.to_provider) : "";
   const roundPrefix = p.round ? `[Round ${p.round}] ` : "";
 
   switch (ev.event_type) {

@@ -32,7 +32,7 @@ func TestChatContinuityAndOrchestrationAPIs(t *testing.T) {
 	defer db.Close()
 
 	router := provider.NewRouter()
-	router.OpenRouterBaseURL = mockServer.URL
+	_ = router.SetProviderBaseURL("openrouter", mockServer.URL)
 	orchStorage := orchestration.NewStorage(db)
 
 	app := &App{
@@ -48,6 +48,7 @@ func TestChatContinuityAndOrchestrationAPIs(t *testing.T) {
 		func() (string, string) { return app.activeProvider(), app.activeModel() },
 		orchestration.DefaultCollaborationConfig(),
 	)
+	collabEngine.SetProviderConfiguredChecker(app.isProviderConfigured)
 	orchPool := orchestration.NewWorkerPool(orchStorage, collabEngine, 1)
 	app.orchEngine = collabEngine
 	app.orchPool = orchPool
@@ -130,6 +131,77 @@ func TestChatContinuityAndOrchestrationAPIs(t *testing.T) {
 		_ = json.Unmarshal(w.Body.Bytes(), &events)
 		if len(events) < 2 {
 			t.Fatalf("expected at least 2 events, got %d", len(events))
+		}
+	})
+
+	t.Run("Dynamic 5th OpenAI-Compatible Provider End-to-End", func(t *testing.T) {
+		dynServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch r.URL.Path {
+			case "/v1/models":
+				_, _ = w.Write([]byte(`{"data":[{"id":"mistral-large-latest","name":"Mistral Large"}]}`))
+			case "/v1/chat/completions":
+				_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"Reply from dynamic 5th provider"}}]}`))
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer dynServer.Close()
+
+		// 1. Register 5th provider via REST API
+		createProvBody, _ := json.Marshal(map[string]any{
+			"id":       "mistral-custom",
+			"name":     "Mistral Custom",
+			"base_url": dynServer.URL + "/v1",
+			"api_key":  "sk-mistral-test-1234",
+		})
+		req := httptest.NewRequest(http.MethodPost, "/api/providers", bytes.NewReader(createProvBody))
+		w := httptest.NewRecorder()
+		app.handleProviders(w, req)
+		if w.Code != 201 {
+			t.Fatalf("create dynamic provider failed (%d): %s", w.Code, w.Body.String())
+		}
+
+		// 2. Verify /api/status exposes the new provider dynamically
+		req = httptest.NewRequest(http.MethodGet, "/api/status", nil)
+		w = httptest.NewRecorder()
+		app.status(w, req)
+		var statusResp map[string]any
+		_ = json.Unmarshal(w.Body.Bytes(), &statusResp)
+		provs, _ := statusResp["providers"].(map[string]any)
+		if provs["mistral-custom"] != true {
+			t.Fatalf("expected mistral-custom to be configured in /api/status, got: %+v", statusResp)
+		}
+
+		// 3. Create a chat session and send a message routed to the 5th provider
+		req = httptest.NewRequest(http.MethodPost, "/api/sessions", nil)
+		w = httptest.NewRecorder()
+		app.createSession(w, req)
+		var sess Session
+		_ = json.Unmarshal(w.Body.Bytes(), &sess)
+
+		msgBody, _ := json.Marshal(map[string]any{
+			"session_id": sess.ID,
+			"message":    "Hello Mistral",
+			"provider":   "mistral-custom",
+			"model":      "mistral-large-latest",
+		})
+		req = httptest.NewRequest(http.MethodPost, "/api/messages", bytes.NewReader(msgBody))
+		w = httptest.NewRecorder()
+		app.sendMessage(w, req)
+		if w.Code != 200 {
+			t.Fatalf("chat with dynamic provider failed (%d): %s", w.Code, w.Body.String())
+		}
+		if !bytes.Contains(w.Body.Bytes(), []byte("Reply from dynamic 5th provider")) {
+			t.Fatalf("unexpected chat response: %s", w.Body.String())
+		}
+
+		// 4. Delete dynamic provider via REST API
+		req = httptest.NewRequest(http.MethodDelete, "/api/providers/mistral-custom", nil)
+		w = httptest.NewRecorder()
+		app.handleProviderByID(w, req)
+		if w.Code != 200 {
+			t.Fatalf("delete dynamic provider failed (%d): %s", w.Code, w.Body.String())
 		}
 	})
 }
