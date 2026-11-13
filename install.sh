@@ -75,7 +75,18 @@ else
   cd "$DIR"
   /usr/local/go/bin/go mod tidy
   CGO_ENABLED=0 /usr/local/go/bin/go build -trimpath -ldflags="-s -w" -o "${BIN}.tmp" ./cmd/server
+  chmod +x "${BIN}.tmp"
   mv -f "${BIN}.tmp" "$BIN"
+fi
+
+# The service cannot start a binary without the execute bit (systemd fails
+# with 203/EXEC "Permission denied" and restarts in a loop), so guarantee it
+# here and fail loudly instead of leaving a broken install behind.
+chmod +x "$BIN"
+if [[ ! -x "$BIN" ]]; then
+  echo -e "${R}Installed binary is not executable: $BIN${N}"
+  ls -l "$BIN"
+  exit 1
 fi
 
 step 80 "Verifying service account and credentials"
@@ -139,6 +150,16 @@ install -m 755 "$DIR/scripts/cortext-menu.sh" "$MENU"
 systemctl daemon-reload
 systemctl enable "$APP" >/dev/null 2>&1 || true
 systemctl restart "$APP"
+
+# Prove the service actually stays up instead of silently leaving it in a
+# restart loop (e.g. a bad binary). A healthy service is active within seconds.
+sleep 5
+if ! systemctl is-active --quiet "$APP"; then
+  echo -e "${R}Service failed to start after install/update.${N}"
+  systemctl status "$APP" --no-pager | head -n 20 || true
+  journalctl -u "$APP" -n 20 --no-pager || true
+  exit 1
+fi
 
 step 100 "Done!"
 if [[ "$MODE" == "--update" || "$MODE" == "update" ]]; then

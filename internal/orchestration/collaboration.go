@@ -27,7 +27,7 @@ func DefaultCollaborationConfig() CollaborationConfig {
 		DefaultMaxRounds: 5,
 		DefaultMaxCalls:  15,
 		MaxContextChars:  45000,
-		CallTimeout:      120 * time.Second,
+		CallTimeout:      600 * time.Second, // 10 minutes per model turn
 	}
 }
 
@@ -97,7 +97,7 @@ func NewCollaborationEngine(
 		cfg.MaxContextChars = 45000
 	}
 	if cfg.CallTimeout <= 0 {
-		cfg.CallTimeout = 120 * time.Second
+		cfg.CallTimeout = 600 * time.Second
 	}
 	return &CollaborationEngine{
 		storage:         storage,

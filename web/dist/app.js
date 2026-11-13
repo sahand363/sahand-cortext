@@ -1911,9 +1911,11 @@ async function fetchAndRenderOrchJob(jobId) {
 }
 
 function parseEventJSON(ev) {
-  if (!ev || !ev.payload_json) return {};
+  const raw = ev && (ev.payload || ev.payload_json);
+  if (!raw) return {};
+  if (typeof raw === "object") return raw;
   try {
-    return JSON.parse(ev.payload_json) || {};
+    return JSON.parse(raw) || {};
   } catch {
     return {};
   }
@@ -2074,6 +2076,20 @@ function renderOrchJobDetails(d) {
   $("orch-detail-rounds").textContent = `Round ${d.current_round || 0} / ${d.max_rounds || 5}`;
   $("orch-detail-calls").textContent = `Messages ${messages.length} / ${d.max_calls || 15}`;
   $("orch-detail-task").textContent = d.task || "";
+  const taskEl = $("orch-detail-task");
+  const taskToggleBtn = $("orch-task-toggle-btn");
+  const taskText = d.task || "";
+  taskEl.textContent = taskText;
+  if (taskToggleBtn) {
+    const isLong = taskText.length > 240 || taskText.split("\n").length > 3;
+    taskToggleBtn.classList.toggle("hidden", !isLong);
+    taskEl.classList.add("is-clamped");
+    taskToggleBtn.textContent = "Show full prompt ▾";
+    taskToggleBtn.onclick = () => {
+      const clamped = taskEl.classList.toggle("is-clamped");
+      taskToggleBtn.textContent = clamped ? "Show full prompt ▾" : "Collapse prompt ▴";
+    };
+  }
   $("orch-detail-sub").textContent = `Job ID: ${d.id} · Created ${formatShortTimestamp(d.created_at)}${d.retry_count ? ` · Retries: ${d.retry_count}/${d.max_retries}` : ""}`;
 
   const coordMsgs = messages.filter(m => m.sender_role === "coordinator").length;

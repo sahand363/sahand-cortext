@@ -210,6 +210,55 @@
     color: #fde047 !important;
     border-color: rgba(250, 204, 21, 0.4) !important;
   }
+  .orch-monitor-top {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 12px;
+  }
+  .orch-monitor-header-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+  .orch-task-box-compact {
+    background: rgba(15, 19, 28, 0.65);
+    border: 1px solid #232a38;
+    border-radius: 10px;
+    padding: 10px 14px;
+    width: 100%;
+  }
+  .orch-task-prompt-text {
+    font-size: 0.92rem;
+    font-weight: 400;
+    line-height: 1.5;
+    color: #cbd5e1;
+    margin: 0;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .orch-task-prompt-text.is-clamped {
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .orch-task-toggle-btn {
+    background: none;
+    border: none;
+    color: #38bdf8;
+    font-size: 0.78rem;
+    font-weight: 600;
+    padding: 6px 0 0;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .orch-task-toggle-btn:hover {
+    text-decoration: underline;
+  }
 </style>
 </head>
 <body>
@@ -445,21 +494,24 @@
             <!-- 2. Live Execution & Historical Job Monitor -->
             <div id="orch-monitor-panel" class="orch-panel hidden">
               <div class="orch-monitor-top">
-                <div class="orch-monitor-titles">
+                <div class="orch-monitor-header-row">
                   <div class="orch-badges-row">
                     <span class="orch-status-badge" id="orch-detail-status">QUEUED</span>
                     <span class="orch-stage-badge" id="orch-detail-stage">STAGE: QUEUED</span>
                     <span class="orch-meta-chip" id="orch-detail-rounds">Round 0 / 5</span>
                     <span class="orch-meta-chip" id="orch-detail-calls">Calls 0 / 15</span>
                   </div>
-                  <h2 id="orch-detail-task" dir="auto">Task title</h2>
-                  <div class="orch-detail-sub" id="orch-detail-sub">Job ID: —</div>
+                  <div class="orch-monitor-actions">
+                    <button type="button" class="btn btn-primary btn-small hidden" id="orch-retry-btn">▶ Play / Resume Task</button>
+                    <button type="button" class="tool-btn hidden" id="orch-pause-btn" title="Wait for current AI to finish its turn, then pause">⏸ Pause After Current Turn</button>
+                    <button type="button" class="tool-btn danger hidden" id="orch-cancel-btn" title="Immediately stop the task">⏹ Stop Now</button>
+                    <button type="button" class="tool-btn" id="orch-back-builder-btn">＋ New Task</button>
+                  </div>
                 </div>
-                <div class="orch-monitor-actions">
-                  <button type="button" class="btn btn-primary btn-small hidden" id="orch-retry-btn">▶ Play / Resume Task</button>
-                  <button type="button" class="tool-btn hidden" id="orch-pause-btn" title="Wait for current AI to finish its turn, then pause">⏸ Pause After Current Turn</button>
-                  <button type="button" class="tool-btn danger hidden" id="orch-cancel-btn" title="Immediately stop the task">⏹ Stop Now</button>
-                  <button type="button" class="tool-btn" id="orch-back-builder-btn">＋ New Task</button>
+                <div class="orch-task-box-compact">
+                  <p id="orch-detail-task" class="orch-task-prompt-text is-clamped" dir="auto">Task title</p>
+                  <button type="button" id="orch-task-toggle-btn" class="orch-task-toggle-btn hidden">Show full prompt ▾</button>
+                  <div class="orch-detail-sub" id="orch-detail-sub" style="margin-top:6px">Job ID: —</div>
                 </div>
               </div>
 

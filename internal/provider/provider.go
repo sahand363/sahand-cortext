@@ -15,19 +15,16 @@ import (
 	"time"
 )
 
-// Message represents a normalized conversational turn
 type Message struct {
-	Role    string `json:"role"` // "system", "user", "assistant"
+	Role    string `json:"role"`
 	Content string `json:"content"`
 }
 
-// CallOpts holds optional parameters for model invocations
 type CallOpts struct {
 	MaxTokens    int
 	DisableRetry bool
 }
 
-// Router handles model calls across Google Gemini, OpenRouter, CodeCraft API, and AIPrime
 type Router struct {
 	Client            *http.Client
 	GeminiBaseURL     string
@@ -41,8 +38,6 @@ func NewRouter() *Router {
 		Timeout:   15 * time.Second,
 		KeepAlive: 30 * time.Second,
 	}
-	// Force IPv4 (tcp4) + HTTP/1.1 (disabling HTTP/2 connection multiplexing)
-	// so a slow/stalled upstream request on Cloudflare never poisons subsequent requests.
 	transport := &http.Transport{
 		Proxy: http.ProxyFromEnvironment,
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -54,12 +49,12 @@ func NewRouter() *Router {
 		MaxIdleConns:          10,
 		IdleConnTimeout:       30 * time.Second,
 		TLSHandshakeTimeout:   15 * time.Second,
-		ResponseHeaderTimeout: 120 * time.Second,
+		ResponseHeaderTimeout: 600 * time.Second, // 10 minutes for heavy reasoning & multi-file code generation
 		ExpectContinueTimeout: 1 * time.Second,
 	}
 
 	return &Router{
-		Client:            &http.Client{Transport: transport, Timeout: 180 * time.Second},
+		Client:            &http.Client{Transport: transport, Timeout: 620 * time.Second},
 		GeminiBaseURL:     "https://generativelanguage.googleapis.com/v1beta/models",
 		OpenRouterBaseURL: "https://openrouter.ai/api/v1/chat/completions",
 		CodeCraftBaseURL:  "https://codecraftapi.com/v1/chat/completions",
@@ -93,6 +88,34 @@ func ProviderLabel(p string) string {
 	}
 }
 
+func classifyProviderError(err error, elapsedMs int64) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, context.Canceled) {
+		return err
+	}
+	sec := float64(elapsedMs) / 1000.0
+	msg := strings.ToLower(err.Error())
+
+	if errors.Is(err, context.DeadlineExceeded) || strings.Contains(msg, "timeout") || strings.Contains(msg, "deadline exceeded") {
+		return fmt.Errorf("TIMEOUT after %.1fs (model took too long to finish generating)", sec)
+	}
+	if strings.Contains(msg, "http 429") {
+		return fmt.Errorf("RATE LIMIT (HTTP 429 — provider throttled requests): %v", err)
+	}
+	if strings.Contains(msg, "http 401") || strings.Contains(msg, "http 402") || strings.Contains(msg, "http 403") {
+		return fmt.Errorf("AUTH / WALLET / QUOTA ERROR: %v", err)
+	}
+	if strings.Contains(msg, "http 500") || strings.Contains(msg, "http 502") || strings.Contains(msg, "http 503") || strings.Contains(msg, "http 504") {
+		return fmt.Errorf("PROVIDER OVERLOADED (upstream server error): %v", err)
+	}
+	if strings.Contains(msg, "empty content") || strings.Contains(msg, "empty response") {
+		return fmt.Errorf("EMPTY RESPONSE (model returned 0 tokens): %v", err)
+	}
+	return err
+}
+
 func isRetryable(err error) bool {
 	if err == nil {
 		return false
@@ -112,7 +135,6 @@ func isRetryable(err error) bool {
 		strings.Contains(msg, "eof")
 }
 
-// Call invokes the appropriate provider with structured history and exponential backoff
 func (r *Router) Call(ctx context.Context, provider, key, model string, messages []Message, opts CallOpts) (string, int64, error) {
 	provider = NormalizeProvider(provider)
 	if strings.TrimSpace(key) == "" {
@@ -153,7 +175,6 @@ func (r *Router) Call(ctx context.Context, provider, key, model string, messages
 			if baseURL == "" {
 				baseURL = "https://api.aiprime.shop/v1/chat/completions"
 			}
-			// Do not send max_tokens cap to AIPrime so reasoning models (glm-5.3-flash) never get starved
 			aiPrimeOpts := opts
 			aiPrimeOpts.MaxTokens = 0
 			reply, err = r.callOpenAI(ctx, baseURL, key, model, messages, aiPrimeOpts, "AIPrime", false)
@@ -167,16 +188,15 @@ func (r *Router) Call(ctx context.Context, provider, key, model string, messages
 		if err == nil {
 			return reply, elapsed, nil
 		}
-		lastErr = err
+		lastErr = classifyProviderError(err, elapsed)
 		if !isRetryable(err) || ctx.Err() != nil {
-			return "", elapsed, err
+			return "", elapsed, lastErr
 		}
 	}
 
 	return "", totalLatency, lastErr
 }
 
-// callGemini formats structured conversation history for Google Gemini
 func (r *Router) callGemini(ctx context.Context, key, model string, messages []Message, opts CallOpts) (string, error) {
 	cleanModel := strings.TrimPrefix(strings.TrimSpace(model), "models/")
 	if cleanModel == "" {
@@ -305,7 +325,6 @@ func (r *Router) callGemini(ctx context.Context, key, model string, messages []M
 	return out, nil
 }
 
-// callOpenAI formats standard messages array for OpenAI-compatible gateways
 func (r *Router) callOpenAI(ctx context.Context, endpoint, key, model string, messages []Message, opts CallOpts, label string, openRouterHeaders bool) (string, error) {
 	type oaMsg struct {
 		Role    string `json:"role"`
@@ -353,7 +372,7 @@ func (r *Router) callOpenAI(ctx context.Context, endpoint, key, model string, me
 	if openRouterHeaders {
 		req.Header.Set("HTTP-Referer", "https://github.com/sahand363/sahand-cortext")
 		req.Header.Set("X-Title", "Sahand-CorText")
-		req.Header.Set("User-Agent", "Sahand-CorText/0.5.0")
+		req.Header.Set("User-Agent", "Sahand-CorText/0.5.3")
 	} else {
 		req.Header.Set("User-Agent", "curl/8.5.0")
 	}
