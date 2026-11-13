@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# nokhodichat — type `nokhodichat` anywhere in SSH to open the management menu.
+# Installed to /usr/local/bin/nokhodichat by install.sh.
+if [ "$(id -u)" = "0" ]; then
+  exec /opt/nokhodi-chat/manage.sh "$@"
+else
+  exec sudo /opt/nokhodi-chat/manage.sh "$@"
+fi

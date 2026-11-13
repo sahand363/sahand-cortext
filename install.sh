@@ -1,173 +1,71 @@
 #!/usr/bin/env bash
-set -Eeuo pipefail
-APP=sahand-cortext
-REPO=https://github.com/sahand363/sahand-cortext.git
-RELEASE_URL=https://github.com/sahand363/sahand-cortext/releases/latest/download/sahand-cortext
-DIR=/opt/sahand-cortext
-DATA=/var/lib/sahand-cortext
-ENV=/etc/sahand-cortext.env
-SERVICE=/etc/systemd/system/sahand-cortext.service
-BIN=/usr/local/bin/sahand-cortext
-MENU=/usr/local/bin/cortext
-MODE="${1:-install}"
+# Nokhodi Chat - one-line installer for Ubuntu
+#
+#   curl -sSL https://raw.githubusercontent.com/sahand363/nokhodi-chat/main/install.sh | sudo bash
+#
+# What it does (no compilation on the server):
+#   1. Downloads the pre-built linux/amd64 binary from the latest GitHub release
+#   2. Installs it to /opt/nokhodi-chat, creates config.json + data/
+#   3. Installs + starts the systemd service on port 44044
+#   4. Installs the `nokhodichat` command (/usr/local/bin/nokhodichat) to open the menu
+#   5. Opens the management menu (./manage.sh) so you can set the OP + user passwords
+set -euo pipefail
+REPO="sahand363/nokhodi-chat"
+INSTALL_DIR="/opt/nokhodi-chat"
+PORT="44044"
 
-G='\033[0;32m'; C='\033[0;36m'; Y='\033[1;33m'; R='\033[0;31m'; N='\033[0m'
-step(){ printf "\n${C}[%3s%%]${N} %s\n" "$1" "$2"; }
-fail(){ echo -e "${R}Operation failed. Check the error above.${N}"; exit 1; }
-trap fail ERR
+echo "Installing Nokhodi Chat ..."
+[ "$(id -u)" = "0" ] || { echo "Please run as root / with sudo."; exit 1; }
+command -v curl >/dev/null || { apt-get update -qq && apt-get install -y -qq curl ca-certificates; }
 
-[[ $EUID -eq 0 ]] || { echo "Run with sudo: sudo bash install.sh"; exit 1; }
-clear 2>/dev/null || true
-echo -e "${C}"
-cat <<'EOF'
-  _____       _                     _        _____          _______        _   
- / ____|     | |                   | |      / ____|        |__   __|      | |  
-| (___   __ _| |__   __ _ _ __   __| |_____| |     ___  _ __  | | _____  _| |_ 
- \___ \ / _` | '_ \ / _` | '_ \ / _` |_____| |    / _ \| '__| | |/ _ \ \/ / __|
- ____) | (_| | | | | (_| | | | | (_| |     | |___| (_) | |    | |  __/>  <| |_ 
-|_____/ \__,_|_| |_|\__,_|_| |_|\__,_|      \_____\___/|_|    |_|\___/_/\_\\__|
+URL="$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" |
+  grep -o '"browser_download_url": *"[^"]*linux-amd64\.tar\.gz"' | head -1 |
+  sed 's/.*"browser_download_url": *"//; s/"$//')"
+[ -n "$URL" ] || { echo "ERROR: no release found for $REPO - push a tag like v1.0.0 first."; exit 1; }
+
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+curl -fsSL -o "$TMP/release.tar.gz" "$URL"
+tar -xzf "$TMP/release.tar.gz" -C "$TMP"
+mkdir -p "$INSTALL_DIR/data"
+cp -f "$TMP/nokhodi-chat" "$INSTALL_DIR/nokhodi-chat"
+chmod +x "$INSTALL_DIR/nokhodi-chat"
+[ -f "$TMP/manage.sh" ] && cp -f "$TMP/manage.sh" "$INSTALL_DIR/manage.sh" && chmod +x "$INSTALL_DIR/manage.sh"
+[ -f "$TMP/nokhodi-chat.service" ] && cp -f "$TMP/nokhodi-chat.service" /etc/systemd/system/nokhodi-chat.service
+# `nokhodichat` shortcut: type it in any SSH session to open the menu.
+if [ -f "$TMP/nokhodichat" ]; then
+  cp -f "$TMP/nokhodichat" /usr/local/bin/nokhodichat
+else
+  cat > /usr/local/bin/nokhodichat <<'EOF'
+#!/usr/bin/env bash
+if [ "$(id -u)" = "0" ]; then exec /opt/nokhodi-chat/manage.sh "$@"; else exec sudo /opt/nokhodi-chat/manage.sh "$@"; fi
 EOF
-if [[ "$MODE" == "--update" || "$MODE" == "update" ]]; then
-  echo -e "${N}${G}Sahand-CorText · Fast Updater${N}"
-else
-  echo -e "${N}${G}Sahand-CorText · Fast Installer & Updater${N}"
+fi
+chmod +x /usr/local/bin/nokhodichat
+# Existing installs may still have the old title in config.json - rename it.
+
+# First run generates config.json (defaults: user changeme123, OP changeme-op123) if missing.
+if [ ! -f "$INSTALL_DIR/config.json" ]; then
+  (cd "$INSTALL_DIR" && timeout 3 ./nokhodi-chat -config config.json >/dev/null 2>&1 || true)
 fi
 
-step 10 "Checking required system tools"
-if command -v git >/dev/null 2>&1 && command -v curl >/dev/null 2>&1 && command -v openssl >/dev/null 2>&1; then
-  echo -e "${G}✓ System tools (git, curl, openssl) are already installed — skipping APT download.${N}"
-else
-  sed -i 's|http://de\.archive\.ubuntu\.com/ubuntu|http://archive.ubuntu.com/ubuntu|g' /etc/apt/sources.list 2>/dev/null || true
-  export DEBIAN_FRONTEND=noninteractive
-  apt-get update -o Dpkg::Progress-Fancy=1
-  apt-get install -y -o Dpkg::Progress-Fancy=1 git curl ca-certificates openssl gnupg
-fi
-
-step 35 "Updating Sahand-CorText web files"
-if [[ -d "$DIR/.git" ]]; then
-  git -C "$DIR" fetch --depth 1 origin main
-  git -C "$DIR" reset --hard origin/main
-else
-  rm -rf "$DIR"
-  git clone --depth 1 "$REPO" "$DIR"
-fi
-
-step 60 "Installing application binary"
-mkdir -p /usr/local/bin
-rm -f "${BIN}.tmp"
-if curl -fL --http1.1 --retry 5 --retry-delay 2 --retry-all-errors --connect-timeout 15 --progress-bar "$RELEASE_URL" -o "${BIN}.tmp"; then
-  chmod +x "${BIN}.tmp"
-  mv -f "${BIN}.tmp" "$BIN"
-  echo -e "${G}✓ Pre-built binary downloaded and installed.${N}"
-else
-  rm -f "${BIN}.tmp"
-  echo -e "${Y}Release download interrupted. Building binary with Go 1.23...${N}"
-  if ! /usr/local/go/bin/go version 2>/dev/null | grep -Eq 'go1\.(23|24|25)'; then
-    arch=$(dpkg --print-architecture)
-    case "$arch" in amd64) ga=amd64;; arm64) ga=arm64;; *) echo "Unsupported CPU: $arch"; exit 1;; esac
-    curl -fL --http1.1 --retry 5 --retry-delay 2 --retry-all-errors --progress-bar "https://go.dev/dl/go1.23.12.linux-${ga}.tar.gz" -o /tmp/go.tgz
-    rm -rf /usr/local/go
-    tar -C /usr/local -xzf /tmp/go.tgz
-    ln -sf /usr/local/go/bin/go /usr/local/bin/go
-    rm -f /tmp/go.tgz
-  fi
-  export PATH="/usr/local/go/bin:$PATH"
-  cd "$DIR"
-  /usr/local/go/bin/go mod tidy
-  CGO_ENABLED=0 /usr/local/go/bin/go build -trimpath -ldflags="-s -w" -o "${BIN}.tmp" ./cmd/server
-  chmod +x "${BIN}.tmp"
-  mv -f "${BIN}.tmp" "$BIN"
-fi
-
-# The service cannot start a binary without the execute bit (systemd fails
-# with 203/EXEC "Permission denied" and restarts in a loop), so guarantee it
-# here and fail loudly instead of leaving a broken install behind.
-chmod +x "$BIN"
-if [[ ! -x "$BIN" ]]; then
-  echo -e "${R}Installed binary is not executable: $BIN${N}"
-  ls -l "$BIN"
-  exit 1
-fi
-
-step 80 "Verifying service account and credentials"
-id cortext >/dev/null 2>&1 || useradd --system --home "$DATA" --shell /usr/sbin/nologin cortext
-install -d -o cortext -g cortext -m 750 "$DATA"
-
-if [[ -f "$ENV" ]] && grep -q "^HUB_PASSWORD_HASH=" "$ENV"; then
-  echo -e "${G}✓ Existing admin credentials and database preserved.${N}"
-else
-  read -rp "Panel username [admin]: " username </dev/tty
-  username=${username:-admin}
-  while true; do
-    read -rsp "Panel password (at least 12 characters): " p1 </dev/tty
-    echo
-    [[ ${#p1} -ge 12 ]] && break
-    echo "Use at least 12 characters."
-  done
-  read -rsp "Confirm password: " p2 </dev/tty
-  echo
-  [[ "$p1" == "$p2" ]] || { echo "Passwords do not match."; exit 1; }
-  hash=$("$BIN" hash-password "$p1")
-  umask 077
-  cat > "$ENV" <<EOF
-HUB_ADDR=0.0.0.0:8787
-HUB_DATA_DIR=$DATA
-HUB_WEB_DIR=$DIR/web/dist
-HUB_USERNAME=$username
-HUB_PASSWORD_HASH=$hash
-HUB_COOKIE_SECURE=false
-EOF
-  chmod 600 "$ENV"
-  unset p1 p2 hash
-fi
-
-step 95 "Updating system service and SSH menu"
-cat > "$SERVICE" <<EOF
-[Unit]
-Description=Sahand-CorText private AI hub
-After=network-online.target
-Wants=network-online.target
-[Service]
-Type=simple
-User=cortext
-Group=cortext
-WorkingDirectory=$DIR
-EnvironmentFile=$ENV
-ExecStart=$BIN
-Restart=on-failure
-RestartSec=4
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectSystem=strict
-ProtectHome=true
-ReadWritePaths=$DATA
-CapabilityBoundingSet=
-LockPersonality=true
-[Install]
-WantedBy=multi-user.target
-EOF
-install -m 755 "$DIR/scripts/cortext-menu.sh" "$MENU"
 systemctl daemon-reload
-systemctl enable "$APP" >/dev/null 2>&1 || true
-systemctl restart "$APP"
-
-# Prove the service actually stays up instead of silently leaving it in a
-# restart loop (e.g. a bad binary). A healthy service is active within seconds.
-sleep 5
-if ! systemctl is-active --quiet "$APP"; then
-  echo -e "${R}Service failed to start after install/update.${N}"
-  systemctl status "$APP" --no-pager | head -n 20 || true
-  journalctl -u "$APP" -n 20 --no-pager || true
-  exit 1
-fi
-
-step 100 "Done!"
-if [[ "$MODE" == "--update" || "$MODE" == "update" ]]; then
-  ip=$(hostname -I 2>/dev/null | awk '{print $1}')
-  echo -e "\n${G}✓ Sahand-CorText updated and restarted! Panel: http://${ip}:8787${N}"
+systemctl enable --now nokhodi-chat
+sleep 1
+IP="$(hostname -I | awk '{print $1}')"
+echo
+SCHEME="http"
+grep -q '"tls_enabled": *true' "$INSTALL_DIR/config.json" 2>/dev/null && SCHEME="https"
+echo " Done! Open:  $SCHEME://$IP:$PORT"
+echo "   Installed: $($INSTALL_DIR/nokhodi-chat version)"
+echo "   Default passwords: user changeme123, OP changeme-op123 - change both now in the menu (options 3 and 4)."
+echo "   Manage later with:  nokhodichat   (or sudo /opt/nokhodi-chat/manage.sh)"
+echo
+# Open the menu on the real terminal, not on the curl pipe this script
+# was run from - otherwise the menu reads EOF and loops "Invalid choice."
+if [ -r /dev/tty ] && [ -w /dev/tty ]; then
+  exec "$INSTALL_DIR/manage.sh" < /dev/tty
+else
+  echo "No terminal to open the menu in - run 'nokhodichat' yourself from a normal SSH prompt."
   exit 0
-fi
-
-if [[ -r /dev/tty ]]; then
-  INSTALLED_NOW=1 exec "$MENU" </dev/tty
 fi

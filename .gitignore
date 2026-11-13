@@ -1,6 +1,4 @@
-/bin/
-/data/
-/.env
-*.db
-*.db-shm
-*.db-wal
+config.json
+data/
+nokhodi-chat
+*.log
