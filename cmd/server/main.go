@@ -218,20 +218,33 @@ func (a *App) saveTestRecord(p, model string, rec ModelTestRecord) {
 	}
 }
 
-func (a *App) setModelEnabled(p, model string, enabled bool) {
+func (a *App) setModelsEnabledBatch(p string, models []string, enabled bool) {
 	norm := provider.NormalizeProvider(p)
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	records := a.loadTestRecords(norm)
-	rec := records[model]
-	if rec.Status == "" {
-		rec.Status = "untested"
+	for _, m := range models {
+		modelID := strings.TrimSpace(m)
+		if norm == "gemini" {
+			modelID = strings.TrimPrefix(modelID, "models/")
+		}
+		if modelID == "" {
+			continue
+		}
+		rec := records[modelID]
+		if rec.Status == "" {
+			rec.Status = "untested"
+		}
+		rec.Disabled = !enabled
+		records[modelID] = rec
 	}
-	rec.Disabled = !enabled
-	records[model] = rec
 	if data, err := json.Marshal(records); err == nil {
 		_ = a.setSetting(norm+"_model_tests", string(data))
 	}
+}
+
+func (a *App) setModelEnabled(p, model string, enabled bool) {
+	a.setModelsEnabledBatch(p, []string{model}, enabled)
 }
 
 // verifiedWorkingParticipants returns only models that are verified working AND explicitly enabled by the user
@@ -520,32 +533,37 @@ func (a *App) handleModels(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// POST /api/models/toggle - Enables or disables a model in Chat, Orchestration pickers, and Failover pools
+// POST /api/models/toggle - Enables or disables one or multiple models in Chat, Orchestration pickers, and Failover pools
 func (a *App) handleToggleModel(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", 405)
 		return
 	}
 	var body struct {
-		Provider string `json:"provider"`
-		Model    string `json:"model"`
-		Enabled  bool   `json:"enabled"`
+		Provider string   `json:"provider"`
+		Model    string   `json:"model"`
+		Models   []string `json:"models"`
+		Enabled  bool     `json:"enabled"`
 	}
-	if json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&body) != nil || strings.TrimSpace(body.Model) == "" {
-		jsonOut(w, 400, map[string]string{"error": "Model ID is required"})
+	if json.NewDecoder(http.MaxBytesReader(w, r.Body, 256*1024)).Decode(&body) != nil {
+		jsonOut(w, 400, map[string]string{"error": "Invalid request payload"})
 		return
 	}
 	norm := provider.NormalizeProvider(body.Provider)
-	modelID := strings.TrimSpace(body.Model)
-	if norm == "gemini" {
-		modelID = strings.TrimPrefix(modelID, "models/")
+	targets := body.Models
+	if strings.TrimSpace(body.Model) != "" {
+		targets = append(targets, strings.TrimSpace(body.Model))
+	}
+	if len(targets) == 0 {
+		jsonOut(w, 400, map[string]string{"error": "Model ID or models list is required"})
+		return
 	}
 
-	a.setModelEnabled(norm, modelID, body.Enabled)
+	a.setModelsEnabledBatch(norm, targets, body.Enabled)
 	jsonOut(w, 200, map[string]any{
 		"ok":       true,
 		"provider": norm,
-		"model":    modelID,
+		"count":    len(targets),
 		"enabled":  body.Enabled,
 	})
 }

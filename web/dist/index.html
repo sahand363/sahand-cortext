@@ -218,8 +218,10 @@
         <div class="page-heading">
           <div><div class="eyebrow">THE INTELLIGENCE LAYER</div><h1>Models & providers</h1><p>Test models and use the <b>Enabled</b> checkbox on each card to control which models appear in Chat, Orchestration, and Failover pools.</p></div>
           <div class="heading-actions">
-            <button class="btn btn-quiet btn-small" id="refresh-models-page">↻ Refresh list</button>
-            <button class="btn btn-primary btn-small" id="test-all-models-page">⚡ Test shown models</button>
+            <button type="button" class="btn btn-quiet btn-small" id="check-all-models-page">✓ Check All</button>
+            <button type="button" class="btn btn-quiet btn-small" id="uncheck-all-models-page">☐ Uncheck All</button>
+            <button type="button" class="btn btn-quiet btn-small" id="refresh-models-page">↻ Refresh list</button>
+            <button type="button" class="btn btn-primary btn-small" id="test-all-models-page">⚡ Test shown models</button>
           </div>
         </div>
 
@@ -567,6 +569,8 @@
                 </div>
                 <div class="key-actions">
                   <button type="submit" class="btn btn-primary btn-small" id="save-key-btn">Save Key &amp; Load Models <span>↗</span></button>
+                  <button type="button" class="btn btn-quiet btn-small" id="check-all-models-btn">✓ Check All</button>
+                  <button type="button" class="btn btn-quiet btn-small" id="uncheck-all-models-btn">☐ Uncheck All</button>
                   <button type="button" class="btn btn-quiet btn-small" id="reload-models-btn">↻ Reload Models</button>
                   <button type="button" class="btn btn-quiet btn-small" id="test-all-models-btn">⚡ Test Shown Models</button>
                   <button type="button" class="btn btn-quiet btn-small" data-goto="chat">Go to Chat <span>→</span></button>

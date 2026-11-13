@@ -1140,6 +1140,33 @@ async function toggleModelEnabledState(provider, modelId, enabled) {
   renderOrchParticipantsBuilder();
 }
 
+async function batchToggleShownModels(enabled) {
+  const provider = selectedProvider;
+  const shown = getDisplayedModels(provider);
+  if (!shown.length) {
+    toast(`No models loaded for ${providerCatalog[provider].name} yet.`);
+    return;
+  }
+  const ids = shown.map(m => m.id);
+  shown.forEach(m => { m.enabled = enabled; });
+
+  try {
+    await api("/api/models/toggle", {
+      method: "POST",
+      body: JSON.stringify({ provider, models: ids, enabled })
+    });
+    toast(enabled
+      ? `✓ Checked all ${ids.length} shown models on ${providerCatalog[provider].name}`
+      : `☐ Unchecked all ${ids.length} shown models on ${providerCatalog[provider].name}`);
+  } catch (err) {
+    toast("Batch toggle failed: " + err.message);
+  }
+  syncModelDropdown();
+  syncAuditorModelDropdown();
+  renderModelGrids();
+  renderOrchParticipantsBuilder();
+}
+
 function renderModelGrids() {
   const provider = selectedProvider;
   const meta = providerCatalog[provider];
@@ -1405,6 +1432,10 @@ $("reload-models-btn").onclick = () => loadProviderModels(selectedProvider, true
 $("refresh-models-page").onclick = () => loadProviderModels(selectedProvider, true);
 $("test-all-models-btn").onclick = () => testShownModels();
 $("test-all-models-page").onclick = () => testShownModels();
+if ($("check-all-models-btn")) $("check-all-models-btn").onclick = () => batchToggleShownModels(true);
+if ($("uncheck-all-models-btn")) $("uncheck-all-models-btn").onclick = () => batchToggleShownModels(false);
+if ($("check-all-models-page")) $("check-all-models-page").onclick = () => batchToggleShownModels(true);
+if ($("uncheck-all-models-page")) $("uncheck-all-models-page").onclick = () => batchToggleShownModels(false);
 
 $("toggle-key").onclick = () => {
   const i = $("api-key");
