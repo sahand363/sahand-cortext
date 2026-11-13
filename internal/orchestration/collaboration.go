@@ -470,7 +470,7 @@ func (e *CollaborationEngine) ProcessJob(ctx context.Context, job *Job, helper E
 				nextPhaseDesc = "Coordinator Review"
 			}
 			_ = e.storage.RecordEvent(ctx, job.ID, EventWorkerResponded, string(StageWorking), helper.WorkerID(),
-				fmt.Sprintf("Worker #%d (%s/%s) completed round %d deliverable in %.1fs — passing to %s.", usedWorker.SortOrder+1, usedWorker.Provider, usedWorker.Model, float64(workerLat)/1000.0, nextPhaseDesc),
+				fmt.Sprintf("Worker #%d (%s/%s) completed round %d deliverable in %.1fs — passing to %s.", usedWorker.SortOrder+1, usedWorker.Provider, usedWorker.Model, round, float64(workerLat)/1000.0, nextPhaseDesc),
 				marshalPayload(map[string]any{"round": round, "latency_ms": workerLat, "action": workerParsed.Action, "provider": usedWorker.Provider, "model": usedWorker.Model, "sort_order": usedWorker.SortOrder}))
 		}
 
