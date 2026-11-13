@@ -10,9 +10,9 @@ import (
 )
 
 var (
-	ErrJobNotFound   = errors.New("orchestration job not found")
-	ErrJobCancelled  = errors.New("orchestration job was cancelled")
-	ErrJobCompleted  = errors.New("orchestration job is already completed")
+	ErrJobNotFound  = errors.New("orchestration job not found")
+	ErrJobCancelled = errors.New("orchestration job was cancelled")
+	ErrJobCompleted = errors.New("orchestration job is already completed")
 )
 
 type Storage struct {
@@ -89,7 +89,6 @@ func (s *Storage) InitSchema() error {
 }
 
 func (s *Storage) CreateJob(ctx context.Context, task string, maxRounds, maxCalls int, metadata string) (*Job, error) {
-	_ = time.Now().UnixNano() // Seed
 	id := fmt.Sprintf("orch-%x", time.Now().UnixNano()&0xffffffff)
 
 	if maxRounds <= 0 {
@@ -265,13 +264,13 @@ func (s *Storage) GetCollaborationMessages(ctx context.Context, jobID string) ([
 	return out, nil
 }
 
-func (s *Storage) RecordEvent(ctx context.Context, jobID, eventType, phase, workerID, message, payloadJSON string) error {
+func (s *Storage) RecordEvent(ctx context.Context, jobID string, eventType EventType, phase, workerID, message, payloadJSON string) error {
 	if strings.TrimSpace(payloadJSON) == "" {
 		payloadJSON = "{}"
 	}
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO orch_events(job_id, event_type, phase, worker_id, message, payload_json) VALUES(?, ?, ?, ?, ?, ?)`,
-		jobID, eventType, phase, workerID, message, payloadJSON,
+		jobID, string(eventType), phase, workerID, message, payloadJSON,
 	)
 	return err
 }
@@ -295,10 +294,10 @@ func (s *Storage) GetJobEvents(ctx context.Context, jobID string) ([]Event, erro
 	return out, nil
 }
 
-func (s *Storage) UpdateJobStage(ctx context.Context, jobID, stage string, round, totalCalls int) error {
+func (s *Storage) UpdateJobStage(ctx context.Context, jobID string, stage WorkflowStage, round, totalCalls int) error {
 	_, err := s.db.ExecContext(ctx,
 		`UPDATE orch_jobs SET status='running', current_stage=?, current_round=?, total_calls=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`,
-		stage, round, totalCalls, jobID,
+		string(stage), round, totalCalls, jobID,
 	)
 	return err
 }
@@ -334,7 +333,6 @@ func (s *Storage) CancelJob(ctx context.Context, jobID string) error {
 	return nil
 }
 
-// PauseJob sets a pause flag and transitions job status to 'paused' after current turn finishes
 func (s *Storage) PauseJob(ctx context.Context, jobID string) error {
 	res, err := s.db.ExecContext(ctx,
 		`UPDATE orch_jobs SET status='paused', current_stage='paused', updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='running'`,
