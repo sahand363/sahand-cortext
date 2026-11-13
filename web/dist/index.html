@@ -6,6 +6,113 @@
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@400;500;600;700;800&family=Noto+Sans+Arabic:wght@400;500;600;700&family=Vazirmatn:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/style.css">
+<style>
+  .orch-contrib-card {
+    background: rgba(18, 22, 31, 0.75);
+    border: 1px solid #232a38;
+    border-radius: 12px;
+    padding: 14px 16px;
+    margin-bottom: 16px;
+  }
+  .orch-contrib-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 10px;
+    font-size: 0.78rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: #94a3b8;
+    font-weight: 700;
+  }
+  .orch-contrib-bar {
+    display: flex;
+    height: 10px;
+    width: 100%;
+    border-radius: 999px;
+    overflow: hidden;
+    background: #1a202c;
+    gap: 2px;
+    margin-bottom: 12px;
+  }
+  .orch-contrib-seg {
+    height: 100%;
+    transition: width 0.35s ease;
+  }
+  .orch-contrib-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px 18px;
+    font-size: 0.85rem;
+  }
+  .orch-contrib-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    color: #e2e8f0;
+  }
+  .orch-contrib-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    display: inline-block;
+    flex-shrink: 0;
+  }
+  .orch-fail-pill {
+    background: rgba(239, 68, 68, 0.16);
+    color: #fca5a5;
+    border: 1px solid rgba(239, 68, 68, 0.35);
+    border-radius: 6px;
+    padding: 1px 6px;
+    font-size: 0.74rem;
+    font-weight: 600;
+  }
+  .model-enable-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 0.75rem;
+    padding: 2px 7px;
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    color: #cbd5e1;
+    cursor: pointer;
+    user-select: none;
+  }
+  .model-enable-toggle input {
+    margin: 0;
+    cursor: pointer;
+    accent-color: #10b981;
+  }
+  .api-model-card.is-disabled {
+    opacity: 0.52;
+  }
+  .orch-rev-checks {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px 20px;
+    margin: 10px 0 12px;
+    padding: 10px 12px;
+    background: rgba(15, 19, 28, 0.65);
+    border: 1px solid #252d3d;
+    border-radius: 9px;
+  }
+  .orch-rev-check {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.85rem;
+    color: #cbd5e1;
+    cursor: pointer;
+  }
+  .orch-rev-check input {
+    accent-color: #10b981;
+    width: 15px;
+    height: 15px;
+    cursor: pointer;
+  }
+</style>
 </head>
 <body>
 <div id="login-screen" class="auth-screen">
@@ -109,7 +216,7 @@
 
       <section id="page-models" class="page module-page hidden">
         <div class="page-heading">
-          <div><div class="eyebrow">THE INTELLIGENCE LAYER</div><h1>Models & providers</h1><p>Switch between Gemini, OpenRouter, AIPrime, and CodeCraft API to inspect and test every model on your plan.</p></div>
+          <div><div class="eyebrow">THE INTELLIGENCE LAYER</div><h1>Models & providers</h1><p>Test models and use the <b>Enabled</b> checkbox on each card to control which models appear in Chat, Orchestration, and Failover pools.</p></div>
           <div class="heading-actions">
             <button class="btn btn-quiet btn-small" id="refresh-models-page">↻ Refresh list</button>
             <button class="btn btn-primary btn-small" id="test-all-models-page">⚡ Test shown models</button>
@@ -130,7 +237,7 @@
               <div>
                 <div class="provider-overline">SELECTED PROVIDER</div>
                 <h3 id="models-feature-title">Google Gemini API</h3>
-                <p id="models-feature-desc">Click any model card below to test live generation and set it as your active chat model.</p>
+                <p id="models-feature-desc">Click any model card below to test live generation. Uncheck "Enabled" on any model you want to hide or exclude from failovers.</p>
               </div>
             </div>
             <span class="status-pill" id="models-provider-status">Needs setup</span>
@@ -170,7 +277,7 @@
                 <div>
                   <div class="eyebrow">TEAM & TASK CONFIGURATION</div>
                   <h2>Configure Collaboration Team</h2>
-                  <p>Assign at least two participants (Coordinator & Worker). Models never talk directly—Sahand-CorText routes and validates every step.</p>
+                  <p>Assign your Coordinator, Worker(s), and optional QA Auditor. Workers execute sequentially by round or act as instant backup failovers.</p>
                 </div>
               </div>
 
@@ -215,8 +322,8 @@
                   <label class="orch-check-row">
                     <input type="checkbox" id="orch-opt-global-fallback" checked>
                     <div>
-                      <b>Fallback to any other verified working model if all assigned participants fail</b>
-                      <small>If all selected team models fail, automatically try other models you have verified as working on this server.</small>
+                      <b>Fallback to any other verified &amp; enabled working model if all assigned participants fail</b>
+                      <small>Only uses models that have passed testing AND have their "Enabled" checkbox checked in Models &amp; providers.</small>
                     </div>
                   </label>
                 </div>
@@ -270,6 +377,16 @@
               <!-- Configured Participants Roster Pill Bar -->
               <div id="orch-detail-roster" class="orch-detail-roster"></div>
 
+              <!-- GitHub-Style AI Contribution & Failure Breakdown Bar -->
+              <div id="orch-contrib-card" class="orch-contrib-card hidden">
+                <div class="orch-contrib-head">
+                  <span>AI CONTRIBUTION &amp; RELIABILITY BREAKDOWN</span>
+                  <span id="orch-contrib-total-label">100%</span>
+                </div>
+                <div id="orch-contrib-bar" class="orch-contrib-bar"></div>
+                <div id="orch-contrib-legend" class="orch-contrib-legend"></div>
+              </div>
+
               <!-- Collaboration Exchange Telemetry Summary Bar -->
               <div id="orch-stats-bar" class="orch-stats-bar">
                 <div class="orch-stat-box">
@@ -283,7 +400,7 @@
                   <small id="orch-stat-revisions-sub">Rounds completed: 0</small>
                 </div>
                 <div class="orch-stat-box">
-                  <span>Failovers & Retries</span>
+                  <span>Failovers &amp; Retries</span>
                   <b id="orch-stat-failovers">0</b>
                   <small id="orch-stat-failovers-sub">Automatic model switches</small>
                 </div>
@@ -335,7 +452,7 @@
                   </div>
                   <div id="orch-audit-summary" class="orch-audit-summary" dir="auto"></div>
                   <details class="orch-audit-details">
-                    <summary>View full auditor output & corrected code</summary>
+                    <summary>View full auditor output &amp; corrected code</summary>
                     <div id="orch-audit-body" class="orch-audit-body" dir="auto"></div>
                   </details>
                 </div>
@@ -365,13 +482,23 @@
                   <div>
                     <div class="eyebrow">HUMAN-IN-THE-LOOP ITERATION</div>
                     <h3>Request Changes or Add Features to This Project</h3>
-                    <p>Tell the AI team what to fix, change, or add. They will keep your existing project files and produce an updated version.</p>
+                    <p>Tell the AI team what to fix, change, or add. Use the checkboxes below to control what context is sent to the models.</p>
                   </div>
                 </div>
                 <form id="orch-revision-form" class="orch-revision-form">
                   <textarea id="orch-revision-input" dir="auto" rows="3" placeholder="Describe the changes or new features you want… / تغییرات یا قابلیت‌های جدیدی که می‌خواهید به این پروژه اضافه شود را بنویسید…" required></textarea>
+                  <div class="orch-rev-checks">
+                    <label class="orch-rev-check">
+                      <input type="checkbox" id="orch-rev-full-files" checked>
+                      <span><b>Include full current project files</b> (prevents rewriting from scratch)</span>
+                    </label>
+                    <label class="orch-rev-check">
+                      <input type="checkbox" id="orch-rev-summary" checked>
+                      <span><b>Include condensed discussion &amp; decisions summary</b></span>
+                    </label>
+                  </div>
                   <div class="orch-revision-actions">
-                    <span class="muted-note">Adds +3 collaboration rounds and resumes with full project context.</span>
+                    <span class="muted-note">Adds +3 collaboration rounds and preserves your existing project files.</span>
                     <button type="submit" class="btn btn-primary btn-small" id="orch-revision-submit">Send Revision to AI Team <span>↗</span></button>
                   </div>
                 </form>
@@ -408,7 +535,7 @@
       <section id="page-usage" class="page module-page hidden"><div class="page-heading"><div><div class="eyebrow">OBSERVABILITY</div><h1>Usage & analytics</h1><p>Understand model activity, response times and token usage.</p></div><span class="status-pill planned">IN DEVELOPMENT</span></div><div class="metric-grid"><div class="metric-card"><span>Tokens used</span><b>—</b><small>Waiting for telemetry module</small></div><div class="metric-card"><span>Requests</span><b>—</b><small>Waiting for telemetry module</small></div><div class="metric-card"><span>Average latency</span><b>—</b><small>Response timing will appear here</small></div></div><div class="chart-placeholder"><div class="chart-bars"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div><span>ACTIVITY VISUALIZATION · COMING SOON</span></div></section>
 
       <section id="page-settings" class="page module-page hidden">
-        <div class="page-heading"><div><div class="eyebrow">YOUR HUB, YOUR RULES</div><h1>Settings</h1><p>Configure Google Gemini, OpenRouter, AIPrime, and CodeCraft API keys and test which models respond.</p></div></div>
+        <div class="page-heading"><div><div class="eyebrow">YOUR HUB, YOUR RULES</div><h1>Settings</h1><p>Configure Google Gemini, OpenRouter, AIPrime, and CodeCraft API keys and choose which models are enabled.</p></div></div>
         <div class="settings-layout">
           <div class="settings-nav">
             <button class="settings-tab active" data-tab="provider-settings">AI providers</button>
@@ -439,20 +566,20 @@
                   <button type="button" id="toggle-key" class="key-toggle">Show</button>
                 </div>
                 <div class="key-actions">
-                  <button type="submit" class="btn btn-primary btn-small" id="save-key-btn">Save Key & Load Models <span>↗</span></button>
+                  <button type="submit" class="btn btn-primary btn-small" id="save-key-btn">Save Key &amp; Load Models <span>↗</span></button>
                   <button type="button" class="btn btn-quiet btn-small" id="reload-models-btn">↻ Reload Models</button>
                   <button type="button" class="btn btn-quiet btn-small" id="test-all-models-btn">⚡ Test Shown Models</button>
                   <button type="button" class="btn btn-quiet btn-small" data-goto="chat">Go to Chat <span>→</span></button>
                 </div>
-                <div id="key-feedback" class="key-feedback">Select a provider tab above, paste its API key, and click "Save Key & Load Models". This page stays open so you can click and test every model.</div>
+                <div id="key-feedback" class="key-feedback">Select a provider tab above, paste its API key, and click "Save Key &amp; Load Models".</div>
               </form>
 
-              <!-- Add Custom Model ID Form (for AIPrime or any OpenAI-compatible provider) -->
+              <!-- Add Custom Model ID Form -->
               <form id="custom-model-form" class="api-key-box" style="padding-top:16px;margin-top:16px;border-top:1px solid #29313e">
-                <label for="custom-model-id">Add & Test Custom Model ID (e.g. <code>glm-5.3-flash</code>)</label>
+                <label for="custom-model-id">Add &amp; Test Custom Model ID (e.g. <code>glm-5.3-flash</code>)</label>
                 <div class="key-input-wrap">
                   <input id="custom-model-id" type="text" placeholder="Enter exact model ID (e.g. glm-5.3-flash)" autocomplete="off">
-                  <button type="submit" class="btn btn-primary btn-small" id="add-custom-model-btn" style="border-radius:0">＋ Add & Test</button>
+                  <button type="submit" class="btn btn-primary btn-small" id="add-custom-model-btn" style="border-radius:0">＋ Add &amp; Test</button>
                 </div>
               </form>
 
@@ -461,7 +588,7 @@
                   <div class="filter-bar">
                     <div>
                       <h3 id="settings-explorer-title">Available Models</h3>
-                      <p id="settings-models-summary">Click any model card below to test whether it works on your current plan.</p>
+                      <p id="settings-models-summary">Click any model card below to test whether it works. Toggle "Enabled" to include or exclude it from Chat &amp; Orchestration.</p>
                     </div>
                     <label class="free-filter-wrap" id="settings-free-filter-wrap">
                       <input type="checkbox" id="settings-free-only">
@@ -478,13 +605,13 @@
               </div>
             </div>
 
-            <div id="general-settings" class="settings-panel hidden"><div class="settings-section-head"><div><h2>Workspace preferences</h2><p>Personalize how your workspace behaves.</p></div></div><div class="setting-row"><div><b>Persian & BiDi typography</b><small>Vazirmatn font + automatic RTL/LTR mixed sentence alignment.</small></div><span class="status-pill connected">Enabled</span></div><div class="setting-row"><div><b>Multi-provider gateway</b><small>Gemini, OpenRouter, AIPrime, and CodeCraft API unified in one hub.</small></div><span class="status-pill connected">Active</span></div><div class="setting-row"><div><b>Interface scale</b><small>Optimized 130% readable typography and layout.</small></div><span class="status-pill connected">130% Comfort</span></div></div>
-            <div id="security-settings" class="settings-panel hidden"><div class="settings-section-head"><div><h2>Security & access</h2><p>Controls for your private, single-user installation.</p></div></div><div class="setting-row"><div><b>Single-user authentication</b><small>Login protected with a bcrypt password hash and persistent SQLite session.</small></div><span class="status-pill connected">Enabled</span></div><div class="setting-row"><div><b>Server-side provider keys</b><small>API credentials are never stored in browser storage.</small></div><span class="status-pill connected">Enabled</span></div><div class="setting-row"><div><b>Change login credentials</b><small>Use the SSH control center: <code>sudo cortext</code></small></div><span class="status-pill">SSH menu</span></div></div>
+            <div id="general-settings" class="settings-panel hidden"><div class="settings-section-head"><div><h2>Workspace preferences</h2><p>Personalize how your workspace behaves.</p></div></div><div class="setting-row"><div><b>Persian &amp; BiDi typography</b><small>Vazirmatn font + automatic RTL/LTR mixed sentence alignment.</small></div><span class="status-pill connected">Enabled</span></div><div class="setting-row"><div><b>Multi-provider gateway</b><small>Gemini, OpenRouter, AIPrime, and CodeCraft API unified in one hub.</small></div><span class="status-pill connected">Active</span></div><div class="setting-row"><div><b>Interface scale</b><small>Optimized 130% readable typography and layout.</small></div><span class="status-pill connected">130% Comfort</span></div></div>
+            <div id="security-settings" class="settings-panel hidden"><div class="settings-section-head"><div><h2>Security &amp; access</h2><p>Controls for your private, single-user installation.</p></div></div><div class="setting-row"><div><b>Single-user authentication</b><small>Login protected with a bcrypt password hash and persistent SQLite session.</small></div><span class="status-pill connected">Enabled</span></div><div class="setting-row"><div><b>Server-side provider keys</b><small>API credentials are never stored in browser storage.</small></div><span class="status-pill connected">Enabled</span></div><div class="setting-row"><div><b>Change login credentials</b><small>Use the SSH control center: <code>sudo cortext</code></small></div><span class="status-pill">SSH menu</span></div></div>
           </div>
         </div>
       </section>
     </div>
-    <footer><span>SAHAND-CORTEXT</span><i>·</i> PRIVATE MULTI-PROVIDER AI WORKSPACE <b>v0.5.0</b></footer>
+    <footer><span>SAHAND-CORTEXT</span><i>·</i> PRIVATE MULTI-PROVIDER AI WORKSPACE <b>v0.5.1</b></footer>
   </main>
 </div>
 <div id="toast" class="toast"></div>

@@ -64,12 +64,14 @@ type ModelInfo struct {
 	Status      string  `json:"status"`
 	LatencyMs   int64   `json:"latency_ms"`
 	LastError   string  `json:"last_error"`
+	Enabled     bool    `json:"enabled"`
 }
 
 type ModelTestRecord struct {
 	Status    string `json:"status"`
 	LatencyMs int64  `json:"latency_ms"`
 	LastError string `json:"last_error"`
+	Disabled  bool   `json:"disabled,omitempty"`
 }
 
 func env(key, fallback string) string {
@@ -206,13 +208,33 @@ func (a *App) saveTestRecord(p, model string, rec ModelTestRecord) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	records := a.loadTestRecords(norm)
+	if prev, ok := records[model]; ok {
+		// Preserve user's explicit Disabled toggle unless they are re-enabling it
+		rec.Disabled = prev.Disabled
+	}
 	records[model] = rec
 	if data, err := json.Marshal(records); err == nil {
 		_ = a.setSetting(norm+"_model_tests", string(data))
 	}
 }
 
-// verifiedWorkingParticipants returns all models previously verified as working across all configured providers
+func (a *App) setModelEnabled(p, model string, enabled bool) {
+	norm := provider.NormalizeProvider(p)
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	records := a.loadTestRecords(norm)
+	rec := records[model]
+	if rec.Status == "" {
+		rec.Status = "untested"
+	}
+	rec.Disabled = !enabled
+	records[model] = rec
+	if data, err := json.Marshal(records); err == nil {
+		_ = a.setSetting(norm+"_model_tests", string(data))
+	}
+}
+
+// verifiedWorkingParticipants returns only models that are verified working AND explicitly enabled by the user
 func (a *App) verifiedWorkingParticipants() []orchestration.Participant {
 	var out []orchestration.Participant
 	for _, p := range []string{"gemini", "openrouter", "aiprime", "codecraft"} {
@@ -221,16 +243,13 @@ func (a *App) verifiedWorkingParticipants() []orchestration.Participant {
 		}
 		records := a.loadTestRecords(p)
 		for modelID, rec := range records {
-			if rec.Status == "working" {
+			if rec.Status == "working" && !rec.Disabled {
 				out = append(out, orchestration.Participant{
 					Provider: p,
 					Model:    modelID,
 				})
 			}
 		}
-	}
-	if ap, am := a.activeProvider(), a.activeModel(); ap != "" && am != "" && a.providerKey(ap) != "" {
-		out = append([]orchestration.Participant{{Provider: ap, Model: am}}, out...)
 	}
 	return out
 }
@@ -371,7 +390,7 @@ func (a *App) status(w http.ResponseWriter, r *http.Request) {
 	aCfg := a.providerKey("aiprime") != ""
 	jsonOut(w, 200, map[string]any{
 		"status":                "online",
-		"version":               "0.5.0",
+		"version":               "0.5.1",
 		"gemini_configured":     gCfg,
 		"openrouter_configured": oCfg,
 		"codecraft_configured":  cCfg,
@@ -501,6 +520,36 @@ func (a *App) handleModels(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// POST /api/models/toggle - Enables or disables a model in Chat, Orchestration pickers, and Failover pools
+func (a *App) handleToggleModel(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", 405)
+		return
+	}
+	var body struct {
+		Provider string `json:"provider"`
+		Model    string `json:"model"`
+		Enabled  bool   `json:"enabled"`
+	}
+	if json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&body) != nil || strings.TrimSpace(body.Model) == "" {
+		jsonOut(w, 400, map[string]string{"error": "Model ID is required"})
+		return
+	}
+	norm := provider.NormalizeProvider(body.Provider)
+	modelID := strings.TrimSpace(body.Model)
+	if norm == "gemini" {
+		modelID = strings.TrimPrefix(modelID, "models/")
+	}
+
+	a.setModelEnabled(norm, modelID, body.Enabled)
+	jsonOut(w, 200, map[string]any{
+		"ok":       true,
+		"provider": norm,
+		"model":    modelID,
+		"enabled":  body.Enabled,
+	})
+}
+
 // POST /api/models/custom - Allows adding and testing any custom model ID for a provider
 func (a *App) handleAddCustomModel(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -544,6 +593,7 @@ func (a *App) handleAddCustomModel(w http.ResponseWriter, r *http.Request) {
 			Status:    "working",
 			LatencyMs: latency,
 		})
+		a.setModelEnabled(norm, modelID, true)
 		a.setActiveSelection(norm, modelID)
 	}
 
@@ -626,11 +676,13 @@ func (a *App) handleTestModel(w http.ResponseWriter, r *http.Request) {
 		a.setActiveSelection(norm, model)
 	}
 
+	rec := a.loadTestRecords(norm)[model]
 	jsonOut(w, 200, map[string]any{
 		"ok":              true,
 		"provider":        norm,
 		"model":           model,
 		"status":          "working",
+		"enabled":         !rec.Disabled,
 		"latency_ms":      latency,
 		"reply":           strings.TrimSpace(reply),
 		"active_provider": a.activeProvider(),
@@ -688,10 +740,12 @@ func (a *App) fetchAIPrimeModels(key string) ([]ModelInfo, error) {
 		status := "untested"
 		var lat int64
 		var lastErr string
+		enabled := true
 		if exists {
 			status = rec.Status
 			lat = rec.LatencyMs
 			lastErr = rec.LastError
+			enabled = !rec.Disabled
 		}
 		out = append(out, ModelInfo{
 			Provider:    "aiprime",
@@ -704,18 +758,16 @@ func (a *App) fetchAIPrimeModels(key string) ([]ModelInfo, error) {
 			Status:      status,
 			LatencyMs:   lat,
 			LastError:   lastErr,
+			Enabled:     enabled,
 		})
 	}
 
-	// Always guarantee featured GLM 5.3 Flash model is present
 	addModel("glm-5.3-flash", "GLM 5.3 Flash", "AIPrime Featured · Reasoning & Vision capable", 128000, "$0.006 in / $0.018 out")
 
-	// Include any user-added custom model IDs for AIPrime
 	for _, customID := range a.loadCustomModels("aiprime") {
 		addModel(customID, customID, "Custom AIPrime model", 0, "AIPrime Wallet Plan")
 	}
 
-	// Parse models returned from /v1/models if available
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		var parsed struct {
 			Data []struct {
@@ -803,10 +855,12 @@ func (a *App) fetchGeminiModels(key string) ([]ModelInfo, error) {
 		status := "untested"
 		var lat int64
 		var lastErr string
+		enabled := true
 		if exists {
 			status = rec.Status
 			lat = rec.LatencyMs
 			lastErr = rec.LastError
+			enabled = !rec.Disabled
 		}
 		disp := m.DisplayName
 		if disp == "" {
@@ -823,6 +877,7 @@ func (a *App) fetchGeminiModels(key string) ([]ModelInfo, error) {
 			Status:      status,
 			LatencyMs:   lat,
 			LastError:   lastErr,
+			Enabled:     enabled,
 		})
 	}
 
@@ -890,10 +945,12 @@ func (a *App) fetchOpenRouterModels(key string) ([]ModelInfo, error) {
 		status := "untested"
 		var lat int64
 		var lastErr string
+		enabled := true
 		if exists {
 			status = rec.Status
 			lat = rec.LatencyMs
 			lastErr = rec.LastError
+			enabled = !rec.Disabled
 		}
 		disp := m.Name
 		if disp == "" {
@@ -911,6 +968,7 @@ func (a *App) fetchOpenRouterModels(key string) ([]ModelInfo, error) {
 			Status:      status,
 			LatencyMs:   lat,
 			LastError:   lastErr,
+			Enabled:     enabled,
 		})
 	}
 
@@ -973,10 +1031,12 @@ func (a *App) fetchCodeCraftModels(key string) ([]ModelInfo, error) {
 		status := "untested"
 		var lat int64
 		var lastErr string
+		enabled := true
 		if exists {
 			status = rec.Status
 			lat = rec.LatencyMs
 			lastErr = rec.LastError
+			enabled = !rec.Disabled
 		}
 		disp := m.Name
 		if disp == "" {
@@ -999,6 +1059,7 @@ func (a *App) fetchCodeCraftModels(key string) ([]ModelInfo, error) {
 			Status:      status,
 			LatencyMs:   lat,
 			LastError:   lastErr,
+			Enabled:     enabled,
 		})
 	}
 
@@ -1441,15 +1502,27 @@ func (a *App) orchGetJob(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		var body struct {
-			Instruction string `json:"instruction"`
-			ExtraRounds int    `json:"extra_rounds"`
-			ExtraCalls  int    `json:"extra_calls"`
+			Instruction      string `json:"instruction"`
+			ExtraRounds      int    `json:"extra_rounds"`
+			ExtraCalls       int    `json:"extra_calls"`
+			IncludeFullFiles *bool  `json:"include_full_files"`
+			IncludeSummary   *bool  `json:"include_summary"`
 		}
 		if json.NewDecoder(http.MaxBytesReader(w, r.Body, 32*1024)).Decode(&body) != nil || strings.TrimSpace(body.Instruction) == "" {
 			jsonOut(w, 400, map[string]string{"error": "Please enter your revision instructions"})
 			return
 		}
-		updatedJob, err := a.orchStorage.IterateJob(r.Context(), jobID, body.Instruction, body.ExtraRounds, body.ExtraCalls)
+		incFull := true
+		if body.IncludeFullFiles != nil {
+			incFull = *body.IncludeFullFiles
+		}
+		incSum := true
+		if body.IncludeSummary != nil {
+			incSum = *body.IncludeSummary
+		}
+		taggedInstruction := fmt.Sprintf("[REV_OPTS:full_files=%t,summary=%t]\n%s", incFull, incSum, strings.TrimSpace(body.Instruction))
+
+		updatedJob, err := a.orchStorage.IterateJob(r.Context(), jobID, taggedInstruction, body.ExtraRounds, body.ExtraCalls)
 		if err != nil {
 			if errors.Is(err, orchestration.ErrJobNotFound) {
 				jsonOut(w, 404, map[string]string{"error": "Job not found"})
@@ -1607,6 +1680,7 @@ func main() {
 	mux.HandleFunc("/api/setup/provider", app.auth(app.saveProviderKey))
 	mux.HandleFunc("/api/models", app.auth(app.handleModels))
 	mux.HandleFunc("/api/models/test", app.auth(app.handleTestModel))
+	mux.HandleFunc("/api/models/toggle", app.auth(app.handleToggleModel))
 	mux.HandleFunc("/api/models/custom", app.auth(app.handleAddCustomModel))
 
 	mux.HandleFunc("/api/sessions", app.auth(func(w http.ResponseWriter, r *http.Request) {
@@ -1666,7 +1740,7 @@ func main() {
 		_ = server.Shutdown(shutdownCtx)
 	}()
 
-	log.Printf("Sahand-CorText v0.5.0 listening on %s", server.Addr)
+	log.Printf("Sahand-CorText v0.5.1 listening on %s", server.Addr)
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}

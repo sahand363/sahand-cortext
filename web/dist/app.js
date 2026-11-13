@@ -8,7 +8,6 @@ let activeModel = "gemini-2.0-flash";
 let freeOnlyOpenRouter = true;
 let deleteArmed = false;
 
-// Orchestration State (Defaults to 3-Role Pipeline: Coordinator -> Worker -> QA Auditor)
 let orchParticipantsDraft = [
   { role: "coordinator", name: "Coordinator / Architect", provider: "gemini", model: "gemini-2.0-flash" },
   { role: "worker", name: "Worker / Developer", provider: "gemini", model: "gemini-2.0-flash" },
@@ -20,6 +19,16 @@ let orchPollTimer = null;
 let orchActiveSubView = "messages";
 let orchSubmitting = false;
 let selectedDeliverableFileIdx = 0;
+
+const contribPalette = [
+  "#38bdf8", // Sky Blue
+  "#facc15", // Yellow
+  "#4ade80", // Green
+  "#a855f7", // Purple
+  "#fb7185", // Rose
+  "#fb923c", // Orange
+  "#2dd4bf"  // Teal
+];
 
 const providerCatalog = {
   gemini: {
@@ -50,7 +59,7 @@ const providerCatalog = {
     icon: "◈",
     placeholder: "Paste your AIPrime API key (sk-...)",
     label: "AIPrime API Key (https://api.aiprime.shop/v1)",
-    desc: "Connect AIPrime to use GLM 5.3 Flash (glm-5.3-flash) and any other models available on your AIPrime wallet.",
+    desc: "Connect AIPrime to use GLM 5.3 Flash (glm-5.3-flash) and any other models enabled on your AIPrime wallet.",
     helpText: "Manage your AIPrime keys and models:",
     helpUrl: "https://aiprime.shop",
     helpBtn: "Open AIPrime Panel ↗"
@@ -111,7 +120,6 @@ function toast(msg) {
   toastTimer = setTimeout(() => t.classList.remove("show"), 3400);
 }
 
-// Universal Copy Helper: works on both HTTP (IP address) and HTTPS
 async function copyTextToClipboard(text) {
   if (!text) return false;
   if (navigator.clipboard && window.isSecureContext) {
@@ -136,6 +144,17 @@ async function copyTextToClipboard(text) {
   } catch {}
   document.body.removeChild(ta);
   return ok;
+}
+
+function stripRevOptsTag(text) {
+  const s = String(text || "").trim();
+  if (s.startsWith("[REV_OPTS:")) {
+    const endIdx = s.indexOf("]");
+    if (endIdx !== -1) {
+      return s.slice(endIdx + 1).trim();
+    }
+  }
+  return s;
 }
 
 /* ============================================================================
@@ -1018,18 +1037,19 @@ async function loadProviderModels(provider, showToastMsg = false) {
   }
 }
 
+// Only includes models where m.enabled !== false
 function buildUnifiedModelOptions(sel) {
   if (!sel) return;
   const prevVal = sel.value;
   sel.innerHTML = "";
 
   const workingGroup = document.createElement("optgroup");
-  workingGroup.label = "★ Verified Working Models";
+  workingGroup.label = "★ Verified & Enabled Working Models";
   let hasWorking = false;
 
   allProvidersList.forEach(p => {
     const short = providerCatalog[p].short;
-    (providerState[p].models || []).filter(m => m.status === "working").forEach(m => {
+    (providerState[p].models || []).filter(m => m.status === "working" && m.enabled !== false).forEach(m => {
       hasWorking = true;
       const opt = document.createElement("option");
       opt.value = `${p}::${m.id}`;
@@ -1040,7 +1060,7 @@ function buildUnifiedModelOptions(sel) {
   if (hasWorking) sel.appendChild(workingGroup);
 
   allProvidersList.forEach(p => {
-    const list = providerState[p].models || [];
+    const list = (providerState[p].models || []).filter(m => m.enabled !== false);
     if (!list.length) return;
     const grp = document.createElement("optgroup");
     grp.label = providerCatalog[p].name;
@@ -1097,13 +1117,37 @@ function getDisplayedModels(provider) {
   return all;
 }
 
+async function toggleModelEnabledState(provider, modelId, enabled) {
+  const list = providerState[provider]?.models || [];
+  const item = list.find(x => x.id === modelId);
+  if (item) {
+    item.enabled = enabled;
+  }
+  try {
+    await api("/api/models/toggle", {
+      method: "POST",
+      body: JSON.stringify({ provider, model: modelId, enabled })
+    });
+    toast(enabled
+      ? `✓ Enabled ${modelId} for Chat, Orchestration & Failovers`
+      : `⏸ Disabled ${modelId} (excluded from pickers & failovers)`);
+  } catch (err) {
+    toast("Could not update model state: " + err.message);
+  }
+  syncModelDropdown();
+  syncAuditorModelDropdown();
+  renderModelGrids();
+  renderOrchParticipantsBuilder();
+}
+
 function renderModelGrids() {
   const provider = selectedProvider;
   const meta = providerCatalog[provider];
   const allModels = providerState[provider]?.models || [];
   const shownModels = getDisplayedModels(provider);
 
-  const workingCount = allModels.filter(m => m.status === "working").length;
+  const workingCount = allModels.filter(m => m.status === "working" && m.enabled !== false).length;
+  const disabledCount = allModels.filter(m => m.enabled === false).length;
   const failedCount = allModels.filter(m => m.status === "failed").length;
   const freeCount = allModels.filter(m => m.is_free).length;
 
@@ -1123,15 +1167,17 @@ function renderModelGrids() {
     }
 
     if (summary) {
-      const freeNote = provider === "openrouter" ? ` · <b>${freeCount}</b> free models` : "";
-      summary.innerHTML = `<b>${meta.name}</b> returned <b>${allModels.length}</b> models${freeNote} (showing <b>${shownModels.length}</b>) · <span class="text-ok"><b>${workingCount}</b> verified working</span> · <span class="text-err"><b>${failedCount}</b> failed</span>. <b>Click any card to test live:</b>`;
+      const freeNote = provider === "openrouter" ? ` · <b>${freeCount}</b> free` : "";
+      const disNote = disabledCount > 0 ? ` · <b>${disabledCount}</b> unchecked/disabled` : "";
+      summary.innerHTML = `<b>${meta.name}</b> returned <b>${allModels.length}</b> models${freeNote} (showing <b>${shownModels.length}</b>) · <span class="text-ok"><b>${workingCount}</b> active working</span> · <span class="text-err"><b>${failedCount}</b> failed</span>${disNote}. <b>Click card to test, or uncheck "Enabled" to bench a model:</b>`;
     }
 
     shownModels.forEach(m => {
-      const card = document.createElement("button");
-      card.type = "button";
+      const card = document.createElement("div");
       const isCurrent = (provider === activeProvider && m.id === activeModel);
-      card.className = `api-model-card status-${m.status || "untested"}${isCurrent ? " is-active" : ""}`;
+      const isEnabled = m.enabled !== false;
+      card.className = `api-model-card status-${m.status || "untested"}${isCurrent ? " is-active" : ""}${!isEnabled ? " is-disabled" : ""}`;
+      card.style.cursor = "pointer";
 
       const top = document.createElement("div");
       top.className = "api-model-top";
@@ -1148,7 +1194,26 @@ function renderModelGrids() {
 
       const badgeWrap = document.createElement("div");
       badgeWrap.className = "api-model-badges";
-      if (isCurrent) {
+
+      // Per-Model Enable / Disable Checkbox
+      const enableLabel = document.createElement("label");
+      enableLabel.className = "model-enable-toggle";
+      enableLabel.title = "Check to allow this model in Chat, Orchestration & Automatic Failovers. Uncheck to disable it.";
+      enableLabel.onclick = e => e.stopPropagation();
+
+      const enableChk = document.createElement("input");
+      enableChk.type = "checkbox";
+      enableChk.checked = isEnabled;
+      enableChk.onchange = e => {
+        e.stopPropagation();
+        toggleModelEnabledState(provider, m.id, enableChk.checked);
+      };
+      const enableTxt = document.createElement("span");
+      enableTxt.textContent = isEnabled ? "Enabled" : "Off";
+      enableLabel.append(enableChk, enableTxt);
+      badgeWrap.appendChild(enableLabel);
+
+      if (isCurrent && isEnabled) {
         const act = document.createElement("span");
         act.className = "model-badge active-badge";
         act.textContent = "★ ACTIVE";
@@ -1177,7 +1242,9 @@ function renderModelGrids() {
 
       const metaRow = document.createElement("div");
       metaRow.className = "api-model-meta";
-      if (m.status === "failed" && m.last_error) {
+      if (!isEnabled) {
+        metaRow.textContent = "Disabled by you — hidden from Chat, Orchestration & Failover pools.";
+      } else if (m.status === "failed" && m.last_error) {
         metaRow.textContent = m.last_error;
         metaRow.classList.add("err-text");
       } else if (m.status === "working") {
@@ -1216,7 +1283,9 @@ async function testSingleModel(provider, modelId, setActive = true) {
       item.last_error = res.error || "";
     }
     if (res.ok) {
-      if (setActive) setActiveSelectionUI(provider, modelId);
+      if (setActive && (!item || item.enabled !== false)) {
+        setActiveSelectionUI(provider, modelId);
+      }
       toast(`✓ [${providerCatalog[provider].short}] ${modelId} works! (${res.latency_ms} ms)`);
     } else {
       toast(`✗ ${modelId} failed on ${providerCatalog[provider].short}`);
@@ -1235,12 +1304,12 @@ async function testSingleModel(provider, modelId, setActive = true) {
 
 async function testShownModels() {
   const provider = selectedProvider;
-  const shown = getDisplayedModels(provider);
+  const shown = getDisplayedModels(provider).filter(m => m.enabled !== false);
   if (!shown.length) {
     toast(`Save your ${providerCatalog[provider].name} API key first.`);
     return;
   }
-  toast(`Testing ${shown.length} models on ${providerCatalog[provider].name}…`);
+  toast(`Testing ${shown.length} enabled models on ${providerCatalog[provider].name}…`);
   let foundWorking = false;
   for (const m of shown) {
     const activate = !foundWorking;
@@ -1250,8 +1319,8 @@ async function testShownModels() {
       foundWorking = true;
     }
   }
-  const workingCount = (providerState[provider].models || []).filter(m => m.status === "working").length;
-  toast(`Done! ${workingCount} working models found on ${providerCatalog[provider].name}.`);
+  const workingCount = (providerState[provider].models || []).filter(m => m.status === "working" && m.enabled !== false).length;
+  toast(`Done! ${workingCount} enabled working models found on ${providerCatalog[provider].name}.`);
 }
 
 $("api-key-form").addEventListener("submit", async e => {
@@ -1285,7 +1354,7 @@ $("api-key-form").addEventListener("submit", async e => {
     $("setup-banner").classList.add("hidden");
 
     fb.className = "key-feedback ok";
-    fb.innerHTML = `✓ <b>${meta.name} API key saved (${res.latency_ms} ms)!</b> Loaded <b>${providerState[provider].models.length}</b> models below. <b>Click any model card below to test if it responds!</b>`;
+    fb.innerHTML = `✓ <b>${meta.name} API key saved (${res.latency_ms} ms)!</b> Loaded <b>${providerState[provider].models.length}</b> models below.`;
     toast(`${meta.name} connected! (${providerState[provider].models.length} models)`);
   } catch (err) {
     fb.className = "key-feedback err";
@@ -1296,7 +1365,6 @@ $("api-key-form").addEventListener("submit", async e => {
   }
 });
 
-// Add & Test Custom Model ID
 if ($("custom-model-form")) {
   $("custom-model-form").addEventListener("submit", async e => {
     e.preventDefault();
@@ -1359,7 +1427,7 @@ function getConfiguredProvidersList() {
 }
 
 function getDefaultModelForProvider(p) {
-  const models = providerState[p]?.models || [];
+  const models = (providerState[p]?.models || []).filter(m => m.enabled !== false);
   const working = models.find(m => m.status === "working");
   if (working) return working.id;
   if (p === "aiprime") return "glm-5.3-flash";
@@ -1521,11 +1589,11 @@ function renderOrchParticipantsBuilder() {
     function populateModelsForPart() {
       modSelect.innerHTML = "";
       const p = part.provider;
-      const list = providerState[p]?.models || [];
+      const list = (providerState[p]?.models || []).filter(m => m.enabled !== false);
       if (!list.length) {
         const fallbackOpt = document.createElement("option");
         fallbackOpt.value = part.model || "";
-        fallbackOpt.textContent = part.model ? `${part.model} (Configure key in Settings)` : "No models loaded — configure provider";
+        fallbackOpt.textContent = part.model ? `${part.model} (Configure or enable models in Settings)` : "No enabled models — check Models & providers";
         modSelect.appendChild(fallbackOpt);
         return;
       }
@@ -1537,7 +1605,7 @@ function renderOrchParticipantsBuilder() {
 
       if (working.length) {
         const grpW = document.createElement("optgroup");
-        grpW.label = "★ Verified Working";
+        grpW.label = "★ Verified & Enabled Working";
         working.forEach(m => {
           const o = document.createElement("option");
           o.value = m.id;
@@ -1549,7 +1617,7 @@ function renderOrchParticipantsBuilder() {
 
       if (others.length) {
         const grpO = document.createElement("optgroup");
-        grpO.label = "Available Models";
+        grpO.label = "Enabled Models";
         others.forEach(m => {
           const o = document.createElement("option");
           o.value = m.id;
@@ -1617,7 +1685,6 @@ document.querySelectorAll(".orch-view-tab").forEach(btn => {
   };
 });
 
-// Submit New Collaboration Job
 $("orch-create-form").addEventListener("submit", async e => {
   e.preventDefault();
   if (orchSubmitting) return;
@@ -1814,6 +1881,138 @@ async function fetchAndRenderOrchJob(jobId) {
   }
 }
 
+function parseEventJSON(ev) {
+  if (!ev || !ev.payload_json) return {};
+  try {
+    return JSON.parse(ev.payload_json) || {};
+  } catch {
+    return {};
+  }
+}
+
+// Renders GitHub-style AI Contribution & Failure Breakdown Bar
+function renderAIContributionBar(participants, messages, events) {
+  const card = $("orch-contrib-card");
+  const bar = $("orch-contrib-bar");
+  const legend = $("orch-contrib-legend");
+  if (!card || !bar || !legend) return;
+
+  // Map failures per model key (provider::model)
+  const failMap = {};
+  events.forEach(ev => {
+    if (ev.event_type === "participant_failed" || ev.event_type === "participant_fallback") {
+      const p = parseEventJSON(ev);
+      const prov = p.provider || p.from_provider || "";
+      const mod = p.model || p.from_model || "";
+      if (!prov && !mod) return;
+      if (ev.event_type === "participant_fallback" && events.some(x => x.event_type === "participant_failed")) {
+        return; // Avoid double counting when participant_failed is present
+      }
+      const key = `${prov}::${mod}`;
+      if (!failMap[key]) failMap[key] = { count: 0, lastError: "", role: p.role || "worker", provider: prov, model: mod };
+      failMap[key].count++;
+      if (p.error) failMap[key].lastError = p.error;
+    }
+  });
+
+  // Aggregate contributed characters & turns per AI model
+  const modelStats = new Map();
+
+  // Seed with configured participants first so even 0% / failed participants appear
+  participants.forEach((p, idx) => {
+    const key = `${p.provider}::${p.model}::${p.role}`;
+    if (!modelStats.has(key)) {
+      modelStats.set(key, {
+        key,
+        provider: p.provider,
+        model: p.model,
+        role: p.role,
+        chars: 0,
+        msgs: 0,
+        color: contribPalette[idx % contribPalette.length]
+      });
+    }
+  });
+
+  messages.forEach(m => {
+    if (m.sender_role === "user") return;
+    const key = `${m.provider}::${m.model}::${m.sender_role}`;
+    if (!modelStats.has(key)) {
+      modelStats.set(key, {
+        key,
+        provider: m.provider,
+        model: m.model,
+        role: m.sender_role,
+        chars: 0,
+        msgs: 0,
+        color: contribPalette[modelStats.size % contribPalette.length]
+      });
+    }
+    const st = modelStats.get(key);
+    st.chars += (m.content || "").length;
+    st.msgs += 1;
+  });
+
+  const entries = [...modelStats.values()];
+  const totalChars = entries.reduce((sum, e) => sum + e.chars, 0);
+
+  if (entries.length === 0 && Object.keys(failMap).length === 0) {
+    card.classList.add("hidden");
+    return;
+  }
+
+  card.classList.remove("hidden");
+  bar.innerHTML = "";
+  legend.innerHTML = "";
+
+  const totalKb = (totalChars / 1024).toFixed(1);
+  if ($("orch-contrib-total-label")) {
+    $("orch-contrib-total-label").textContent = totalChars > 0 ? `${totalKb} KB TOTAL AI OUTPUT` : "WAITING FOR OUTPUT";
+  }
+
+  entries.sort((a, b) => b.chars - a.chars);
+
+  entries.forEach(e => {
+    const pct = totalChars > 0 ? ((e.chars / totalChars) * 100) : 0;
+    const pctStr = pct.toFixed(1) + "%";
+
+    if (pct > 0) {
+      const seg = document.createElement("div");
+      seg.className = "orch-contrib-seg";
+      seg.style.width = `${Math.max(2, pct)}%`;
+      seg.style.background = e.color;
+      seg.title = `${e.model} (${e.role}): ${pctStr} (${e.msgs} turns)`;
+      bar.appendChild(seg);
+    }
+
+    const item = document.createElement("div");
+    item.className = "orch-contrib-item";
+
+    const dot = document.createElement("span");
+    dot.className = "orch-contrib-dot";
+    dot.style.background = e.chars > 0 ? e.color : "#ef4444";
+
+    const roleShort = e.role === "coordinator" ? "Coord" : e.role === "auditor" ? "Auditor" : "Worker";
+    const provShort = providerCatalog[e.provider]?.short || e.provider;
+    const label = document.createElement("span");
+    label.innerHTML = `<b>${e.model}</b> <small style="color:#94a3b8">(${provShort} · ${roleShort})</small> <span style="color:#cbd5e1;font-weight:700">${pctStr}</span>`;
+
+    item.append(dot, label);
+
+    const failInfo = failMap[`${e.provider}::${e.model}`];
+    if (failInfo && failInfo.count > 0) {
+      const fp = document.createElement("span");
+      fp.className = "orch-fail-pill";
+      const shortErr = failInfo.lastError ? `: ${failInfo.lastError.slice(0, 48)}` : "";
+      fp.textContent = `✗ Failed ${failInfo.count}x${shortErr}`;
+      fp.title = failInfo.lastError || "Model invocation failed";
+      item.appendChild(fp);
+    }
+
+    legend.appendChild(item);
+  });
+}
+
 function renderOrchJobDetails(d) {
   const status = (d.status || "queued").toLowerCase();
   const stage = (d.current_stage || status).toLowerCase();
@@ -1830,13 +2029,12 @@ function renderOrchJobDetails(d) {
   $("orch-detail-task").textContent = d.task || "";
   $("orch-detail-sub").textContent = `Job ID: ${d.id} · Created ${formatShortTimestamp(d.created_at)}${d.retry_count ? ` · Retries: ${d.retry_count}/${d.max_retries}` : ""}`;
 
-  // Calculate Collaboration Exchange Stats
   const coordMsgs = messages.filter(m => m.sender_role === "coordinator").length;
   const workerMsgs = messages.filter(m => m.sender_role === "worker").length;
   const auditorMsgs = messages.filter(m => m.sender_role === "auditor").length;
   const userRevs = messages.filter(m => m.sender_role === "user").length;
   const revisionsReq = messages.filter(m => (m.sender_role === "coordinator" || m.sender_role === "user" || m.sender_role === "auditor") && m.action === "revise").length;
-  const failoversCount = events.filter(e => e.event_type === "participant_fallback" || e.event_type === "retry_scheduled").length;
+  const failoversCount = events.filter(e => e.event_type === "participant_fallback" || e.event_type === "retry_scheduled" || e.event_type === "participant_failed").length;
   const totalLatencyMs = messages.reduce((sum, m) => sum + (m.latency_ms || 0), 0);
 
   if ($("orch-stat-msgs")) {
@@ -1848,7 +2046,7 @@ function renderOrchJobDetails(d) {
     $("orch-stat-revisions").textContent = String(revisionsReq);
     $("orch-stat-revisions-sub").textContent = `Rounds active: ${d.current_round || 0} of ${d.max_rounds || 5}`;
     $("orch-stat-failovers").textContent = String(failoversCount);
-    $("orch-stat-failovers-sub").textContent = failoversCount > 0 ? "Automatic model switches" : "No model failures";
+    $("orch-stat-failovers-sub").textContent = failoversCount > 0 ? "Failovers & model errors" : "No model failures";
     $("orch-stat-latency").textContent = `${(totalLatencyMs / 1000).toFixed(1)} s`;
     $("orch-stat-latency-sub").textContent = `${totalLatencyMs.toLocaleString()} ms total API time`;
   }
@@ -1872,12 +2070,22 @@ function renderOrchJobDetails(d) {
 
   const activeBanner = $("orch-active-banner");
   const participants = d.participants || [];
+  const workersList = participants.filter(p => p.role === "worker");
+  const curRound = Math.max(1, d.current_round || 1);
+
+  // Determine exact single currently-executing participant from the latest model_invoked event
+  const latestInvokeEvt = [...events].reverse().find(e => e.event_type === "model_invoked");
+  const invokeMeta = parseEventJSON(latestInvokeEvt);
+
   const coordPart = participants.find(p => p.role === "coordinator") || participants[0];
-  const workerPart = participants.find(p => p.role === "worker") || participants[1] || coordPart;
+  const scheduledWorker = workersList.length > 0 ? workersList[(curRound - 1) % workersList.length] : (participants[1] || coordPart);
   const auditorPart = participants.find(p => p.role === "auditor") || coordPart;
 
   if (isActive) {
     activeBanner.classList.remove("hidden");
+    const activeProvName = invokeMeta.provider ? (providerCatalog[invokeMeta.provider]?.name || invokeMeta.provider) : "";
+    const activeModelLabel = invokeMeta.model ? `${activeProvName} · ${invokeMeta.model}` : "";
+
     if (status === "queued") {
       $("orch-active-headline").textContent = "Task queued — waiting for background worker…";
       $("orch-active-subline").textContent = "A worker will claim this job automatically.";
@@ -1885,16 +2093,16 @@ function renderOrchJobDetails(d) {
       $("orch-active-headline").textContent = "Waiting to retry after temporary provider error…";
       $("orch-active-subline").textContent = d.error_message || "Scheduled for automatic retry.";
     } else if (stage === "planning") {
-      $("orch-active-headline").textContent = `Coordinator (${coordPart ? `${providerCatalog[coordPart.provider]?.name || coordPart.provider} · ${coordPart.model}` : "Architect"}) is creating the implementation plan…`;
+      $("orch-active-headline").textContent = `Coordinator (${activeModelLabel || (coordPart ? `${providerCatalog[coordPart.provider]?.name || coordPart.provider} · ${coordPart.model}` : "Architect")}) is creating the implementation plan…`;
       $("orch-active-subline").textContent = "Analyzing task and preparing instructions for Worker.";
     } else if (stage === "working") {
-      $("orch-active-headline").textContent = `Worker (${workerPart ? `${providerCatalog[workerPart.provider]?.name || workerPart.provider} · ${workerPart.model}` : "Developer"}) is executing round ${d.current_round || 1}…`;
+      $("orch-active-headline").textContent = `Worker (${activeModelLabel || (scheduledWorker ? `${providerCatalog[scheduledWorker.provider]?.name || scheduledWorker.provider} · ${scheduledWorker.model}` : "Developer")}) is executing round ${curRound}…`;
       $("orch-active-subline").textContent = "Producing deliverable based on Coordinator, QA Auditor, and User instructions.";
     } else if (stage === "auditing") {
-      $("orch-active-headline").textContent = `QA Auditor (${auditorPart ? `${providerCatalog[auditorPart.provider]?.name || auditorPart.provider} · ${auditorPart.model}` : "Auditor"}) is inspecting round ${d.current_round || 1}…`;
+      $("orch-active-headline").textContent = `QA Auditor (${activeModelLabel || (auditorPart ? `${providerCatalog[auditorPart.provider]?.name || auditorPart.provider} · ${auditorPart.model}` : "Auditor")}) is inspecting round ${curRound}…`;
       $("orch-active-subline").textContent = "Testing Worker deliverable for runtime bugs, missing files, and edge cases before Coordinator review.";
     } else if (stage === "reviewing") {
-      $("orch-active-headline").textContent = `Coordinator (${coordPart ? `${providerCatalog[coordPart.provider]?.name || coordPart.provider} · ${coordPart.model}` : "Architect"}) is reviewing round ${d.current_round || 1}…`;
+      $("orch-active-headline").textContent = `Coordinator (${activeModelLabel || (coordPart ? `${providerCatalog[coordPart.provider]?.name || coordPart.provider} · ${coordPart.model}` : "Architect")}) is reviewing round ${curRound}…`;
       $("orch-active-subline").textContent = "Evaluating Worker deliverable and QA Auditor report for final approval.";
     } else {
       $("orch-active-headline").textContent = "Collaboration in progress…";
@@ -1912,24 +2120,63 @@ function renderOrchJobDetails(d) {
     errEl.classList.add("hidden");
   }
 
+  // Count failures per participant slot
+  const slotFailures = {};
+  events.forEach(ev => {
+    if (ev.event_type === "participant_failed") {
+      const p = parseEventJSON(ev);
+      const key = p.sort_order !== undefined && p.sort_order >= 0 ? `slot_${p.sort_order}` : `${p.provider}::${p.model}`;
+      slotFailures[key] = (slotFailures[key] || 0) + 1;
+    }
+  });
+
+  // Render Participant Roster Pills (Strict Single Active-Worker Highlighting)
   const rosterEl = $("orch-detail-roster");
   rosterEl.innerHTML = "";
   participants.forEach((p, i) => {
     const pill = document.createElement("div");
-    const isWorkingNow = isActive && (
-      ((stage === "planning" || stage === "reviewing") && p.role === "coordinator") ||
-      (stage === "working" && p.role === "worker") ||
-      (stage === "auditing" && p.role === "auditor")
-    );
+
+    let isWorkingNow = false;
+    if (isActive) {
+      if (invokeMeta && invokeMeta.sort_order !== undefined && invokeMeta.sort_order >= 0) {
+        isWorkingNow = (invokeMeta.sort_order === i);
+      } else if (invokeMeta && invokeMeta.provider && invokeMeta.model) {
+        isWorkingNow = (p.provider === invokeMeta.provider && p.model === invokeMeta.model && (
+          ((stage === "planning" || stage === "reviewing") && p.role === "coordinator") ||
+          (stage === "working" && p.role === "worker") ||
+          (stage === "auditing" && p.role === "auditor")
+        ));
+      } else {
+        if ((stage === "planning" || stage === "reviewing") && p.role === "coordinator") {
+          isWorkingNow = (p === coordPart);
+        } else if (stage === "working" && p.role === "worker") {
+          isWorkingNow = (p === scheduledWorker);
+        } else if (stage === "auditing" && p.role === "auditor") {
+          isWorkingNow = (p === auditorPart);
+        }
+      }
+    }
+
     pill.className = `orch-roster-pill${isWorkingNow ? " working-now" : ""}`;
     let roleLabel = "Worker / Developer";
     if (p.role === "coordinator") roleLabel = "Coordinator / Architect";
     if (p.role === "auditor") roleLabel = "Quality Assurance / Auditor";
     const provName = providerCatalog[p.provider]?.name || p.provider;
     const modelMsgs = messages.filter(m => m.provider === p.provider && m.model === p.model && m.sender_role === p.role).length;
-    pill.innerHTML = `<span class="roster-role">#${i + 1} ${roleLabel} · ${modelMsgs} msg${modelMsgs === 1 ? "" : "s"}</span><b>${provName} · ${p.model}</b>`;
+    const failCount = slotFailures[`slot_${i}`] || slotFailures[`${p.provider}::${p.model}`] || 0;
+
+    const stateTag = isWorkingNow
+      ? ` · <span style="color:#4ade80;font-weight:700">⚡ WORKING NOW</span>`
+      : failCount > 0
+        ? ` · <span style="color:#f87171;font-weight:700">✗ ${failCount} fail</span>`
+        : "";
+
+    pill.innerHTML = `<span class="roster-role">#${i + 1} ${roleLabel} · ${modelMsgs} msg${modelMsgs === 1 ? "" : "s"}${stateTag}</span><b>${provName} · ${p.model}</b>`;
     rosterEl.appendChild(pill);
   });
+
+  // Render GitHub-Style AI Contribution & Reliability Breakdown
+  renderAIContributionBar(participants, messages, events);
 
   // Final Result Card + Second-Opinion Auditor + Multi-File Explorer + ZIP Download
   const finalCard = $("orch-final-card");
@@ -2090,7 +2337,6 @@ function renderOrchJobDetails(d) {
     finalCard.classList.add("hidden");
   }
 
-  // Show Human-in-the-Loop Revision Box whenever job is completed, failed, or cancelled
   const revCard = $("orch-revision-card");
   if (revCard) {
     revCard.classList.toggle("hidden", isActive);
@@ -2133,12 +2379,14 @@ function renderOrchJobDetails(d) {
       right.className = "orch-msg-meta";
       right.innerHTML = `<span>Round ${m.round}</span> · <span class="action-tag action-${m.action}">Action: ${(m.action || "continue").toUpperCase()}</span>${m.latency_ms ? ` · <span>${m.latency_ms} ms</span>` : ""}`;
 
+      const displayContent = m.sender_role === "user" ? stripRevOptsTag(m.content) : m.content;
+
       const copyTurnBtn = document.createElement("button");
       copyTurnBtn.type = "button";
       copyTurnBtn.className = "mini-turn-btn";
       copyTurnBtn.textContent = "📋 Copy";
       copyTurnBtn.onclick = async () => {
-        const ok = await copyTextToClipboard(m.content);
+        const ok = await copyTextToClipboard(displayContent);
         toast(ok ? `✓ Turn #${idx + 1} copied` : "Copy failed");
       };
 
@@ -2147,7 +2395,7 @@ function renderOrchJobDetails(d) {
       dlTurnBtn.className = "mini-turn-btn";
       dlTurnBtn.textContent = "⬇ Save";
       dlTurnBtn.onclick = () => {
-        const turnFiles = extractProjectFiles(m.content, `${d.id}-turn-${idx + 1}`).files;
+        const turnFiles = extractProjectFiles(displayContent, `${d.id}-turn-${idx + 1}`).files;
         if (turnFiles.length > 1) {
           downloadProjectZip(turnFiles, `${d.id}-turn-${idx + 1}`);
         } else {
@@ -2161,7 +2409,7 @@ function renderOrchJobDetails(d) {
       const body = document.createElement("div");
       body.className = "orch-msg-body";
       body.setAttribute("dir", "auto");
-      body.textContent = m.content;
+      body.textContent = displayContent;
 
       card.append(head, body);
 
@@ -2208,7 +2456,7 @@ function renderOrchJobDetails(d) {
     const msg = document.createElement("div");
     msg.className = "orch-event-msg";
     msg.setAttribute("dir", "auto");
-    msg.textContent = ev.message;
+    msg.textContent = stripRevOptsTag(ev.message);
 
     main.append(topLine, msg);
     row.append(dot, main);
@@ -2267,7 +2515,7 @@ async function applyAuditorFixes(jobId, messageId) {
   }
 }
 
-// Submit Human-in-the-Loop Revision Request
+// Submit Human-in-the-Loop Revision Request (with context checkboxes)
 if ($("orch-revision-form")) {
   $("orch-revision-form").addEventListener("submit", async e => {
     e.preventDefault();
@@ -2275,6 +2523,9 @@ if ($("orch-revision-form")) {
     const input = $("orch-revision-input");
     const instruction = input.value.trim();
     if (!instruction) return;
+
+    const includeFullFiles = $("orch-rev-full-files") ? $("orch-rev-full-files").checked : true;
+    const includeSummary = $("orch-rev-summary") ? $("orch-rev-summary").checked : true;
 
     const btn = $("orch-revision-submit");
     btn.disabled = true;
@@ -2286,11 +2537,13 @@ if ($("orch-revision-form")) {
         body: JSON.stringify({
           instruction,
           extra_rounds: 3,
-          extra_calls: 8
+          extra_calls: 8,
+          include_full_files: includeFullFiles,
+          include_summary: includeSummary
         })
       });
       input.value = "";
-      toast("✓ Revision sent! AI team is updating your project…");
+      toast("✓ Revision sent! AI team is updating your existing project…");
       await loadOrchJobsList();
       await fetchAndRenderOrchJob(activeOrchJobId);
     } catch (err) {
@@ -2351,10 +2604,11 @@ function formatEventTypeLabel(evtType, phase) {
     review_decision: "Coordinator Review Decision",
     revision_requested: "Revision Requested",
     revision_completed: "Worker Revision Completed",
+    participant_failed: "Model Call Failed",
     participant_fallback: "Automatic Model Failover",
     user_revision_requested: "User Revision Submitted",
-    audit_started: "Second-Opinion Audit Started",
-    audit_completed: "Second-Opinion Audit Completed",
+    audit_started: "QA / Audit Started",
+    audit_completed: "QA / Audit Completed",
     audit_applied: "Auditor Fixes Applied",
     model_invoked: "Model Request Sent",
     model_responded: "Model Response Received",
