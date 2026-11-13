@@ -16,18 +16,18 @@ let orchParticipantsDraft = [
 let orchJobsCache = [];
 let activeOrchJobId = localStorage.getItem("cortext_active_orch_job") || null;
 let orchPollTimer = null;
-let orchActiveSubView = "messages";
+let orchActiveSubView = "events"; // Default to Live Progress Timeline
 let orchSubmitting = false;
 let selectedDeliverableFileIdx = 0;
 
 const contribPalette = [
-  "#38bdf8", // Sky Blue
-  "#facc15", // Yellow
-  "#4ade80", // Green
-  "#a855f7", // Purple
-  "#fb7185", // Rose
-  "#fb923c", // Orange
-  "#2dd4bf"  // Teal
+  "#38bdf8",
+  "#facc15",
+  "#4ade80",
+  "#a855f7",
+  "#fb7185",
+  "#fb923c",
+  "#2dd4bf"
 ];
 
 const providerCatalog = {
@@ -1037,7 +1037,6 @@ async function loadProviderModels(provider, showToastMsg = false) {
   }
 }
 
-// Only includes models where m.enabled !== false
 function buildUnifiedModelOptions(sel) {
   if (!sel) return;
   const prevVal = sel.value;
@@ -1070,7 +1069,7 @@ function buildUnifiedModelOptions(sel) {
       opt.value = `${p}::${m.id}`;
       const prefix = m.status === "working" ? "✓ " : m.status === "failed" ? "✗ " : "";
       const freeTag = (p === "openrouter" && m.is_free) ? " [FREE]" : "";
-      opt.textContent = `${prefix}${m.display_name}${freeTag} (${m.id})`;
+      opt.textContent = `${prefix}[${providerCatalog[p].short}] ${m.display_name}${freeTag} (${m.id})`;
       grp.appendChild(opt);
     });
     sel.appendChild(grp);
@@ -1222,7 +1221,6 @@ function renderModelGrids() {
       const badgeWrap = document.createElement("div");
       badgeWrap.className = "api-model-badges";
 
-      // Per-Model Enable / Disable Checkbox
       const enableLabel = document.createElement("label");
       enableLabel.className = "model-enable-toggle";
       enableLabel.title = "Check to allow this model in Chat, Orchestration & Automatic Failovers. Uncheck to disable it.";
@@ -1333,7 +1331,7 @@ async function testShownModels() {
   const provider = selectedProvider;
   const shown = getDisplayedModels(provider).filter(m => m.enabled !== false);
   if (!shown.length) {
-    toast(`Save your ${providerCatalog[provider].name} API key first.`);
+    toast(`No enabled models shown on ${providerCatalog[provider].name}. Check the models you want to test first.`);
     return;
   }
   toast(`Testing ${shown.length} enabled models on ${providerCatalog[provider].name}…`);
@@ -1921,14 +1919,12 @@ function parseEventJSON(ev) {
   }
 }
 
-// Renders GitHub-style AI Contribution & Failure Breakdown Bar
 function renderAIContributionBar(participants, messages, events) {
   const card = $("orch-contrib-card");
   const bar = $("orch-contrib-bar");
   const legend = $("orch-contrib-legend");
   if (!card || !bar || !legend) return;
 
-  // Map failures per model key (provider::model)
   const failMap = {};
   events.forEach(ev => {
     if (ev.event_type === "participant_failed" || ev.event_type === "participant_fallback") {
@@ -1937,7 +1933,7 @@ function renderAIContributionBar(participants, messages, events) {
       const mod = p.model || p.from_model || "";
       if (!prov && !mod) return;
       if (ev.event_type === "participant_fallback" && events.some(x => x.event_type === "participant_failed")) {
-        return; // Avoid double counting when participant_failed is present
+        return;
       }
       const key = `${prov}::${mod}`;
       if (!failMap[key]) failMap[key] = { count: 0, lastError: "", role: p.role || "worker", provider: prov, model: mod };
@@ -1946,10 +1942,8 @@ function renderAIContributionBar(participants, messages, events) {
     }
   });
 
-  // Aggregate contributed characters & turns per AI model
   const modelStats = new Map();
 
-  // Seed with configured participants first so even 0% / failed participants appear
   participants.forEach((p, idx) => {
     const key = `${p.provider}::${p.model}::${p.role}`;
     if (!modelStats.has(key)) {
@@ -2044,6 +2038,28 @@ function renderAIContributionBar(participants, messages, events) {
   });
 }
 
+async function swapParticipantModelMidJob(jobId, participants, slotIdx, newCompositeValue) {
+  if (!newCompositeValue || !newCompositeValue.includes("::")) return;
+  const [newProv, newMod] = newCompositeValue.split("::");
+  const updated = participants.map((p, i) => {
+    if (i === slotIdx) {
+      return { ...p, provider: newProv, model: newMod, sort_order: i };
+    }
+    return { ...p, sort_order: i };
+  });
+
+  try {
+    await api(`/api/orchestration/jobs/${encodeURIComponent(jobId)}/participants`, {
+      method: "POST",
+      body: JSON.stringify({ participants: updated })
+    });
+    toast(`✓ Updated Participant #${slotIdx + 1} to ${providerCatalog[newProv]?.short || newProv} · ${newMod}`);
+    await fetchAndRenderOrchJob(jobId);
+  } catch (err) {
+    toast("Could not swap participant model: " + err.message);
+  }
+}
+
 function renderOrchJobDetails(d) {
   const status = (d.status || "queued").toLowerCase();
   const stage = (d.current_stage || status).toLowerCase();
@@ -2083,19 +2099,28 @@ function renderOrchJobDetails(d) {
   }
 
   const isActive = status === "queued" || status === "running" || status === "waiting";
-  const canRetry = status === "failed" || status === "cancelled" || status === "waiting";
+  const isPaused = status === "paused";
+  const canRetryOrPlay = status === "failed" || status === "cancelled" || status === "waiting" || isPaused;
 
   const cancelBtn = $("orch-cancel-btn");
-  cancelBtn.classList.toggle("hidden", !isActive);
+  cancelBtn.classList.toggle("hidden", !(isActive || isPaused));
   cancelBtn.disabled = false;
-  cancelBtn.textContent = "⏹ Stop Task";
+  cancelBtn.textContent = "⏹ Stop Now";
   cancelBtn.onclick = () => cancelActiveOrchJob(d.id);
+
+  const pauseBtn = $("orch-pause-btn");
+  if (pauseBtn) {
+    pauseBtn.classList.toggle("hidden", status !== "running");
+    pauseBtn.disabled = false;
+    pauseBtn.textContent = "⏸ Pause After Current Turn";
+    pauseBtn.onclick = () => pauseActiveOrchJob(d.id);
+  }
 
   const retryBtn = $("orch-retry-btn");
   if (retryBtn) {
-    retryBtn.classList.toggle("hidden", !canRetry);
+    retryBtn.classList.toggle("hidden", !canRetryOrPlay);
     retryBtn.disabled = false;
-    retryBtn.textContent = "↻ Retry / Resume Task";
+    retryBtn.textContent = isPaused ? "▶ Play / Continue Task" : "↻ Retry / Resume Task";
     retryBtn.onclick = () => retryOrchJob(d.id);
   }
 
@@ -2104,7 +2129,6 @@ function renderOrchJobDetails(d) {
   const workersList = participants.filter(p => p.role === "worker");
   const curRound = Math.max(1, d.current_round || 1);
 
-  // Determine exact single currently-executing participant from the latest model_invoked event
   const latestInvokeEvt = [...events].reverse().find(e => e.event_type === "model_invoked");
   const invokeMeta = parseEventJSON(latestInvokeEvt);
 
@@ -2112,12 +2136,15 @@ function renderOrchJobDetails(d) {
   const scheduledWorker = workersList.length > 0 ? workersList[(curRound - 1) % workersList.length] : (participants[1] || coordPart);
   const auditorPart = participants.find(p => p.role === "auditor") || coordPart;
 
-  if (isActive) {
+  if (isActive || isPaused) {
     activeBanner.classList.remove("hidden");
     const activeProvName = invokeMeta.provider ? (providerCatalog[invokeMeta.provider]?.name || invokeMeta.provider) : "";
     const activeModelLabel = invokeMeta.model ? `${activeProvName} · ${invokeMeta.model}` : "";
 
-    if (status === "queued") {
+    if (isPaused) {
+      $("orch-active-headline").textContent = "⏸ Collaboration Paused — Ready to Swap Models or Press Play";
+      $("orch-active-subline").textContent = "You can change any upcoming AI model in the participant cards below (except the one that just answered), then click ▶ Play / Continue Task.";
+    } else if (status === "queued") {
       $("orch-active-headline").textContent = "Task queued — waiting for background worker…";
       $("orch-active-subline").textContent = "A worker will claim this job automatically.";
     } else if (status === "waiting") {
@@ -2151,7 +2178,6 @@ function renderOrchJobDetails(d) {
     errEl.classList.add("hidden");
   }
 
-  // Count failures per participant slot
   const slotFailures = {};
   events.forEach(ev => {
     if (ev.event_type === "participant_failed") {
@@ -2161,14 +2187,16 @@ function renderOrchJobDetails(d) {
     }
   });
 
-  // Render Participant Roster Pills (Strict Single Active-Worker Highlighting)
+  // Identify the participant that answered the very last AI turn (locked from swapping)
+  const lastAIMsg = [...messages].reverse().find(m => m.sender_role !== "user");
+
   const rosterEl = $("orch-detail-roster");
   rosterEl.innerHTML = "";
   participants.forEach((p, i) => {
     const pill = document.createElement("div");
 
     let isWorkingNow = false;
-    if (isActive) {
+    if (isActive && status === "running") {
       if (invokeMeta && invokeMeta.sort_order !== undefined && invokeMeta.sort_order >= 0) {
         isWorkingNow = (invokeMeta.sort_order === i);
       } else if (invokeMeta && invokeMeta.provider && invokeMeta.model) {
@@ -2188,6 +2216,8 @@ function renderOrchJobDetails(d) {
       }
     }
 
+    const answeredLastTurn = !!(lastAIMsg && lastAIMsg.sender_role === p.role && lastAIMsg.provider === p.provider && lastAIMsg.model === p.model);
+
     pill.className = `orch-roster-pill${isWorkingNow ? " working-now" : ""}`;
     let roleLabel = "Worker / Developer";
     if (p.role === "coordinator") roleLabel = "Coordinator / Architect";
@@ -2202,14 +2232,42 @@ function renderOrchJobDetails(d) {
         ? ` · <span style="color:#f87171;font-weight:700">✗ ${failCount} fail</span>`
         : "";
 
-    pill.innerHTML = `<span class="roster-role">#${i + 1} ${roleLabel} · ${modelMsgs} msg${modelMsgs === 1 ? "" : "s"}${stateTag}</span><b>${provName} · ${p.model}</b>`;
+    const headerDiv = document.createElement("div");
+    headerDiv.innerHTML = `<span class="roster-role">#${i + 1} ${roleLabel} · ${modelMsgs} msg${modelMsgs === 1 ? "" : "s"}${stateTag}</span><b>${provName} · ${p.model}</b>`;
+    pill.appendChild(headerDiv);
+
+    // Mid-Job Model Switcher (locks the model that answered the last turn)
+    if (answeredLastTurn) {
+      const lockNote = document.createElement("span");
+      lockNote.className = "roster-lock-note";
+      lockNote.textContent = "🔒 Answered last turn (locked)";
+      pill.appendChild(lockNote);
+    } else if (status !== "completed") {
+      const swapRow = document.createElement("div");
+      swapRow.className = "roster-swap-row";
+      const swapSel = document.createElement("select");
+      swapSel.className = "roster-swap-select";
+      swapSel.title = "Change this participant's AI model for upcoming turns";
+      buildUnifiedModelOptions(swapSel);
+      const curComp = `${p.provider}::${p.model}`;
+      if (![...swapSel.options].some(o => o.value === curComp)) {
+        const curOpt = document.createElement("option");
+        curOpt.value = curComp;
+        curOpt.textContent = `${provName} · ${p.model}`;
+        swapSel.prepend(curOpt);
+      }
+      swapSel.value = curComp;
+      swapSel.onchange = () => swapParticipantModelMidJob(d.id, participants, i, swapSel.value);
+      swapRow.appendChild(swapSel);
+      pill.appendChild(swapRow);
+    }
+
     rosterEl.appendChild(pill);
   });
 
-  // Render GitHub-Style AI Contribution & Reliability Breakdown
   renderAIContributionBar(participants, messages, events);
 
-  // Final Result Card + Second-Opinion Auditor + Multi-File Explorer + ZIP Download
+  // Final Result Card
   const finalCard = $("orch-final-card");
   if (status === "completed" && d.execution_result) {
     finalCard.classList.remove("hidden");
@@ -2373,7 +2431,7 @@ function renderOrchJobDetails(d) {
     revCard.classList.toggle("hidden", isActive);
   }
 
-  // Render Collaboration Messages Transcript
+  // Render Collapsible Collaboration Transcript (Collapsed by Default)
   $("orch-msg-count").textContent = String(messages.length);
   const msgContainer = $("orch-messages-view");
   msgContainer.innerHTML = "";
@@ -2387,11 +2445,11 @@ function renderOrchJobDetails(d) {
     msgContainer.appendChild(emptyMsg);
   } else {
     messages.forEach((m, idx) => {
-      const card = document.createElement("article");
-      card.className = `orch-msg-card role-${m.sender_role}`;
+      const detailsEl = document.createElement("details");
+      detailsEl.className = `orch-msg-collapsible role-${m.sender_role}`;
+      // Collapsed by default so large code turns don't clutter the screen
 
-      const head = document.createElement("div");
-      head.className = "orch-msg-head";
+      const summaryEl = document.createElement("summary");
 
       const left = document.createElement("div");
       left.className = "orch-msg-sender";
@@ -2406,16 +2464,30 @@ function renderOrchJobDetails(d) {
       const modelLabel = m.sender_role === "user" ? "Interactive Revision" : `${provShort} · ${m.model}`;
       left.innerHTML = `<span class="orch-role-tag ${m.sender_role}">#${idx + 1} · ${roleTitle}</span> <b>${modelLabel}</b>`;
 
+      const displayContent = m.sender_role === "user" ? stripRevOptsTag(m.content) : m.content;
+      const previewSnippet = (m.completion_summary || displayContent || "").replace(/\s+/g, " ").trim().slice(0, 95);
+
+      const previewSpan = document.createElement("span");
+      previewSpan.className = "orch-msg-preview";
+      previewSpan.textContent = previewSnippet ? `— ${previewSnippet}… (click to expand)` : "(click to expand)";
+
       const right = document.createElement("div");
       right.className = "orch-msg-meta";
-      right.innerHTML = `<span>Round ${m.round}</span> · <span class="action-tag action-${m.action}">Action: ${(m.action || "continue").toUpperCase()}</span>${m.latency_ms ? ` · <span>${m.latency_ms} ms</span>` : ""}`;
+      right.innerHTML = `<span>Round ${m.round}</span> · <span class="action-tag action-${m.action}">${(m.action || "continue").toUpperCase()}</span>${m.latency_ms ? ` · <span>${(m.latency_ms / 1000).toFixed(1)}s</span>` : ""}`;
 
-      const displayContent = m.sender_role === "user" ? stripRevOptsTag(m.content) : m.content;
+      summaryEl.append(left, previewSpan, right);
+
+      const innerCard = document.createElement("div");
+      innerCard.style.padding = "12px 14px";
+
+      const toolsBar = document.createElement("div");
+      toolsBar.style.display = "flex";
+      toolsBar.style.gap = "8px";
+      toolsBar.style.marginBottom = "10px";
 
       const copyTurnBtn = document.createElement("button");
       copyTurnBtn.type = "button";
       copyTurnBtn.className = "mini-turn-btn";
-      copyTurnBtn.textContent = "📋 Copy";
       copyTurnBtn.onclick = async () => {
         const ok = await copyTextToClipboard(displayContent);
         toast(ok ? `✓ Turn #${idx + 1} copied` : "Copy failed");
@@ -2424,7 +2496,7 @@ function renderOrchJobDetails(d) {
       const dlTurnBtn = document.createElement("button");
       dlTurnBtn.type = "button";
       dlTurnBtn.className = "mini-turn-btn";
-      dlTurnBtn.textContent = "⬇ Save";
+      dlTurnBtn.textContent = "⬇ Save Turn";
       dlTurnBtn.onclick = () => {
         const turnFiles = extractProjectFiles(displayContent, `${d.id}-turn-${idx + 1}`).files;
         if (turnFiles.length > 1) {
@@ -2434,15 +2506,14 @@ function renderOrchJobDetails(d) {
         }
       };
 
-      right.append(copyTurnBtn, dlTurnBtn);
-      head.append(left, right);
+      toolsBar.append(copyTurnBtn, dlTurnBtn);
 
       const body = document.createElement("div");
       body.className = "orch-msg-body";
       body.setAttribute("dir", "auto");
       body.textContent = displayContent;
 
-      card.append(head, body);
+      innerCard.append(toolsBar, body);
 
       if (m.completion_summary) {
         const sum = document.createElement("div");
@@ -2452,47 +2523,78 @@ function renderOrchJobDetails(d) {
         const span = document.createElement("span");
         span.textContent = m.completion_summary;
         sum.appendChild(span);
-        card.appendChild(sum);
+        innerCard.appendChild(sum);
       }
 
-      msgContainer.appendChild(card);
+      detailsEl.append(summaryEl, innerCard);
+      msgContainer.appendChild(detailsEl);
     });
   }
 
-  // Render Persisted Event Timeline
+  // Render Line-by-Line Plain-English Live Progress Timeline
   $("orch-evt-count").textContent = String(events.length);
   const evtContainer = $("orch-events-view");
   evtContainer.innerHTML = "";
 
-  events.forEach(ev => {
-    const row = document.createElement("div");
-    row.className = `orch-event-row evt-${ev.event_type}`;
+  events.forEach((ev, idx) => {
+    const line = document.createElement("div");
+    line.className = `orch-step-line evt-${ev.event_type}`;
 
-    const dot = document.createElement("span");
-    dot.className = "orch-event-dot";
+    const time = document.createElement("span");
+    time.className = "orch-step-time";
+    time.textContent = `#${String(idx + 1).padStart(2, "0")} · ${formatShortTimestamp(ev.created_at)}`;
 
-    const main = document.createElement("div");
-    main.className = "orch-event-main";
-    const topLine = document.createElement("div");
-    topLine.className = "orch-event-top";
+    const badge = document.createElement("span");
+    const isFail = ev.event_type === "participant_failed" || ev.event_type === "participant_fallback" || ev.event_type === "job_failed";
+    const isOk = ev.event_type === "plan_generated" || ev.event_type === "worker_response_received" || ev.event_type === "audit_completed" || ev.event_type === "task_completed";
+    badge.className = `orch-step-badge${isFail ? " is-fail" : isOk ? " is-ok" : ""}`;
+    badge.textContent = formatEventTypeLabel(ev.event_type, ev.phase);
 
-    const label = document.createElement("b");
-    label.textContent = formatEventTypeLabel(ev.event_type, ev.phase);
+    const text = document.createElement("div");
+    text.className = "orch-step-text";
+    text.setAttribute("dir", "auto");
+    text.textContent = buildDetailedTimelineNarrative(ev);
 
-    const time = document.createElement("small");
-    time.textContent = formatShortTimestamp(ev.created_at);
-
-    topLine.append(label, time);
-
-    const msg = document.createElement("div");
-    msg.className = "orch-event-msg";
-    msg.setAttribute("dir", "auto");
-    msg.textContent = stripRevOptsTag(ev.message);
-
-    main.append(topLine, msg);
-    row.append(dot, main);
-    evtContainer.appendChild(row);
+    line.append(time, badge, text);
+    evtContainer.appendChild(line);
   });
+}
+
+function buildDetailedTimelineNarrative(ev) {
+  const p = parseEventJSON(ev);
+  const provName = p.provider ? (providerCatalog[p.provider]?.name || p.provider) : "";
+  const fromProv = p.from_provider ? (providerCatalog[p.from_provider]?.name || p.from_provider) : "";
+  const toProv = p.to_provider ? (providerCatalog[p.to_provider]?.name || p.to_provider) : "";
+  const roundPrefix = p.round ? `[Round ${p.round}] ` : "";
+
+  switch (ev.event_type) {
+    case "coordinator_started":
+      return `${roundPrefix}Coordinator #${(p.sort_order ?? 0) + 1} (${provName} · ${p.model}) started analyzing your task and writing the master architectural plan…`;
+    case "plan_generated":
+      return `${roundPrefix}Coordinator (${provName} · ${p.model}) finished the implementation plan in ${((p.latency_ms || 0) / 1000).toFixed(1)}s — passing instructions to Worker.`;
+    case "worker_started":
+      return `${roundPrefix}Worker #${(p.sort_order ?? 1) + 1} (${provName} · ${p.model}) started building/revising the project files…`;
+    case "worker_response_received":
+      return `${roundPrefix}Worker #${(p.sort_order ?? 1) + 1} (${provName} · ${p.model}) finished generating the project files in ${((p.latency_ms || 0) / 1000).toFixed(1)}s — passing deliverable for inspection.`;
+    case "participant_failed":
+      return `${roundPrefix}✗ ${(p.role || "Model").toUpperCase()} (${provName} · ${p.model}) failed with error: ${p.error || ev.message}`;
+    case "participant_fallback":
+      return `${roundPrefix}⚡ Handing over job: ${fromProv} · ${p.from_model} failed (${p.error || "error"}) → passing turn to backup model ${toProv} · ${p.to_model}…`;
+    case "audit_started":
+      return `${roundPrefix}QA Auditor (${provName} · ${p.model}) is inspecting the code for runtime bugs, missing files, and broken logic…`;
+    case "audit_completed":
+      return `${roundPrefix}QA Auditor (${provName} · ${p.model}) finished inspection in ${((p.latency_ms || 0) / 1000).toFixed(1)}s (Verdict: ${(p.action || "complete").toUpperCase()})${p.completion_summary ? ` — "${p.completion_summary}"` : ""}.`;
+    case "review_started":
+      return `${roundPrefix}Coordinator (${provName} · ${p.model}) is reviewing the Worker's deliverable and QA Auditor report…`;
+    case "review_decision":
+      return `${roundPrefix}Coordinator (${provName} · ${p.model}) completed review in ${((p.latency_ms || 0) / 1000).toFixed(1)}s — Decision: ${(p.action || "").toUpperCase()}${p.completion_summary ? ` ("${p.completion_summary}")` : ""}.`;
+    case "revision_requested":
+      return `${roundPrefix}Coordinator requested code revisions — passing task back to the next Worker in your roster.`;
+    case "job_paused":
+      return `⏸ Task paused by user. You can swap any upcoming AI model in the roster above and click ▶ Play / Continue Task.`;
+    default:
+      return stripRevOptsTag(ev.message);
+  }
 }
 
 async function runIndependentAudit(jobId) {
@@ -2546,7 +2648,6 @@ async function applyAuditorFixes(jobId, messageId) {
   }
 }
 
-// Submit Human-in-the-Loop Revision Request (with context checkboxes)
 if ($("orch-revision-form")) {
   $("orch-revision-form").addEventListener("submit", async e => {
     e.preventDefault();
@@ -2586,6 +2687,26 @@ if ($("orch-revision-form")) {
   });
 }
 
+async function pauseActiveOrchJob(jobId) {
+  const btn = $("orch-pause-btn");
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = "Pausing after current turn…";
+  }
+  try {
+    await api(`/api/orchestration/jobs/${encodeURIComponent(jobId)}/pause`, { method: "POST" });
+    toast("⏸ Pause requested — job will pause as soon as the current AI finishes its turn.");
+    await loadOrchJobsList();
+    await fetchAndRenderOrchJob(jobId);
+  } catch (err) {
+    toast("Pause failed: " + err.message);
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = "⏸ Pause After Current Turn";
+    }
+  }
+}
+
 async function retryOrchJob(jobId) {
   const btn = $("orch-retry-btn");
   if (btn) {
@@ -2594,14 +2715,14 @@ async function retryOrchJob(jobId) {
   }
   try {
     await api(`/api/orchestration/jobs/${encodeURIComponent(jobId)}/retry`, { method: "POST" });
-    toast("↻ Task re-queued! Resuming from last saved step…");
+    toast("▶ Task resumed! Continuing from last saved step…");
     await loadOrchJobsList();
     await fetchAndRenderOrchJob(jobId);
   } catch (err) {
-    toast("Retry failed: " + err.message);
+    toast("Resume failed: " + err.message);
     if (btn) {
       btn.disabled = false;
-      btn.textContent = "↻ Retry / Resume Task";
+      btn.textContent = "▶ Play / Resume Task";
     }
   }
 }
@@ -2612,45 +2733,47 @@ async function cancelActiveOrchJob(jobId) {
   btn.textContent = "Stopping…";
   try {
     await api(`/api/orchestration/jobs/${encodeURIComponent(jobId)}/cancel`, { method: "POST" });
-    toast("⏹ Task cancellation confirmed");
+    toast("⏹ Task stopped immediately");
     await loadOrchJobsList();
     await fetchAndRenderOrchJob(jobId);
   } catch (err) {
-    toast("Cancel failed: " + err.message);
+    toast("Stop failed: " + err.message);
     btn.disabled = false;
-    btn.textContent = "⏹ Stop Task";
+    btn.textContent = "⏹ Stop Now";
   }
 }
 
 function formatEventTypeLabel(evtType, phase) {
   const map = {
-    job_created: "Job Created",
-    job_claimed: "Claimed by Worker",
-    job_started: "Execution Started",
-    coordinator_started: "Coordinator Planning Started",
-    plan_generated: "Implementation Plan Generated",
-    worker_started: "Worker Execution Started",
-    worker_response_received: "Worker Deliverable Received",
-    review_started: "Coordinator Review Started",
-    review_decision: "Coordinator Review Decision",
-    revision_requested: "Revision Requested",
-    revision_completed: "Worker Revision Completed",
-    participant_failed: "Model Call Failed",
-    participant_fallback: "Automatic Model Failover",
-    user_revision_requested: "User Revision Submitted",
-    audit_started: "QA / Audit Started",
-    audit_completed: "QA / Audit Completed",
-    audit_applied: "Auditor Fixes Applied",
-    model_invoked: "Model Request Sent",
-    model_responded: "Model Response Received",
-    retry_scheduled: "Retry / Resume Scheduled",
-    worker_recovery: "Recovered by Worker",
-    task_completed: "Collaboration Completed",
-    job_completed: "Job Marked Complete",
-    job_failed: "Job Failed",
-    job_cancelled: "Job Cancelled"
+    job_created: "Queued",
+    job_claimed: "Claimed",
+    job_started: "Started",
+    coordinator_started: "Planning",
+    plan_generated: "Plan Ready",
+    worker_started: "Worker Active",
+    worker_response_received: "Draft Complete",
+    review_started: "Reviewing",
+    review_decision: "Decision",
+    revision_requested: "Revision",
+    revision_completed: "Revised",
+    participant_failed: "Model Failed",
+    participant_fallback: "Failover Switch",
+    participants_updated: "Team Updated",
+    user_revision_requested: "User Revision",
+    audit_started: "Auditing",
+    audit_completed: "Audit Verdict",
+    audit_applied: "Fixes Applied",
+    model_invoked: "API Call",
+    model_responded: "API Reply",
+    job_paused: "Paused",
+    retry_scheduled: "Resumed",
+    worker_recovery: "Recovered",
+    task_completed: "Completed",
+    job_completed: "Finished",
+    job_failed: "Failed",
+    job_cancelled: "Stopped"
   };
-  return map[evtType] || `${evtType} (${phase || "info"})`;
+  return map[evtType] || `${evtType}`;
 }
 
 function formatShortTimestamp(ts) {

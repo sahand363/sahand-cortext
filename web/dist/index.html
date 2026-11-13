@@ -112,6 +112,104 @@
     height: 15px;
     cursor: pointer;
   }
+  .roster-swap-row {
+    margin-top: 8px;
+    padding-top: 7px;
+    border-top: 1px solid rgba(255,255,255,0.08);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .roster-swap-select {
+    width: 100%;
+    background: #0f131c;
+    color: #e2e8f0;
+    border: 1px solid #2b3548;
+    border-radius: 6px;
+    padding: 4px 7px;
+    font-size: 0.78rem;
+  }
+  .roster-lock-note {
+    font-size: 0.74rem;
+    color: #fbbf24;
+    display: inline-block;
+    margin-top: 6px;
+  }
+  .orch-msg-collapsible {
+    border: 1px solid #232a38;
+    border-radius: 10px;
+    background: rgba(16, 20, 29, 0.72);
+    margin-bottom: 10px;
+    overflow: hidden;
+  }
+  .orch-msg-collapsible > summary {
+    list-style: none;
+    cursor: pointer;
+    padding: 12px 14px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 10px;
+    user-select: none;
+  }
+  .orch-msg-collapsible > summary::-webkit-details-marker {
+    display: none;
+  }
+  .orch-msg-collapsible[open] > summary {
+    border-bottom: 1px solid #232a38;
+    background: rgba(255,255,255,0.02);
+  }
+  .orch-msg-preview {
+    color: #94a3b8;
+    font-size: 0.82rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 420px;
+  }
+  .orch-step-line {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 10px 13px;
+    border-bottom: 1px solid rgba(255,255,255,0.05);
+    font-size: 0.88rem;
+    line-height: 1.45;
+  }
+  .orch-step-time {
+    font-family: monospace;
+    font-size: 0.78rem;
+    color: #64748b;
+    flex-shrink: 0;
+    padding-top: 2px;
+  }
+  .orch-step-badge {
+    font-size: 0.72rem;
+    font-weight: 700;
+    padding: 2px 7px;
+    border-radius: 5px;
+    text-transform: uppercase;
+    flex-shrink: 0;
+    background: rgba(56, 189, 248, 0.14);
+    color: #7dd3fc;
+  }
+  .orch-step-badge.is-fail {
+    background: rgba(239, 68, 68, 0.18);
+    color: #fca5a5;
+  }
+  .orch-step-badge.is-ok {
+    background: rgba(74, 222, 128, 0.16);
+    color: #86efac;
+  }
+  .orch-step-text {
+    color: #e2e8f0;
+    flex: 1;
+  }
+  .status-paused {
+    background: rgba(250, 204, 21, 0.18) !important;
+    color: #fde047 !important;
+    border-color: rgba(250, 204, 21, 0.4) !important;
+  }
 </style>
 </head>
 <body>
@@ -133,7 +231,7 @@
     <div class="nav-caption">WORKSPACE</div>
     <nav class="main-nav">
       <button class="nav-link active" data-page="chat"><span class="nav-icon">▤</span>Chat <span class="nav-count" id="chat-count">01</span></button>
-      <button class="nav-link" data-page="models"><span class="nav-icon">✳</span>Models & providers</button>
+      <button class="nav-link" data-page="models"><span class="nav-icon">✳</span>Models &amp; providers</button>
       <button class="nav-link" data-page="orchestration"><span class="nav-icon">⌘</span>AI orchestration <span class="nav-count" id="orch-count">00</span></button>
       <button class="nav-link" data-page="memory"><span class="nav-icon">◉</span>Topic memory <span class="soon">SOON</span></button>
       <button class="nav-link" data-page="sessions"><span class="nav-icon">◷</span>Sessions</button>
@@ -142,7 +240,7 @@
     <div class="session-list" id="session-list"></div>
     <div class="sidebar-bottom">
       <nav class="main-nav bottom-nav">
-        <button class="nav-link" data-page="usage"><span class="nav-icon">⌁</span>Usage & analytics <span class="soon">SOON</span></button>
+        <button class="nav-link" data-page="usage"><span class="nav-icon">⌁</span>Usage &amp; analytics <span class="soon">SOON</span></button>
         <button class="nav-link" data-page="settings"><span class="nav-icon">⚙</span>Settings</button>
       </nav>
       <div class="profile-row"><div class="profile-avatar">S</div><div class="profile-meta"><b>Workspace owner</b><span>Personal account</span></div><button id="logout" class="icon-btn" title="Sign out">↗</button></div>
@@ -170,7 +268,7 @@
           <div class="hero-mark"><span>c.</span><i></i></div>
           <div class="eyebrow">THINK WITHOUT LIMITS</div>
           <h1>A space for<br><em>what’s next.</em></h1>
-          <p>Gemini, OpenRouter, AIPrime & CodeCraft API. One private workspace.</p>
+          <p>Gemini, OpenRouter, AIPrime &amp; CodeCraft API. One private workspace.</p>
           <div class="hero-actions"><button class="btn btn-primary" id="hero-start">Start a conversation <span>↗</span></button><button class="btn btn-quiet" data-goto="orchestration">Launch AI Orchestration <span>→</span></button></div>
           <div class="capability-row"><span><i>✳</i> Google Gemini</span><span><i>⇄</i> OpenRouter</span><span><i>◈</i> AIPrime (GLM 5.3 Flash)</span><span><i>⌘</i> Multi-Model Orchestration</span></div>
         </div>
@@ -216,7 +314,7 @@
 
       <section id="page-models" class="page module-page hidden">
         <div class="page-heading">
-          <div><div class="eyebrow">THE INTELLIGENCE LAYER</div><h1>Models & providers</h1><p>Test models and use the <b>Enabled</b> checkbox on each card to control which models appear in Chat, Orchestration, and Failover pools.</p></div>
+          <div><div class="eyebrow">THE INTELLIGENCE LAYER</div><h1>Models &amp; providers</h1><p>Use <b>Uncheck All</b> to bench models in bulk, then check only the models you want active in Chat, Orchestration, and Failovers.</p></div>
           <div class="heading-actions">
             <button type="button" class="btn btn-quiet btn-small" id="check-all-models-page">✓ Check All</button>
             <button type="button" class="btn btn-quiet btn-small" id="uncheck-all-models-page">☐ Uncheck All</button>
@@ -277,7 +375,7 @@
             <div id="orch-builder-panel" class="orch-panel">
               <div class="orch-panel-head">
                 <div>
-                  <div class="eyebrow">TEAM & TASK CONFIGURATION</div>
+                  <div class="eyebrow">TEAM &amp; TASK CONFIGURATION</div>
                   <h2>Configure Collaboration Team</h2>
                   <p>Assign your Coordinator, Worker(s), and optional QA Auditor. Workers execute sequentially by round or act as instant backup failovers.</p>
                 </div>
@@ -306,7 +404,7 @@
 
                 <!-- Optional Resilience & Failover Controls -->
                 <div class="orch-options-box">
-                  <div class="orch-options-title">RESILIENCE & AUTOMATIC FAILOVER OPTIONS</div>
+                  <div class="orch-options-title">RESILIENCE &amp; AUTOMATIC FAILOVER OPTIONS</div>
                   <label class="orch-check-row">
                     <input type="checkbox" id="orch-opt-autoretry" checked>
                     <div>
@@ -358,8 +456,9 @@
                   <div class="orch-detail-sub" id="orch-detail-sub">Job ID: —</div>
                 </div>
                 <div class="orch-monitor-actions">
-                  <button type="button" class="btn btn-primary btn-small hidden" id="orch-retry-btn">↻ Retry / Resume Task</button>
-                  <button type="button" class="tool-btn danger hidden" id="orch-cancel-btn">⏹ Stop Task</button>
+                  <button type="button" class="btn btn-primary btn-small hidden" id="orch-retry-btn">▶ Play / Resume Task</button>
+                  <button type="button" class="tool-btn hidden" id="orch-pause-btn" title="Wait for current AI to finish its turn, then pause">⏸ Pause After Current Turn</button>
+                  <button type="button" class="tool-btn danger hidden" id="orch-cancel-btn" title="Immediately stop the task">⏹ Stop Now</button>
                   <button type="button" class="tool-btn" id="orch-back-builder-btn">＋ New Task</button>
                 </div>
               </div>
@@ -376,7 +475,7 @@
               <!-- Error Banner (if failed) -->
               <div id="orch-detail-error" class="orch-error-banner hidden" dir="auto"></div>
 
-              <!-- Configured Participants Roster Pill Bar -->
+              <!-- Configured Participants Roster Pill Bar (with mid-job model switcher) -->
               <div id="orch-detail-roster" class="orch-detail-roster"></div>
 
               <!-- GitHub-Style AI Contribution & Failure Breakdown Bar -->
@@ -506,14 +605,14 @@
                 </form>
               </div>
 
-              <!-- Sub-tabs: Collaboration Transcript vs Durable Event Timeline -->
+              <!-- Sub-tabs: Live Progress Timeline (DEFAULT) vs Collapsible Collaboration Transcript -->
               <div class="orch-Monitor-tabs">
-                <button type="button" class="orch-view-tab active" data-orchview="messages">Collaboration Transcript (<span id="orch-msg-count">0</span>)</button>
-                <button type="button" class="orch-view-tab" data-orchview="events">Live Progress Timeline (<span id="orch-evt-count">0</span>)</button>
+                <button type="button" class="orch-view-tab active" data-orchview="events">Live Progress Timeline (<span id="orch-evt-count">0</span>)</button>
+                <button type="button" class="orch-view-tab" data-orchview="messages">Collaboration Transcript (<span id="orch-msg-count">0</span> · Collapsed)</button>
               </div>
 
-              <div id="orch-messages-view" class="orch-stream-list"></div>
-              <div id="orch-events-view" class="orch-events-list hidden"></div>
+              <div id="orch-events-view" class="orch-events-list"></div>
+              <div id="orch-messages-view" class="orch-stream-list hidden"></div>
             </div>
           </div>
 
@@ -534,7 +633,7 @@
 
       <section id="page-sessions" class="page module-page hidden"><div class="page-heading"><div><div class="eyebrow">YOUR WORK, ORGANIZED</div><h1>Sessions</h1><p>Pin important chats, rename conversations, or clean up old threads.</p></div><button class="btn btn-primary btn-small" id="sessions-new">＋ New session</button></div><div id="sessions-grid" class="sessions-grid"></div></section>
 
-      <section id="page-usage" class="page module-page hidden"><div class="page-heading"><div><div class="eyebrow">OBSERVABILITY</div><h1>Usage & analytics</h1><p>Understand model activity, response times and token usage.</p></div><span class="status-pill planned">IN DEVELOPMENT</span></div><div class="metric-grid"><div class="metric-card"><span>Tokens used</span><b>—</b><small>Waiting for telemetry module</small></div><div class="metric-card"><span>Requests</span><b>—</b><small>Waiting for telemetry module</small></div><div class="metric-card"><span>Average latency</span><b>—</b><small>Response timing will appear here</small></div></div><div class="chart-placeholder"><div class="chart-bars"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div><span>ACTIVITY VISUALIZATION · COMING SOON</span></div></section>
+      <section id="page-usage" class="page module-page hidden"><div class="page-heading"><div><div class="eyebrow">OBSERVABILITY</div><h1>Usage &amp; analytics</h1><p>Understand model activity, response times and token usage.</p></div><span class="status-pill planned">IN DEVELOPMENT</span></div><div class="metric-grid"><div class="metric-card"><span>Tokens used</span><b>—</b><small>Waiting for telemetry module</small></div><div class="metric-card"><span>Requests</span><b>—</b><small>Waiting for telemetry module</small></div><div class="metric-card"><span>Average latency</span><b>—</b><small>Response timing will appear here</small></div></div><div class="chart-placeholder"><div class="chart-bars"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div><span>ACTIVITY VISUALIZATION · COMING SOON</span></div></section>
 
       <section id="page-settings" class="page module-page hidden">
         <div class="page-heading"><div><div class="eyebrow">YOUR HUB, YOUR RULES</div><h1>Settings</h1><p>Configure Google Gemini, OpenRouter, AIPrime, and CodeCraft API keys and choose which models are enabled.</p></div></div>
@@ -615,7 +714,7 @@
         </div>
       </section>
     </div>
-    <footer><span>SAHAND-CORTEXT</span><i>·</i> PRIVATE MULTI-PROVIDER AI WORKSPACE <b>v0.5.1</b></footer>
+    <footer><span>SAHAND-CORTEXT</span><i>·</i> PRIVATE MULTI-PROVIDER AI WORKSPACE <b>v0.5.2</b></footer>
   </main>
 </div>
 <div id="toast" class="toast"></div>

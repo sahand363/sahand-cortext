@@ -203,21 +203,6 @@ func (a *App) loadTestRecords(p string) map[string]ModelTestRecord {
 	return out
 }
 
-func (a *App) saveTestRecord(p, model string, rec ModelTestRecord) {
-	norm := provider.NormalizeProvider(p)
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	records := a.loadTestRecords(norm)
-	if prev, ok := records[model]; ok {
-		// Preserve user's explicit Disabled toggle unless they are re-enabling it
-		rec.Disabled = prev.Disabled
-	}
-	records[model] = rec
-	if data, err := json.Marshal(records); err == nil {
-		_ = a.setSetting(norm+"_model_tests", string(data))
-	}
-}
-
 func (a *App) setModelsEnabledBatch(p string, models []string, enabled bool) {
 	norm := provider.NormalizeProvider(p)
 	a.mu.Lock()
@@ -247,7 +232,20 @@ func (a *App) setModelEnabled(p, model string, enabled bool) {
 	a.setModelsEnabledBatch(p, []string{model}, enabled)
 }
 
-// verifiedWorkingParticipants returns only models that are verified working AND explicitly enabled by the user
+func (a *App) saveTestRecord(p, model string, rec ModelTestRecord) {
+	norm := provider.NormalizeProvider(p)
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	records := a.loadTestRecords(norm)
+	if prev, ok := records[model]; ok {
+		rec.Disabled = prev.Disabled
+	}
+	records[model] = rec
+	if data, err := json.Marshal(records); err == nil {
+		_ = a.setSetting(norm+"_model_tests", string(data))
+	}
+}
+
 func (a *App) verifiedWorkingParticipants() []orchestration.Participant {
 	var out []orchestration.Participant
 	for _, p := range []string{"gemini", "openrouter", "aiprime", "codecraft"} {
@@ -403,7 +401,7 @@ func (a *App) status(w http.ResponseWriter, r *http.Request) {
 	aCfg := a.providerKey("aiprime") != ""
 	jsonOut(w, 200, map[string]any{
 		"status":                "online",
-		"version":               "0.5.1",
+		"version":               "0.5.2",
 		"gemini_configured":     gCfg,
 		"openrouter_configured": oCfg,
 		"codecraft_configured":  cCfg,
@@ -568,7 +566,6 @@ func (a *App) handleToggleModel(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// POST /api/models/custom - Allows adding and testing any custom model ID for a provider
 func (a *App) handleAddCustomModel(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", 405)
@@ -1428,6 +1425,7 @@ func (a *App) orchGetJob(w http.ResponseWriter, r *http.Request) {
 	jobID = strings.TrimSuffix(jobID, "/participants")
 	jobID = strings.TrimSuffix(jobID, "/details")
 	jobID = strings.TrimSuffix(jobID, "/cancel")
+	jobID = strings.TrimSuffix(jobID, "/pause")
 	jobID = strings.TrimSuffix(jobID, "/retry")
 	jobID = strings.TrimSuffix(jobID, "/iterate")
 	jobID = strings.TrimSuffix(jobID, "/audit")
@@ -1467,16 +1465,47 @@ func (a *App) orchGetJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if strings.HasSuffix(r.URL.Path, "/participants") {
-		if r.Method != http.MethodGet {
-			http.Error(w, "method not allowed", 405)
+		if r.Method == http.MethodGet {
+			parts, err := a.orchStorage.GetParticipants(r.Context(), jobID)
+			if err != nil {
+				jsonOut(w, 500, map[string]string{"error": "Failed retrieving participants"})
+				return
+			}
+			jsonOut(w, 200, parts)
+			return
+		} else if r.Method == http.MethodPost || r.Method == http.MethodPut {
+			var body struct {
+				Participants []orchestration.Participant `json:"participants"`
+			}
+			if json.NewDecoder(http.MaxBytesReader(w, r.Body, 16*1024)).Decode(&body) != nil || len(body.Participants) == 0 {
+				jsonOut(w, 400, map[string]string{"error": "Invalid participants list"})
+				return
+			}
+			for i := range body.Participants {
+				p := strings.TrimSpace(body.Participants[i].Provider)
+				m := strings.TrimSpace(body.Participants[i].Model)
+				if strings.Contains(m, "::") {
+					parts := strings.SplitN(m, "::", 2)
+					p = parts[0]
+					m = parts[1]
+				}
+				normProv := provider.NormalizeProvider(p)
+				if m == "" || a.providerKey(normProv) == "" {
+					jsonOut(w, 400, map[string]string{"error": "Invalid participant provider or model"})
+					return
+				}
+				body.Participants[i].Provider = normProv
+				body.Participants[i].Model = m
+			}
+			if err := a.orchStorage.SaveParticipants(r.Context(), jobID, body.Participants); err != nil {
+				jsonOut(w, 500, map[string]string{"error": "Failed updating participants: " + err.Error()})
+				return
+			}
+			_ = a.orchStorage.RecordEvent(r.Context(), jobID, "participants_updated", "running", "user", "Collaboration team roster updated mid-job", "{}")
+			jsonOut(w, 200, map[string]bool{"ok": true})
 			return
 		}
-		parts, err := a.orchStorage.GetParticipants(r.Context(), jobID)
-		if err != nil {
-			jsonOut(w, 500, map[string]string{"error": "Failed retrieving participants: " + err.Error()})
-			return
-		}
-		jsonOut(w, 200, parts)
+		http.Error(w, "method not allowed", 405)
 		return
 	}
 
@@ -1494,6 +1523,23 @@ func (a *App) orchGetJob(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		jsonOut(w, 200, map[string]any{"id": jobID, "status": "cancelled", "cancelled": true})
+		return
+	}
+
+	if strings.HasSuffix(r.URL.Path, "/pause") {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", 405)
+			return
+		}
+		if err := a.orchStorage.PauseJob(r.Context(), jobID); err != nil {
+			if errors.Is(err, orchestration.ErrJobNotFound) {
+				jsonOut(w, 404, map[string]string{"error": "Job not found or not running"})
+				return
+			}
+			jsonOut(w, 500, map[string]string{"error": "Pause failed: " + err.Error()})
+			return
+		}
+		jsonOut(w, 200, map[string]any{"id": jobID, "status": "paused", "paused": true})
 		return
 	}
 
@@ -1758,7 +1804,7 @@ func main() {
 		_ = server.Shutdown(shutdownCtx)
 	}()
 
-	log.Printf("Sahand-CorText v0.5.1 listening on %s", server.Addr)
+	log.Printf("Sahand-CorText v0.5.2 listening on %s", server.Addr)
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}

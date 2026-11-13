@@ -2,983 +2,145 @@ package orchestration
 
 import (
 	"context"
-	"crypto/rand"
 	"database/sql"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
-	"sync"
 	"time"
 )
 
 var (
-	ErrJobNotFound  = errors.New("orchestration job not found")
-	ErrJobCancelled = errors.New("orchestration job has been cancelled")
+	ErrJobNotFound   = errors.New("orchestration job not found")
+	ErrJobCancelled  = errors.New("orchestration job was cancelled")
+	ErrJobCompleted  = errors.New("orchestration job is already completed")
 )
 
 type Storage struct {
 	db *sql.DB
-	mu sync.Mutex // guarantees serialized writes on connection
 }
 
 func NewStorage(db *sql.DB) *Storage {
 	return &Storage{db: db}
 }
 
-func randomID(prefix string) string {
-	b := make([]byte, 8)
-	_, _ = rand.Read(b)
-	return fmt.Sprintf("%s-%s", prefix, hex.EncodeToString(b))
-}
-
-// InitSchema ensures tables, columns, and indexes exist idempotently
 func (s *Storage) InitSchema() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	queries := []string{
-		`CREATE TABLE IF NOT EXISTS orchestration_jobs (
+		`CREATE TABLE IF NOT EXISTS orch_jobs(
 			id TEXT PRIMARY KEY,
 			task TEXT NOT NULL,
-			status TEXT NOT NULL,
+			status TEXT NOT NULL DEFAULT 'queued',
 			current_stage TEXT NOT NULL DEFAULT 'queued',
-			max_rounds INTEGER NOT NULL DEFAULT 5,
-			max_calls INTEGER NOT NULL DEFAULT 12,
 			current_round INTEGER NOT NULL DEFAULT 0,
+			max_rounds INTEGER NOT NULL DEFAULT 5,
 			total_calls INTEGER NOT NULL DEFAULT 0,
+			max_calls INTEGER NOT NULL DEFAULT 15,
 			retry_count INTEGER NOT NULL DEFAULT 0,
 			max_retries INTEGER NOT NULL DEFAULT 3,
-			claimed_by TEXT,
-			lease_expires_at DATETIME,
+			error_message TEXT NOT NULL DEFAULT '',
+			execution_result TEXT NOT NULL DEFAULT '',
 			metadata TEXT NOT NULL DEFAULT '{}',
-			execution_result TEXT,
-			error_message TEXT,
 			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-			started_at DATETIME,
-			completed_at DATETIME
+			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 		);`,
-		`CREATE INDEX IF NOT EXISTS idx_orch_jobs_status_lease ON orchestration_jobs(status, lease_expires_at);`,
-		`CREATE TABLE IF NOT EXISTS orchestration_participants (
+		`CREATE TABLE IF NOT EXISTS orch_participants(
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			job_id TEXT NOT NULL REFERENCES orchestration_jobs(id) ON DELETE CASCADE,
+			job_id TEXT NOT NULL REFERENCES orch_jobs(id) ON DELETE CASCADE,
 			role TEXT NOT NULL,
-			name TEXT NOT NULL DEFAULT '',
+			name TEXT NOT NULL,
 			provider TEXT NOT NULL,
 			model TEXT NOT NULL,
-			system_prompt TEXT NOT NULL DEFAULT '',
-			sort_order INTEGER NOT NULL DEFAULT 0,
-			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+			sort_order INTEGER NOT NULL DEFAULT 0
 		);`,
-		`CREATE INDEX IF NOT EXISTS idx_orch_participants_job ON orchestration_participants(job_id, sort_order ASC);`,
-		`CREATE TABLE IF NOT EXISTS orchestration_messages (
+		`CREATE TABLE IF NOT EXISTS orch_messages(
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			job_id TEXT NOT NULL REFERENCES orchestration_jobs(id) ON DELETE CASCADE,
-			round INTEGER NOT NULL DEFAULT 1,
-			turn_index INTEGER NOT NULL DEFAULT 1,
+			job_id TEXT NOT NULL REFERENCES orch_jobs(id) ON DELETE CASCADE,
+			round INTEGER NOT NULL,
+			turn_index INTEGER NOT NULL,
 			sender_role TEXT NOT NULL,
-			sender_name TEXT NOT NULL DEFAULT '',
+			sender_name TEXT NOT NULL,
 			provider TEXT NOT NULL,
 			model TEXT NOT NULL,
-			action TEXT NOT NULL DEFAULT 'continue',
+			action TEXT NOT NULL,
 			content TEXT NOT NULL,
 			completion_summary TEXT NOT NULL DEFAULT '',
 			raw_response TEXT NOT NULL DEFAULT '',
 			latency_ms INTEGER NOT NULL DEFAULT 0,
 			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 		);`,
-		`CREATE INDEX IF NOT EXISTS idx_orch_messages_job ON orchestration_messages(job_id, id ASC);`,
-		`CREATE TABLE IF NOT EXISTS orchestration_events (
+		`CREATE TABLE IF NOT EXISTS orch_events(
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			job_id TEXT NOT NULL REFERENCES orchestration_jobs(id) ON DELETE CASCADE,
+			job_id TEXT NOT NULL REFERENCES orch_jobs(id) ON DELETE CASCADE,
 			event_type TEXT NOT NULL,
-			phase TEXT NOT NULL DEFAULT '',
-			worker_id TEXT NOT NULL DEFAULT '',
-			message TEXT NOT NULL DEFAULT '',
-			payload TEXT NOT NULL DEFAULT '{}',
+			phase TEXT NOT NULL,
+			worker_id TEXT NOT NULL,
+			message TEXT NOT NULL,
+			payload_json TEXT NOT NULL DEFAULT '{}',
 			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 		);`,
-		`CREATE INDEX IF NOT EXISTS idx_orch_events_job ON orchestration_events(job_id, id ASC);`,
-		`CREATE TABLE IF NOT EXISTS orchestration_worker_leases (
-			worker_id TEXT PRIMARY KEY,
-			last_heartbeat DATETIME NOT NULL,
-			active_job_id TEXT,
-			status TEXT NOT NULL DEFAULT 'active'
-		);`,
+		`PRAGMA journal_mode=WAL;`,
+		`PRAGMA foreign_keys=ON;`,
 	}
-
 	for _, q := range queries {
 		if _, err := s.db.Exec(q); err != nil {
-			return fmt.Errorf("failed executing schema query (%s): %w", q, err)
+			return err
 		}
 	}
-
-	_, _ = s.db.Exec(`ALTER TABLE orchestration_jobs ADD COLUMN current_stage TEXT NOT NULL DEFAULT 'queued';`)
 	return nil
 }
 
-// CreateJob enqueues a new job and records the job_created event atomically
 func (s *Storage) CreateJob(ctx context.Context, task string, maxRounds, maxCalls int, metadata string) (*Job, error) {
-	if strings.TrimSpace(task) == "" {
-		return nil, errors.New("job task description cannot be empty")
-	}
+	_ = time.Now().UnixNano() // Seed
+	id := fmt.Sprintf("orch-%x", time.Now().UnixNano()&0xffffffff)
+
 	if maxRounds <= 0 {
 		maxRounds = 5
 	}
 	if maxCalls <= 0 {
-		maxCalls = 12
+		maxCalls = 15
 	}
 	if strings.TrimSpace(metadata) == "" {
 		metadata = "{}"
 	}
 
-	id := randomID("orch")
-	now := time.Now().UTC()
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback()
-
-	_, err = tx.ExecContext(ctx, `
-		INSERT INTO orchestration_jobs (id, task, status, current_stage, max_rounds, max_calls, metadata, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		id, task, string(StatusQueued), string(StageQueued), maxRounds, maxCalls, metadata, now, now)
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO orch_jobs(id, task, status, current_stage, max_rounds, max_calls, metadata) VALUES(?, ?, 'queued', 'queued', ?, ?, ?)`,
+		id, task, maxRounds, maxCalls, metadata,
+	)
 	if err != nil {
 		return nil, err
 	}
 
-	_, err = tx.ExecContext(ctx, `
-		INSERT INTO orchestration_events (job_id, event_type, phase, message, payload, created_at)
-		VALUES (?, ?, 'queued', 'Job created and entered execution queue', ?, ?)`,
-		id, string(EventJobCreated), metadata, now)
-	if err != nil {
-		return nil, err
-	}
-
-	if err := tx.Commit(); err != nil {
-		return nil, err
-	}
-
-	return &Job{
-		ID:           id,
-		Task:         task,
-		Status:       StatusQueued,
-		CurrentStage: StageQueued,
-		MaxRounds:    maxRounds,
-		MaxCalls:     maxCalls,
-		MaxRetries:   3,
-		Metadata:     metadata,
-		CreatedAt:    now,
-		UpdatedAt:    now,
-	}, nil
+	_ = s.RecordEvent(ctx, id, "job_created", "queued", "system", "Collaboration job created and queued", "{}")
+	return s.GetJob(ctx, id)
 }
 
-// SaveParticipants stores the participant roster for a job
-func (s *Storage) SaveParticipants(ctx context.Context, jobID string, participants []Participant) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-
-	_, err = tx.ExecContext(ctx, `DELETE FROM orchestration_participants WHERE job_id = ?`, jobID)
-	if err != nil {
-		return err
-	}
-
-	now := time.Now().UTC()
-	for i, p := range participants {
-		role := strings.ToLower(strings.TrimSpace(p.Role))
-		if role == "" {
-			if i == 0 {
-				role = RoleCoordinator
-			} else {
-				role = RoleWorker
-			}
-		}
-		name := strings.TrimSpace(p.Name)
-		if name == "" {
-			if role == RoleCoordinator {
-				name = "Coordinator"
-			} else {
-				name = "Worker"
-			}
-		}
-		_, err = tx.ExecContext(ctx, `
-			INSERT INTO orchestration_participants (job_id, role, name, provider, model, system_prompt, sort_order, created_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-			jobID, role, name, strings.ToLower(strings.TrimSpace(p.Provider)), strings.TrimSpace(p.Model), p.SystemPrompt, i, now)
-		if err != nil {
-			return err
-		}
-	}
-
-	return tx.Commit()
-}
-
-// GetParticipants returns the ordered list of participants for a job
-func (s *Storage) GetParticipants(ctx context.Context, jobID string) ([]Participant, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, job_id, role, name, provider, model, system_prompt, sort_order, created_at
-		FROM orchestration_participants
-		WHERE job_id = ?
-		ORDER BY sort_order ASC, id ASC`, jobID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var out []Participant
-	for rows.Next() {
-		var p Participant
-		if err := rows.Scan(&p.ID, &p.JobID, &p.Role, &p.Name, &p.Provider, &p.Model, &p.SystemPrompt, &p.SortOrder, &p.CreatedAt); err == nil {
-			out = append(out, p)
-		}
-	}
-	return out, nil
-}
-
-// SaveCollaborationMessage atomically persists a single model turn and updates job progress in one transaction
-func (s *Storage) SaveCollaborationMessage(ctx context.Context, msg CollaborationMessage) (*CollaborationMessage, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback()
-
-	var currentStatus string
-	if err := tx.QueryRowContext(ctx, `SELECT status FROM orchestration_jobs WHERE id = ?`, msg.JobID).Scan(&currentStatus); err != nil {
-		return nil, err
-	}
-	if currentStatus == string(StatusCancelled) {
-		return nil, ErrJobCancelled
-	}
-
-	now := time.Now().UTC()
-	if msg.Action == "" {
-		msg.Action = ActionContinue
-	}
-
-	res, err := tx.ExecContext(ctx, `
-		INSERT INTO orchestration_messages
-		(job_id, round, turn_index, sender_role, sender_name, provider, model, action, content, completion_summary, raw_response, latency_ms, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		msg.JobID, msg.Round, msg.TurnIndex, msg.SenderRole, msg.SenderName, msg.Provider, msg.Model,
-		string(msg.Action), msg.Content, msg.CompletionSummary, msg.RawResponse, msg.LatencyMs, now)
-	if err != nil {
-		return nil, err
-	}
-
-	id, _ := res.LastInsertId()
-	msg.ID = id
-	msg.CreatedAt = now
-
-	_, err = tx.ExecContext(ctx, `
-		UPDATE orchestration_jobs
-		SET current_round = ?, total_calls = ?, error_message = NULL, updated_at = ?
-		WHERE id = ?`,
-		msg.Round, msg.TurnIndex, now, msg.JobID)
-	if err != nil {
-		return nil, err
-	}
-
-	if err := tx.Commit(); err != nil {
-		return nil, err
-	}
-	return &msg, nil
-}
-
-// GetCollaborationMessages retrieves all collaboration turns for a job in chronological order
-func (s *Storage) GetCollaborationMessages(ctx context.Context, jobID string) ([]CollaborationMessage, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, job_id, round, turn_index, sender_role, sender_name, provider, model,
-		       action, content, completion_summary, raw_response, latency_ms, created_at
-		FROM orchestration_messages
-		WHERE job_id = ?
-		ORDER BY id ASC`, jobID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var msgs []CollaborationMessage
-	for rows.Next() {
-		var m CollaborationMessage
-		var act string
-		if err := rows.Scan(&m.ID, &m.JobID, &m.Round, &m.TurnIndex, &m.SenderRole, &m.SenderName,
-			&m.Provider, &m.Model, &act, &m.Content, &m.CompletionSummary, &m.RawResponse, &m.LatencyMs, &m.CreatedAt); err == nil {
-			m.Action = CollaborationAction(act)
-			msgs = append(msgs, m)
-		}
-	}
-	return msgs, nil
-}
-
-// UpdateJobProgress updates current_round and total_calls on an active job
-func (s *Storage) UpdateJobProgress(ctx context.Context, jobID string, currentRound, totalCalls int) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	_, err := s.db.ExecContext(ctx, `
-		UPDATE orchestration_jobs
-		SET current_round = ?, total_calls = ?, updated_at = ?
-		WHERE id = ? AND status NOT IN ('cancelled', 'completed')`,
-		currentRound, totalCalls, time.Now().UTC(), jobID)
-	return err
-}
-
-// UpdateJobStage updates the durable workflow stage and current round
-func (s *Storage) UpdateJobStage(ctx context.Context, jobID string, stage WorkflowStage, currentRound, totalCalls int) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	_, err := s.db.ExecContext(ctx, `
-		UPDATE orchestration_jobs
-		SET current_stage = ?, current_round = ?, total_calls = ?, updated_at = ?
-		WHERE id = ? AND status NOT IN ('cancelled', 'completed')`,
-		string(stage), currentRound, totalCalls, time.Now().UTC(), jobID)
-	return err
-}
-
-// IsJobCancelled checks SQLite directly to verify whether a job has been cancelled
-func (s *Storage) IsJobCancelled(ctx context.Context, jobID string) bool {
-	var status string
-	err := s.db.QueryRowContext(ctx, `SELECT status FROM orchestration_jobs WHERE id = ?`, jobID).Scan(&status)
-	if err != nil {
-		return false
-	}
-	return status == string(StatusCancelled)
-}
-
-// ClaimNextJob atomically claims an available queued or expired job.
-func (s *Storage) ClaimNextJob(ctx context.Context, workerID string, leaseDuration time.Duration) (*Job, bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, false, err
-	}
-	defer tx.Rollback()
-
-	var jobID, prevWorker string
-	var prevStatus JobStatus
-	var isRecovery bool
-
-	now := time.Now().UTC()
-
-	err = tx.QueryRowContext(ctx, `
-		SELECT id, status, coalesce(claimed_by, '')
-		FROM orchestration_jobs
-		WHERE status = 'queued'
-		   OR (status IN ('running', 'waiting') AND lease_expires_at IS NOT NULL AND lease_expires_at < ?)
-		ORDER BY created_at ASC
-		LIMIT 1`, now).Scan(&jobID, &prevStatus, &prevWorker)
-
-	if err == sql.ErrNoRows {
-		return nil, false, nil
-	}
-	if err != nil {
-		return nil, false, err
-	}
-
-	if prevStatus != StatusQueued {
-		isRecovery = true
-	}
-
-	leaseEnd := now.Add(leaseDuration)
-
-	res, err := tx.ExecContext(ctx, `
-		UPDATE orchestration_jobs
-		SET status = 'running',
-		    claimed_by = ?,
-		    lease_expires_at = ?,
-		    started_at = coalesce(started_at, ?),
-		    updated_at = ?
-		WHERE id = ? AND status IN ('queued', 'running', 'waiting')
-		  AND (status = 'queued' OR lease_expires_at IS NULL OR lease_expires_at <= ?)`,
-		workerID, leaseEnd, now, now, jobID, now)
-	if err != nil {
-		return nil, false, err
-	}
-	if rows, _ := res.RowsAffected(); rows == 0 {
-		return nil, false, nil
-	}
-
-	_, _ = tx.ExecContext(ctx, `
-		INSERT INTO orchestration_worker_leases (worker_id, last_heartbeat, active_job_id, status)
-		VALUES (?, ?, ?, 'active')
-		ON CONFLICT(worker_id) DO UPDATE SET
-			last_heartbeat = excluded.last_heartbeat,
-			active_job_id = excluded.active_job_id,
-			status = 'active'`,
-		workerID, now, jobID)
-
-	if isRecovery {
-		_, _ = tx.ExecContext(ctx, `
-			INSERT INTO orchestration_events (job_id, event_type, phase, worker_id, message, created_at)
-			VALUES (?, ?, 'recovery', ?, ?, ?)`,
-			jobID, string(EventWorkerRecovery), workerID,
-			fmt.Sprintf("Job recovered and resumed by '%s' (previous state: %s, worker: '%s')", workerID, prevStatus, prevWorker), now)
-	}
-
-	_, _ = tx.ExecContext(ctx, `
-		INSERT INTO orchestration_events (job_id, event_type, phase, worker_id, message, created_at)
-		VALUES (?, ?, 'running', ?, 'Job claimed and execution started', ?)`,
-		jobID, string(EventJobClaimed), workerID, now)
-
-	if err := tx.Commit(); err != nil {
-		return nil, false, err
-	}
-
-	job, err := s.GetJob(ctx, jobID)
-	return job, isRecovery, err
-}
-
-// RenewLease extends lease expiration and verifies job is not cancelled
-func (s *Storage) RenewLease(ctx context.Context, jobID, workerID string, leaseDuration time.Duration) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	var status string
-	err := s.db.QueryRowContext(ctx, `SELECT status FROM orchestration_jobs WHERE id = ?`, jobID).Scan(&status)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return ErrJobNotFound
-		}
-		return err
-	}
-	if status == string(StatusCancelled) {
-		return ErrJobCancelled
-	}
-
-	now := time.Now().UTC()
-	leaseEnd := now.Add(leaseDuration)
-
-	_, err = s.db.ExecContext(ctx, `
-		UPDATE orchestration_jobs
-		SET lease_expires_at = ?, updated_at = ?
-		WHERE id = ? AND claimed_by = ? AND status = 'running'`,
-		leaseEnd, now, jobID, workerID)
-	if err != nil {
-		return err
-	}
-
-	_, _ = s.db.ExecContext(ctx, `
-		UPDATE orchestration_worker_leases
-		SET last_heartbeat = ?
-		WHERE worker_id = ?`, now, workerID)
-
-	return nil
-}
-
-// RecordEvent records an execution milestone into durable SQLite storage
-func (s *Storage) RecordEvent(ctx context.Context, jobID string, evtType EventType, phase, workerID, message, payload string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if payload == "" {
-		payload = "{}"
-	}
-	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO orchestration_events (job_id, event_type, phase, worker_id, message, payload, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		jobID, string(evtType), phase, workerID, message, payload, time.Now().UTC())
-	return err
-}
-
-// CompleteJob transitions status to completed with final result
-func (s *Storage) CompleteJob(ctx context.Context, jobID, workerID, result string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	now := time.Now().UTC()
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-
-	res, err := tx.ExecContext(ctx, `
-		UPDATE orchestration_jobs
-		SET status = 'completed',
-		    current_stage = 'completed',
-		    execution_result = ?,
-		    error_message = NULL,
-		    completed_at = ?,
-		    lease_expires_at = NULL,
-		    updated_at = ?
-		WHERE id = ? AND status = 'running'`,
-		result, now, now, jobID)
-	if err != nil {
-		return err
-	}
-	if rows, _ := res.RowsAffected(); rows == 0 {
-		return nil
-	}
-
-	_, _ = tx.ExecContext(ctx, `
-		UPDATE orchestration_worker_leases
-		SET active_job_id = NULL, last_heartbeat = ?
-		WHERE worker_id = ?`, now, workerID)
-
-	_, _ = tx.ExecContext(ctx, `
-		INSERT INTO orchestration_events (job_id, event_type, phase, worker_id, message, created_at)
-		VALUES (?, ?, 'completed', ?, 'Job execution successfully completed', ?)`,
-		jobID, string(EventJobCompleted), workerID, now)
-
-	return tx.Commit()
-}
-
-// FailOrScheduleRetry handles failures, incrementing retries or terminating as failed
-func (s *Storage) FailOrScheduleRetry(ctx context.Context, jobID, workerID, errMsg string, retryable bool, backoff time.Duration) (bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	var status string
-	var retryCount, maxRetries int
-	err := s.db.QueryRowContext(ctx, `SELECT status, retry_count, max_retries FROM orchestration_jobs WHERE id = ?`, jobID).Scan(&status, &retryCount, &maxRetries)
-	if err != nil {
-		return false, err
-	}
-	if status == string(StatusCancelled) || status == string(StatusCompleted) {
-		return false, nil
-	}
-
-	now := time.Now().UTC()
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return false, err
-	}
-	defer tx.Rollback()
-
-	if retryable && retryCount < maxRetries {
-		newRetries := retryCount + 1
-		leaseEnd := now.Add(backoff)
-
-		_, err = tx.ExecContext(ctx, `
-			UPDATE orchestration_jobs
-			SET status = 'waiting',
-			    retry_count = ?,
-			    error_message = ?,
-			    lease_expires_at = ?,
-			    updated_at = ?
-			WHERE id = ? AND status NOT IN ('cancelled', 'completed')`,
-			newRetries, errMsg, leaseEnd, now, jobID)
-		if err != nil {
-			return false, err
-		}
-
-		_, _ = tx.ExecContext(ctx, `
-			UPDATE orchestration_worker_leases
-			SET active_job_id = NULL, last_heartbeat = ?
-			WHERE worker_id = ?`, now, workerID)
-
-		_, _ = tx.ExecContext(ctx, `
-			INSERT INTO orchestration_events (job_id, event_type, phase, worker_id, message, created_at)
-			VALUES (?, ?, 'retry', ?, ?, ?)`,
-			jobID, string(EventRetryScheduled), workerID,
-			fmt.Sprintf("Retry %d/%d scheduled in %v: %s", newRetries, maxRetries, backoff, errMsg), now)
-
-		return true, tx.Commit()
-	}
-
-	// Permanent failure
-	_, err = tx.ExecContext(ctx, `
-		UPDATE orchestration_jobs
-		SET status = 'failed',
-		    current_stage = 'failed',
-		    error_message = ?,
-		    completed_at = ?,
-		    lease_expires_at = NULL,
-		    updated_at = ?
-		WHERE id = ? AND status NOT IN ('cancelled', 'completed')`,
-		errMsg, now, now, jobID)
-	if err != nil {
-		return false, err
-	}
-
-	_, _ = tx.ExecContext(ctx, `
-		UPDATE orchestration_worker_leases
-		SET active_job_id = NULL, last_heartbeat = ?
-		WHERE worker_id = ?`, now, workerID)
-
-	_, _ = tx.ExecContext(ctx, `
-		INSERT INTO orchestration_events (job_id, event_type, phase, worker_id, message, created_at)
-		VALUES (?, ?, 'failed', ?, ?, ?)`,
-		jobID, string(EventJobFailed), workerID,
-		fmt.Sprintf("Job failed: %s", errMsg), now)
-
-	return false, tx.Commit()
-}
-
-// RetryJob resets a failed, cancelled, or waiting job back to queued so it resumes from its saved messages
-func (s *Storage) RetryJob(ctx context.Context, jobID string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	now := time.Now().UTC()
-	res, err := s.db.ExecContext(ctx, `
-		UPDATE orchestration_jobs
-		SET status = 'queued',
-		    current_stage = 'queued',
-		    retry_count = 0,
-		    error_message = NULL,
-		    claimed_by = NULL,
-		    lease_expires_at = NULL,
-		    completed_at = NULL,
-		    updated_at = ?
-		WHERE id = ? AND status IN ('failed', 'cancelled', 'waiting')`,
-		now, jobID)
-	if err != nil {
-		return err
-	}
-	if rows, _ := res.RowsAffected(); rows == 0 {
-		return ErrJobNotFound
-	}
-
-	_, _ = s.db.ExecContext(ctx, `
-		INSERT INTO orchestration_events (job_id, event_type, phase, message, created_at)
-		VALUES (?, ?, 'queued', 'Job manually re-queued for retry/resume from last saved state', ?)`,
-		jobID, string(EventRetryScheduled), now)
-
-	return nil
-}
-
-// IterateJob appends a human-in-the-loop revision request to an existing job, expands its round/call budgets,
-// and re-queues it so the AI team modifies the existing deliverable without losing prior work.
-func (s *Storage) IterateJob(ctx context.Context, jobID, instructions string, extraRounds, extraCalls int) (*Job, error) {
-	instructions = strings.TrimSpace(instructions)
-	if instructions == "" {
-		return nil, errors.New("revision instructions cannot be empty")
-	}
-	if extraRounds <= 0 {
-		extraRounds = 3
-	}
-	if extraCalls <= 0 {
-		extraCalls = 8
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback()
-
-	var status string
-	var curRound, maxRounds, totalCalls, maxCalls int
-	err = tx.QueryRowContext(ctx, `
-		SELECT status, current_round, max_rounds, total_calls, max_calls
-		FROM orchestration_jobs
-		WHERE id = ?`, jobID).Scan(&status, &curRound, &maxRounds, &totalCalls, &maxCalls)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, ErrJobNotFound
-		}
-		return nil, err
-	}
-	if status == string(StatusRunning) || status == string(StatusQueued) {
-		return nil, errors.New("job is already running or queued; stop it first or wait for the current turn to finish")
-	}
-
-	nextRound := curRound + 1
-	if nextRound < 1 {
-		nextRound = 1
-	}
-	newTurnIndex := totalCalls + 1
-
-	newMaxRounds := maxRounds
-	if nextRound+extraRounds-1 > newMaxRounds {
-		newMaxRounds = nextRound + extraRounds - 1
-	}
-	newMaxCalls := maxCalls
-	if newTurnIndex+extraCalls > newMaxCalls {
-		newMaxCalls = newTurnIndex + extraCalls
-	}
-
-	now := time.Now().UTC()
-
-	// 1. Insert the user's revision instructions into the collaboration transcript
-	_, err = tx.ExecContext(ctx, `
-		INSERT INTO orchestration_messages
-		(job_id, round, turn_index, sender_role, sender_name, provider, model, action, content, completion_summary, raw_response, latency_ms, created_at)
-		VALUES (?, ?, ?, ?, 'Workspace Owner (User)', 'user', 'human-feedback', ?, ?, '', '', 0, ?)`,
-		jobID, nextRound, newTurnIndex, RoleUser, string(ActionRevise), instructions, now)
-	if err != nil {
-		return nil, err
-	}
-
-	// 2. Re-queue the job with expanded limits
-	_, err = tx.ExecContext(ctx, `
-		UPDATE orchestration_jobs
-		SET status = 'queued',
-		    current_stage = 'queued',
-		    current_round = ?,
-		    max_rounds = ?,
-		    total_calls = ?,
-		    max_calls = ?,
-		    retry_count = 0,
-		    error_message = NULL,
-		    claimed_by = NULL,
-		    lease_expires_at = NULL,
-		    completed_at = NULL,
-		    updated_at = ?
-		WHERE id = ?`,
-		nextRound, newMaxRounds, newTurnIndex, newMaxCalls, now, jobID)
-	if err != nil {
-		return nil, err
-	}
-
-	// 3. Record durable audit event
-	shortPreview := instructions
-	if len([]rune(shortPreview)) > 120 {
-		shortPreview = string([]rune(shortPreview)[:120]) + "…"
-	}
-	_, err = tx.ExecContext(ctx, `
-		INSERT INTO orchestration_events (job_id, event_type, phase, message, created_at)
-		VALUES (?, ?, 'queued', ?, ?)`,
-		jobID, string(EventUserRevision),
-		fmt.Sprintf("User requested revision for Round %d: %s", nextRound, shortPreview), now)
-	if err != nil {
-		return nil, err
-	}
-
-	if err := tx.Commit(); err != nil {
-		return nil, err
-	}
-
-	return s.GetJob(ctx, jobID)
-}
-
-// ApplyAuditResult promotes an Auditor message's corrected files to become the job's active execution_result
-func (s *Storage) ApplyAuditResult(ctx context.Context, jobID string, messageID int64) (*Job, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback()
-
-	var content, summary, providerName, modelName string
-	if messageID > 0 {
-		err = tx.QueryRowContext(ctx, `
-			SELECT content, completion_summary, provider, model
-			FROM orchestration_messages
-			WHERE id = ? AND job_id = ? AND sender_role = ?`,
-			messageID, jobID, RoleAuditor).Scan(&content, &summary, &providerName, &modelName)
-	} else {
-		err = tx.QueryRowContext(ctx, `
-			SELECT content, completion_summary, provider, model
-			FROM orchestration_messages
-			WHERE job_id = ? AND sender_role = ?
-			ORDER BY id DESC LIMIT 1`,
-			jobID, RoleAuditor).Scan(&content, &summary, &providerName, &modelName)
-	}
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, errors.New("auditor report not found for this job")
-		}
-		return nil, err
-	}
-
-	finalResult := strings.TrimSpace(content)
-	if strings.TrimSpace(summary) != "" {
-		finalResult = fmt.Sprintf("%s\n\n---\n### Coordinator Completion Summary\n[Verified & Corrected by Independent Auditor %s/%s]\n%s",
-			finalResult, providerName, modelName, strings.TrimSpace(summary))
-	}
-
-	now := time.Now().UTC()
-	_, err = tx.ExecContext(ctx, `
-		UPDATE orchestration_jobs
-		SET execution_result = ?,
-		    status = 'completed',
-		    current_stage = 'completed',
-		    updated_at = ?
-		WHERE id = ?`,
-		finalResult, now, jobID)
-	if err != nil {
-		return nil, err
-	}
-
-	_, err = tx.ExecContext(ctx, `
-		INSERT INTO orchestration_events (job_id, event_type, phase, message, created_at)
-		VALUES (?, ?, 'completed', ?, ?)`,
-		jobID, string(EventAuditApplied),
-		fmt.Sprintf("Applied corrected deliverable from Independent Auditor (%s/%s)", providerName, modelName), now)
-	if err != nil {
-		return nil, err
-	}
-
-	if err := tx.Commit(); err != nil {
-		return nil, err
-	}
-
-	return s.GetJob(ctx, jobID)
-}
-
-// CancelJob marks a job cancelled and informs workers
-func (s *Storage) CancelJob(ctx context.Context, jobID string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	now := time.Now().UTC()
-	res, err := s.db.ExecContext(ctx, `
-		UPDATE orchestration_jobs
-		SET status = 'cancelled',
-		    current_stage = 'cancelled',
-		    completed_at = ?,
-		    lease_expires_at = NULL,
-		    updated_at = ?
-		WHERE id = ? AND status IN ('queued', 'running', 'waiting')`,
-		now, now, jobID)
-	if err != nil {
-		return err
-	}
-	if rows, _ := res.RowsAffected(); rows == 0 {
-		var curStatus string
-		if e := s.db.QueryRowContext(ctx, `SELECT status FROM orchestration_jobs WHERE id = ?`, jobID).Scan(&curStatus); e == nil && curStatus == string(StatusCancelled) {
-			return nil
-		}
-		return ErrJobNotFound
-	}
-
-	_, _ = s.db.ExecContext(ctx, `
-		INSERT INTO orchestration_events (job_id, event_type, phase, message, created_at)
-		VALUES (?, ?, 'cancelled', 'Job cancelled by user request', ?)`,
-		jobID, string(EventJobCancelled), now)
-
-	return nil
-}
-
-// GetJob returns a job by ID
-func (s *Storage) GetJob(ctx context.Context, jobID string) (*Job, error) {
+func (s *Storage) GetJob(ctx context.Context, id string) (*Job, error) {
 	var j Job
-	var stage, claimedBy, execResult, errMsg sql.NullString
-	var leaseExpires, startedAt, completedAt sql.NullTime
-
-	err := s.db.QueryRowContext(ctx, `
-		SELECT id, task, status, current_stage, max_rounds, max_calls, current_round, total_calls,
-		       retry_count, max_retries, claimed_by, lease_expires_at, metadata,
-		       execution_result, error_message, created_at, updated_at, started_at, completed_at
-		FROM orchestration_jobs
-		WHERE id = ?`, jobID).Scan(
-		&j.ID, &j.Task, &j.Status, &stage, &j.MaxRounds, &j.MaxCalls, &j.CurrentRound, &j.TotalCalls,
-		&j.RetryCount, &j.MaxRetries, &claimedBy, &leaseExpires, &j.Metadata,
-		&execResult, &errMsg, &j.CreatedAt, &j.UpdatedAt, &startedAt, &completedAt)
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, task, status, current_stage, current_round, max_rounds, total_calls, max_calls, retry_count, max_retries, error_message, execution_result, metadata, created_at, updated_at 
+		 FROM orch_jobs WHERE id=?`, id,
+	).Scan(&j.ID, &j.Task, &j.Status, &j.CurrentStage, &j.CurrentRound, &j.MaxRounds, &j.TotalCalls, &j.MaxCalls, &j.RetryCount, &j.MaxRetries, &j.ErrorMessage, &j.ExecutionResult, &j.Metadata, &j.CreatedAt, &j.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrJobNotFound
 		}
 		return nil, err
 	}
-
-	if stage.Valid && stage.String != "" {
-		j.CurrentStage = WorkflowStage(stage.String)
-	} else {
-		j.CurrentStage = WorkflowStage(j.Status)
-	}
-	if claimedBy.Valid {
-		j.ClaimedBy = claimedBy.String
-	}
-	if execResult.Valid {
-		j.ExecutionResult = execResult.String
-	}
-	if errMsg.Valid {
-		j.ErrorMessage = errMsg.String
-	}
-	if leaseExpires.Valid {
-		t := leaseExpires.Time
-		j.LeaseExpiresAt = &t
-	}
-	if startedAt.Valid {
-		t := startedAt.Time
-		j.StartedAt = &t
-	}
-	if completedAt.Valid {
-		t := completedAt.Time
-		j.CompletedAt = &t
-	}
-
 	return &j, nil
 }
 
-// GetJobDetails returns the job alongside its participants, collaboration messages, and audit events
-func (s *Storage) GetJobDetails(ctx context.Context, jobID string) (*JobDetails, error) {
-	job, err := s.GetJob(ctx, jobID)
-	if err != nil {
-		return nil, err
-	}
-	parts, err := s.GetParticipants(ctx, jobID)
-	if err != nil {
-		return nil, err
-	}
-	msgs, err := s.GetCollaborationMessages(ctx, jobID)
-	if err != nil {
-		return nil, err
-	}
-	evts, err := s.GetJobEvents(ctx, jobID)
-	if err != nil {
-		return nil, err
-	}
-	return &JobDetails{
-		Job:          job,
-		Participants: parts,
-		Messages:     msgs,
-		Events:       evts,
-	}, nil
-}
-
-// ListJobs retrieves paginated orchestration jobs
 func (s *Storage) ListJobs(ctx context.Context, limit, offset int, statusFilter string) ([]Job, error) {
-	if limit <= 0 {
-		limit = 50
-	}
-	if limit > 100 {
-		limit = 100
-	}
-	if offset < 0 {
-		offset = 0
-	}
-
 	var rows *sql.Rows
 	var err error
-
 	if statusFilter != "" {
-		rows, err = s.db.QueryContext(ctx, `
-			SELECT id, task, status, current_stage, max_rounds, max_calls, current_round, total_calls,
-			       retry_count, max_retries, claimed_by, lease_expires_at, metadata,
-			       execution_result, error_message, created_at, updated_at, started_at, completed_at
-			FROM orchestration_jobs
-			WHERE status = ?
-			ORDER BY created_at DESC
-			LIMIT ? OFFSET ?`, statusFilter, limit, offset)
+		rows, err = s.db.QueryContext(ctx,
+			`SELECT id, task, status, current_stage, current_round, max_rounds, total_calls, max_calls, retry_count, max_retries, error_message, execution_result, metadata, created_at, updated_at 
+			 FROM orch_jobs WHERE status=? ORDER BY created_at DESC LIMIT ? OFFSET ?`, statusFilter, limit, offset)
 	} else {
-		rows, err = s.db.QueryContext(ctx, `
-			SELECT id, task, status, current_stage, max_rounds, max_calls, current_round, total_calls,
-			       retry_count, max_retries, claimed_by, lease_expires_at, metadata,
-			       execution_result, error_message, created_at, updated_at, started_at, completed_at
-			FROM orchestration_jobs
-			ORDER BY created_at DESC
-			LIMIT ? OFFSET ?`, limit, offset)
+		rows, err = s.db.QueryContext(ctx,
+			`SELECT id, task, status, current_stage, current_round, max_rounds, total_calls, max_calls, retry_count, max_retries, error_message, execution_result, metadata, created_at, updated_at 
+			 FROM orch_jobs ORDER BY created_at DESC LIMIT ? OFFSET ?`, limit, offset)
 	}
-
 	if err != nil {
 		return nil, err
 	}
@@ -987,73 +149,318 @@ func (s *Storage) ListJobs(ctx context.Context, limit, offset int, statusFilter 
 	var jobs []Job
 	for rows.Next() {
 		var j Job
-		var stage, claimedBy, execResult, errMsg sql.NullString
-		var leaseExpires, startedAt, completedAt sql.NullTime
-
-		if err := rows.Scan(
-			&j.ID, &j.Task, &j.Status, &stage, &j.MaxRounds, &j.MaxCalls, &j.CurrentRound, &j.TotalCalls,
-			&j.RetryCount, &j.MaxRetries, &claimedBy, &leaseExpires, &j.Metadata,
-			&execResult, &errMsg, &j.CreatedAt, &j.UpdatedAt, &startedAt, &completedAt); err == nil {
-			if stage.Valid && stage.String != "" {
-				j.CurrentStage = WorkflowStage(stage.String)
-			} else {
-				j.CurrentStage = WorkflowStage(j.Status)
-			}
-			if claimedBy.Valid {
-				j.ClaimedBy = claimedBy.String
-			}
-			if execResult.Valid {
-				j.ExecutionResult = execResult.String
-			}
-			if errMsg.Valid {
-				j.ErrorMessage = errMsg.String
-			}
-			if leaseExpires.Valid {
-				t := leaseExpires.Time
-				j.LeaseExpiresAt = &t
-			}
-			if startedAt.Valid {
-				t := startedAt.Time
-				j.StartedAt = &t
-			}
-			if completedAt.Valid {
-				t := completedAt.Time
-				j.CompletedAt = &t
-			}
+		if rows.Scan(&j.ID, &j.Task, &j.Status, &j.CurrentStage, &j.CurrentRound, &j.MaxRounds, &j.TotalCalls, &j.MaxCalls, &j.RetryCount, &j.MaxRetries, &j.ErrorMessage, &j.ExecutionResult, &j.Metadata, &j.CreatedAt, &j.UpdatedAt) == nil {
 			jobs = append(jobs, j)
 		}
 	}
 	return jobs, nil
 }
 
-// GetJobEvents returns full chronological events for audit or stream catchup
-func (s *Storage) GetJobEvents(ctx context.Context, jobID string) ([]Event, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, job_id, event_type, phase, worker_id, message, payload, created_at
-		FROM orchestration_events
-		WHERE job_id = ?
-		ORDER BY id ASC`, jobID)
+func (s *Storage) GetJobDetails(ctx context.Context, id string) (*JobDetails, error) {
+	job, err := s.GetJob(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	participants, _ := s.GetParticipants(ctx, id)
+	messages, _ := s.GetCollaborationMessages(ctx, id)
+	events, _ := s.GetJobEvents(ctx, id)
+
+	return &JobDetails{
+		Job:          *job,
+		Participants: participants,
+		Messages:     messages,
+		Events:       events,
+	}, nil
+}
+
+func (s *Storage) SaveParticipants(ctx context.Context, jobID string, participants []Participant) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM orch_participants WHERE job_id=?`, jobID); err != nil {
+		return err
+	}
+
+	stmt, err := tx.PrepareContext(ctx, `INSERT INTO orch_participants(job_id, role, name, provider, model, sort_order) VALUES(?, ?, ?, ?, ?, ?)`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	for idx, p := range participants {
+		sortOrder := p.SortOrder
+		if sortOrder == 0 && idx > 0 {
+			sortOrder = idx
+		}
+		name := p.Name
+		if name == "" {
+			switch p.Role {
+			case RoleCoordinator:
+				name = "Coordinator / Architect"
+			case RoleAuditor:
+				name = "Quality Assurance / Auditor"
+			default:
+				name = "Worker / Developer"
+			}
+		}
+		_, err := stmt.ExecContext(ctx, jobID, p.Role, name, p.Provider, p.Model, sortOrder)
+		if err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (s *Storage) GetParticipants(ctx context.Context, jobID string) ([]Participant, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, job_id, role, name, provider, model, sort_order FROM orch_participants WHERE job_id=? ORDER BY sort_order ASC`, jobID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	var events []Event
+	var out []Participant
 	for rows.Next() {
-		var e Event
-		var wID, msg, payload sql.NullString
-		if err := rows.Scan(&e.ID, &e.JobID, &e.EventType, &e.Phase, &wID, &msg, &payload, &e.CreatedAt); err == nil {
-			if wID.Valid {
-				e.WorkerID = wID.String
-			}
-			if msg.Valid {
-				e.Message = msg.String
-			}
-			if payload.Valid {
-				e.Payload = payload.String
-			}
-			events = append(events, e)
+		var p Participant
+		if rows.Scan(&p.ID, &p.JobID, &p.Role, &p.Name, &p.Provider, &p.Model, &p.SortOrder) == nil {
+			out = append(out, p)
 		}
 	}
-	return events, nil
+	return out, nil
+}
+
+func (s *Storage) SaveCollaborationMessage(ctx context.Context, m CollaborationMessage) (*CollaborationMessage, error) {
+	res, err := s.db.ExecContext(ctx,
+		`INSERT INTO orch_messages(job_id, round, turn_index, sender_role, sender_name, provider, model, action, content, completion_summary, raw_response, latency_ms)
+		 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		m.JobID, m.Round, m.TurnIndex, m.SenderRole, m.SenderName, m.Provider, m.Model, m.Action, m.Content, m.CompletionSummary, m.RawResponse, m.LatencyMs,
+	)
+	if err != nil {
+		return nil, err
+	}
+	id, _ := res.LastInsertId()
+	m.ID = id
+	return &m, nil
+}
+
+func (s *Storage) GetCollaborationMessages(ctx context.Context, jobID string) ([]CollaborationMessage, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, job_id, round, turn_index, sender_role, sender_name, provider, model, action, content, completion_summary, raw_response, latency_ms, created_at
+		 FROM orch_messages WHERE job_id=? ORDER BY turn_index ASC, id ASC`, jobID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []CollaborationMessage
+	for rows.Next() {
+		var m CollaborationMessage
+		if rows.Scan(&m.ID, &m.JobID, &m.Round, &m.TurnIndex, &m.SenderRole, &m.SenderName, &m.Provider, &m.Model, &m.Action, &m.Content, &m.CompletionSummary, &m.RawResponse, &m.LatencyMs, &m.CreatedAt) == nil {
+			out = append(out, m)
+		}
+	}
+	return out, nil
+}
+
+func (s *Storage) RecordEvent(ctx context.Context, jobID, eventType, phase, workerID, message, payloadJSON string) error {
+	if strings.TrimSpace(payloadJSON) == "" {
+		payloadJSON = "{}"
+	}
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO orch_events(job_id, event_type, phase, worker_id, message, payload_json) VALUES(?, ?, ?, ?, ?, ?)`,
+		jobID, eventType, phase, workerID, message, payloadJSON,
+	)
+	return err
+}
+
+func (s *Storage) GetJobEvents(ctx context.Context, jobID string) ([]Event, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, job_id, event_type, phase, worker_id, message, payload_json, created_at FROM orch_events WHERE job_id=? ORDER BY id ASC`, jobID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []Event
+	for rows.Next() {
+		var ev Event
+		if rows.Scan(&ev.ID, &ev.JobID, &ev.EventType, &ev.Phase, &ev.WorkerID, &ev.Message, &ev.PayloadJSON, &ev.CreatedAt) == nil {
+			out = append(out, ev)
+		}
+	}
+	return out, nil
+}
+
+func (s *Storage) UpdateJobStage(ctx context.Context, jobID, stage string, round, totalCalls int) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE orch_jobs SET status='running', current_stage=?, current_round=?, total_calls=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`,
+		stage, round, totalCalls, jobID,
+	)
+	return err
+}
+
+func (s *Storage) CompleteJob(ctx context.Context, jobID, result string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE orch_jobs SET status='completed', current_stage='completed', execution_result=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`,
+		result, jobID,
+	)
+	return err
+}
+
+func (s *Storage) FailJob(ctx context.Context, jobID, errMsg string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE orch_jobs SET status='failed', current_stage='failed', error_message=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`,
+		errMsg, jobID,
+	)
+	return err
+}
+
+func (s *Storage) CancelJob(ctx context.Context, jobID string) error {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE orch_jobs SET status='cancelled', current_stage='cancelled', updated_at=CURRENT_TIMESTAMP WHERE id=? AND status IN ('queued', 'running', 'waiting', 'paused')`,
+		jobID,
+	)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrJobNotFound
+	}
+	_ = s.RecordEvent(ctx, jobID, "job_cancelled", "cancelled", "user", "Job cancelled by user", "{}")
+	return nil
+}
+
+// PauseJob sets a pause flag and transitions job status to 'paused' after current turn finishes
+func (s *Storage) PauseJob(ctx context.Context, jobID string) error {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE orch_jobs SET status='paused', current_stage='paused', updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='running'`,
+		jobID,
+	)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrJobNotFound
+	}
+	_ = s.RecordEvent(ctx, jobID, "job_paused", "paused", "user", "Job paused by user", "{}")
+	return nil
+}
+
+func (s *Storage) RetryJob(ctx context.Context, jobID string) error {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE orch_jobs SET status='queued', current_stage='queued', error_message='', updated_at=CURRENT_TIMESTAMP WHERE id=? AND status IN ('failed', 'cancelled', 'waiting', 'paused')`,
+		jobID,
+	)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrJobNotFound
+	}
+	_ = s.RecordEvent(ctx, jobID, "retry_scheduled", "queued", "user", "Job re-queued and resumed by user", "{}")
+	return nil
+}
+
+func (s *Storage) IsJobCancelled(ctx context.Context, jobID string) bool {
+	var st string
+	err := s.db.QueryRowContext(ctx, `SELECT status FROM orch_jobs WHERE id=?`, jobID).Scan(&st)
+	return err == nil && (st == "cancelled" || st == "failed")
+}
+
+func (s *Storage) IsJobPaused(ctx context.Context, jobID string) bool {
+	var st string
+	err := s.db.QueryRowContext(ctx, `SELECT status FROM orch_jobs WHERE id=?`, jobID).Scan(&st)
+	return err == nil && st == "paused"
+}
+
+func (s *Storage) IterateJob(ctx context.Context, jobID, instruction string, extraRounds, extraCalls int) (*Job, error) {
+	job, err := s.GetJob(ctx, jobID)
+	if err != nil {
+		return nil, err
+	}
+
+	maxRounds := job.MaxRounds + extraRounds
+	maxCalls := job.MaxCalls + extraCalls
+
+	history, err := s.GetCollaborationMessages(ctx, jobID)
+	if err != nil {
+		return nil, err
+	}
+	nextTurn := len(history) + 1
+
+	_, err = s.SaveCollaborationMessage(ctx, CollaborationMessage{
+		JobID:      jobID,
+		Round:      job.CurrentRound + 1,
+		TurnIndex:  nextTurn,
+		SenderRole: RoleUser,
+		SenderName: "Workspace Owner",
+		Provider:   "human",
+		Model:      "revision",
+		Action:     ActionRevise,
+		Content:    instruction,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	_, err = s.db.ExecContext(ctx,
+		`UPDATE orch_jobs SET status='queued', current_stage='queued', max_rounds=?, max_calls=?, error_message='', updated_at=CURRENT_TIMESTAMP WHERE id=?`,
+		maxRounds, maxCalls, jobID,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	_ = s.RecordEvent(ctx, jobID, "user_revision_requested", "queued", "user",
+		fmt.Sprintf("User submitted revision instruction: %s", truncateString(instruction, 140)),
+		marshalPayload(map[string]any{"instruction": instruction, "extra_rounds": extraRounds}))
+
+	return s.GetJob(ctx, jobID)
+}
+
+func (s *Storage) ApplyAuditResult(ctx context.Context, jobID string, messageID int64) (*Job, error) {
+	var auditContent string
+	err := s.db.QueryRowContext(ctx, `SELECT content FROM orch_messages WHERE id=? AND job_id=? AND sender_role='auditor'`, messageID, jobID).Scan(&auditContent)
+	if err != nil {
+		return nil, errors.New("auditor report message not found")
+	}
+
+	history, err := s.GetCollaborationMessages(ctx, jobID)
+	if err != nil {
+		return nil, err
+	}
+	nextTurn := len(history) + 1
+	job, err := s.GetJob(ctx, jobID)
+	if err != nil {
+		return nil, err
+	}
+
+	_, _ = s.SaveCollaborationMessage(ctx, CollaborationMessage{
+		JobID:      jobID,
+		Round:      job.CurrentRound,
+		TurnIndex:  nextTurn,
+		SenderRole: RoleWorker,
+		SenderName: "Worker / Developer (Applied Auditor Fixes)",
+		Provider:   "auditor-apply",
+		Model:      "fix-applied",
+		Action:     ActionContinue,
+		Content:    auditContent,
+	})
+
+	_, _ = s.db.ExecContext(ctx, `UPDATE orch_jobs SET execution_result=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`, auditContent, jobID)
+	_ = s.RecordEvent(ctx, jobID, "audit_applied", "completed", "user", "Independent auditor corrected files applied to project deliverable", "{}")
+
+	return s.GetJob(ctx, jobID)
+}
+
+func truncateString(s string, max int) string {
+	s = strings.TrimSpace(s)
+	if len([]rune(s)) <= max {
+		return s
+	}
+	return string([]rune(s)[:max]) + "…"
 }
