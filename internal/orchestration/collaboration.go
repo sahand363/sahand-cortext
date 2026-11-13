@@ -347,8 +347,12 @@ func (e *CollaborationEngine) ProcessJob(ctx context.Context, job *Job, helper E
 		}
 		history = append(history, *savedMsg)
 
+		nextWorkerNum := 2
+		if len(workers) > 0 && workers[0].SortOrder >= 0 {
+			nextWorkerNum = workers[0].SortOrder + 1
+		}
 		_ = e.storage.RecordEvent(ctx, job.ID, EventPlanGenerated, string(StagePlanning), helper.WorkerID(),
-			fmt.Sprintf("Coordinator #%d (%s/%s) finished the implementation plan in %.1fs — passing job to Worker #%d.", usedCoord.SortOrder+1, usedCoord.Provider, usedCoord.Model, float64(latency)/1000.0, len(workers)>0 && workers[0].SortOrder >= 0 ? workers[0].SortOrder+1 : 2),
+			fmt.Sprintf("Coordinator #%d (%s/%s) finished the implementation plan in %.1fs — passing job to Worker #%d.", usedCoord.SortOrder+1, usedCoord.Provider, usedCoord.Model, float64(latency)/1000.0, nextWorkerNum),
 			marshalPayload(map[string]any{"round": 1, "action": parsed.Action, "latency_ms": latency, "provider": usedCoord.Provider, "model": usedCoord.Model, "sort_order": usedCoord.SortOrder}))
 
 		if parsed.Action == ActionComplete {
