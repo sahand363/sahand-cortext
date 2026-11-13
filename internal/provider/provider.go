@@ -16,19 +16,16 @@ import (
 	"time"
 )
 
-// Message represents a normalized conversational turn
 type Message struct {
-	Role    string `json:"role"` // "system", "user", "assistant"
+	Role    string `json:"role"`
 	Content string `json:"content"`
 }
 
-// CallOpts holds optional parameters for model invocations
 type CallOpts struct {
 	MaxTokens    int
 	DisableRetry bool
 }
 
-// Router handles model calls across Google Gemini, OpenRouter, CodeCraft API, and AIPrime
 type Router struct {
 	Client            *http.Client
 	GeminiBaseURL     string
@@ -40,10 +37,8 @@ type Router struct {
 func NewRouter() *Router {
 	dialer := &net.Dialer{
 		Timeout:   15 * time.Second,
-		KeepAlive: 30 * time.Second,
+		KeepAlive: 15 * time.Second,
 	}
-	// Force IPv4 (tcp4) + HTTP/1.1 (disabling HTTP/2 connection multiplexing)
-	// so a slow/stalled upstream request on Cloudflare never poisons subsequent requests.
 	transport := &http.Transport{
 		Proxy: http.ProxyFromEnvironment,
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -51,11 +46,11 @@ func NewRouter() *Router {
 		},
 		ForceAttemptHTTP2:     false,
 		TLSNextProto:          make(map[string]func(authority string, c *tls.Conn) http.RoundTripper),
-		DisableKeepAlives:     true,
-		MaxIdleConns:          10,
-		IdleConnTimeout:       30 * time.Second,
+		DisableKeepAlives:     false,
+		MaxIdleConns:          20,
+		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   15 * time.Second,
-		ResponseHeaderTimeout: 600 * time.Second, // 10 minutes for heavy reasoning & multi-file code generation
+		ResponseHeaderTimeout: 600 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
 	}
 
@@ -144,7 +139,6 @@ func isRetryable(err error) bool {
 		strings.Contains(msg, "eof")
 }
 
-// Call invokes the appropriate provider with structured history and exponential backoff
 func (r *Router) Call(ctx context.Context, provider, key, model string, messages []Message, opts CallOpts) (string, int64, error) {
 	provider = NormalizeProvider(provider)
 	if strings.TrimSpace(key) == "" {
@@ -185,11 +179,11 @@ func (r *Router) Call(ctx context.Context, provider, key, model string, messages
 			if baseURL == "" {
 				baseURL = "https://api.aiprime.shop/v1/chat/completions"
 			}
-			// Do not send max_tokens cap to AIPrime, and enable SSE streaming over HTTP/1.1
-			// so Cloudflare never drops long code-generation turns at 100 seconds.
 			aiPrimeOpts := opts
 			aiPrimeOpts.MaxTokens = 0
-			reply, err = r.callOpenAI(ctx, baseURL, key, model, messages, aiPrimeOpts, "AIPrime", false, true)
+			// Use standard non-streaming JSON first; if proxy resets at 30s, fallback to stream
+			streamMode := attempt > 0
+			reply, err = r.callOpenAI(ctx, baseURL, key, model, messages, aiPrimeOpts, "AIPrime", false, streamMode)
 		default:
 			reply, err = r.callGemini(ctx, key, model, messages, opts)
 		}
@@ -209,7 +203,6 @@ func (r *Router) Call(ctx context.Context, provider, key, model string, messages
 	return "", totalLatency, lastErr
 }
 
-// callGemini formats structured conversation history for Google Gemini
 func (r *Router) callGemini(ctx context.Context, key, model string, messages []Message, opts CallOpts) (string, error) {
 	cleanModel := strings.TrimPrefix(strings.TrimSpace(model), "models/")
 	if cleanModel == "" {
@@ -338,7 +331,6 @@ func (r *Router) callGemini(ctx context.Context, key, model string, messages []M
 	return out, nil
 }
 
-// callOpenAI formats standard messages array for OpenAI-compatible gateways (supporting both standard JSON and HTTP/1.1 SSE streaming)
 func (r *Router) callOpenAI(ctx context.Context, endpoint, key, model string, messages []Message, opts CallOpts, label string, openRouterHeaders bool, stream bool) (string, error) {
 	type oaMsg struct {
 		Role    string `json:"role"`
@@ -388,14 +380,11 @@ func (r *Router) callOpenAI(ctx context.Context, endpoint, key, model string, me
 		req.Header.Set("Accept", "application/json")
 	}
 	req.Header.Set("Authorization", "Bearer "+key)
-	req.Header.Set("Connection", "close")
 	if openRouterHeaders {
 		req.Header.Set("HTTP-Referer", "https://github.com/sahand363/sahand-cortext")
 		req.Header.Set("X-Title", "Sahand-CorText")
-		req.Header.Set("User-Agent", "Sahand-CorText/0.5.4")
-	} else {
-		req.Header.Set("User-Agent", "curl/8.5.0")
 	}
+	req.Header.Set("User-Agent", "Sahand-CorText/0.5.5")
 
 	resp, err := r.Client.Do(req)
 	if err != nil {
@@ -419,7 +408,6 @@ func (r *Router) callOpenAI(ctx context.Context, endpoint, key, model string, me
 		return "", fmt.Errorf("empty response body from %s model %s", label, model)
 	}
 
-	// If server returned SSE stream lines without text/event-stream Content-Type header
 	if bytes.HasPrefix(trimmedRaw, []byte("data:")) {
 		return parseOpenAISSEStream(bytes.NewReader(trimmedRaw), label, model)
 	}
@@ -460,7 +448,6 @@ func (r *Router) callOpenAI(ctx context.Context, endpoint, key, model string, me
 
 func parseOpenAISSEStream(r io.Reader, label, model string) (string, error) {
 	scanner := bufio.NewScanner(r)
-	// Allow up to 8 MB per SSE line for large code blocks
 	scanner.Buffer(make([]byte, 64*1024), 8*1024*1024)
 
 	var contentSB strings.Builder
@@ -523,7 +510,6 @@ func parseOpenAISSEStream(r io.Reader, label, model string) (string, error) {
 		out = strings.TrimSpace(reasoningSB.String())
 	}
 
-	// If stream broke mid-way AFTER we already received substantial deliverable content, salvage it
 	if err := scanner.Err(); err != nil {
 		if len(out) > 200 {
 			return out, nil
@@ -531,7 +517,6 @@ func parseOpenAISSEStream(r io.Reader, label, model string) (string, error) {
 		return "", fmt.Errorf("%s stream error: %w", label, err)
 	}
 
-	// Fallback if gateway returned a single non-SSE JSON object despite text/event-stream header
 	if out == "" && rawFallbackSB.Len() > 0 {
 		rawBytes := []byte(rawFallbackSB.String())
 		var single struct {

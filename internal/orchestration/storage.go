@@ -346,7 +346,8 @@ func (s *Storage) UpdateJobStage(ctx context.Context, jobID string, stage Workfl
 
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE orchestration_jobs
-		SET current_stage = ?, current_round = ?, total_calls = ?, updated_at = ?
+		SET status = CASE WHEN status = 'pausing' THEN 'pausing' ELSE 'running' END,
+		    current_stage = ?, current_round = ?, total_calls = ?, updated_at = ?
 		WHERE id = ? AND status NOT IN ('cancelled', 'completed')`,
 		string(stage), currentRound, totalCalls, time.Now().UTC(), jobID)
 	return err
@@ -501,6 +502,10 @@ func (s *Storage) RecordEvent(ctx context.Context, jobID string, evtType EventTy
 
 // CompleteJob transitions status to completed with final result
 func (s *Storage) CompleteJob(ctx context.Context, jobID, workerID, result string) error {
+	if s.FinalizePauseIfRequested(ctx, jobID) {
+		return nil
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -846,7 +851,7 @@ func (s *Storage) CancelJob(ctx context.Context, jobID string) error {
 		    completed_at = ?,
 		    lease_expires_at = NULL,
 		    updated_at = ?
-		WHERE id = ? AND status IN ('queued', 'running', 'waiting', 'paused')`,
+		WHERE id = ? AND status IN ('queued', 'running', 'waiting', 'pausing', 'paused')`,
 		now, now, jobID)
 	if err != nil {
 		return err
@@ -1058,8 +1063,8 @@ func (s *Storage) GetJobEvents(ctx context.Context, jobID string) ([]Event, erro
 	return events, nil
 }
 
-// PauseJob marks a running job as paused and releases its worker lease
-// so the worker pool will not pick it up again until it is resumed.
+// PauseJob marks a running job as 'pausing' — the worker finishes its current
+// turn, and FinalizePauseIfRequested flips it to 'paused' once the worker exits.
 func (s *Storage) PauseJob(ctx context.Context, jobID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1067,10 +1072,7 @@ func (s *Storage) PauseJob(ctx context.Context, jobID string) error {
 	now := time.Now().UTC()
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE orchestration_jobs
-		SET status = 'paused',
-		    current_stage = 'paused',
-		    claimed_by = NULL,
-		    lease_expires_at = NULL,
+		SET status = 'pausing',
 		    updated_at = ?
 		WHERE id = ? AND status = 'running'`,
 		now, jobID)
@@ -1083,14 +1085,46 @@ func (s *Storage) PauseJob(ctx context.Context, jobID string) error {
 
 	_, _ = s.db.ExecContext(ctx, `
 		INSERT INTO orchestration_events (job_id, event_type, phase, worker_id, message, created_at)
-		VALUES (?, ?, 'paused', 'user', 'Job paused by user', ?)`,
+		VALUES (?, ?, 'pausing', 'user', 'Pause requested — waiting for current AI turn to finish before pausing', ?)`,
 		jobID, "job_paused", now)
 
 	return nil
 }
 
-func (s *Storage) IsJobPaused(ctx context.Context, jobID string) bool {
+// FinalizePauseIfRequested flips a 'pausing' job to 'paused' (releasing its
+// worker lease) once the worker goroutine has exited. Returns true when the
+// job is pausing or paused. It takes no lock — CompleteJob calls it while
+// holding s.mu — so the event is written with a direct INSERT, not
+// RecordEvent (which locks s.mu and would deadlock).
+func (s *Storage) FinalizePauseIfRequested(ctx context.Context, jobID string) bool {
 	var st string
 	err := s.db.QueryRowContext(ctx, `SELECT status FROM orchestration_jobs WHERE id = ?`, jobID).Scan(&st)
-	return err == nil && st == "paused"
+	if err != nil || (st != "pausing" && st != "paused") {
+		return false
+	}
+	if st == "pausing" {
+		now := time.Now().UTC()
+		res, err := s.db.ExecContext(ctx, `
+			UPDATE orchestration_jobs
+			SET status = 'paused',
+			    current_stage = 'paused',
+			    claimed_by = NULL,
+			    lease_expires_at = NULL,
+			    updated_at = ?
+			WHERE id = ? AND status = 'pausing'`,
+			now, jobID)
+		if err == nil {
+			if n, _ := res.RowsAffected(); n > 0 {
+				_, _ = s.db.ExecContext(ctx, `
+					INSERT INTO orchestration_events (job_id, event_type, phase, worker_id, message, created_at)
+					VALUES (?, ?, 'paused', 'system', 'Current AI turn finished — job is now safely paused', ?)`,
+					jobID, "job_paused", now)
+			}
+		}
+	}
+	return true
+}
+
+func (s *Storage) IsJobPaused(ctx context.Context, jobID string) bool {
+	return s.FinalizePauseIfRequested(ctx, jobID)
 }

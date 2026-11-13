@@ -1902,7 +1902,7 @@ async function fetchAndRenderOrchJob(jobId) {
       renderOrchJobsList();
     }
 
-    if (details.status === "queued" || details.status === "running" || details.status === "waiting") {
+    if (details.status === "queued" || details.status === "running" || details.status === "waiting" || details.status === "pausing") {
       orchPollTimer = setTimeout(() => fetchAndRenderOrchJob(jobId), 1500);
     }
   } catch (err) {
@@ -2114,7 +2114,8 @@ function renderOrchJobDetails(d) {
     $("orch-stat-latency-sub").textContent = `${totalLatencyMs.toLocaleString()} ms total API time`;
   }
 
-  const isActive = status === "queued" || status === "running" || status === "waiting";
+  const isPausing = status === "pausing";
+  const isActive = status === "queued" || status === "running" || status === "waiting" || isPausing;
   const isPaused = status === "paused";
   const canRetryOrPlay = status === "failed" || status === "cancelled" || status === "waiting" || isPaused;
 
@@ -2126,9 +2127,9 @@ function renderOrchJobDetails(d) {
 
   const pauseBtn = $("orch-pause-btn");
   if (pauseBtn) {
-    pauseBtn.classList.toggle("hidden", status !== "running");
-    pauseBtn.disabled = false;
-    pauseBtn.textContent = "⏸ Pause After Current Turn";
+    pauseBtn.classList.toggle("hidden", !(status === "running" || isPausing));
+    pauseBtn.disabled = isPausing;
+    pauseBtn.textContent = isPausing ? "⏳ Pausing after current AI finishes…" : "⏸ Pause After Current Turn";
     pauseBtn.onclick = () => pauseActiveOrchJob(d.id);
   }
 
@@ -2157,7 +2158,10 @@ function renderOrchJobDetails(d) {
     const activeProvName = invokeMeta.provider ? (providerCatalog[invokeMeta.provider]?.name || invokeMeta.provider) : "";
     const activeModelLabel = invokeMeta.model ? `${activeProvName} · ${invokeMeta.model}` : "";
 
-    if (isPaused) {
+    if (isPausing) {
+      $("orch-active-headline").textContent = "⏳ Finishing current AI turn before pausing…";
+      $("orch-active-subline").textContent = "Waiting for the active model to complete its response so no tokens are wasted. Play will unlock automatically.";
+    } else if (isPaused) {
       $("orch-active-headline").textContent = "⏸ Collaboration Paused — Ready to Swap Models or Press Play";
       $("orch-active-subline").textContent = "You can change any upcoming AI model in the participant cards below (except the one that just answered), then click ▶ Play / Continue Task.";
     } else if (status === "queued") {
