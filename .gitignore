@@ -1,4 +1,6 @@
-config.json
-data/
-nokhodi-chat
-*.log
+/bin/
+/data/
+/.env
+*.db
+*.db-shm
+*.db-wal
