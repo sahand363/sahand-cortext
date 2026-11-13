@@ -934,6 +934,16 @@ func buildCondensedDiscussionSummary(history []CollaborationMessage, maxChars in
 	return truncateText(sb.String(), maxChars)
 }
 
+// hasValidCodeDeliverable checks whether a worker response actually contains structured files or code blocks
+// so truncated planning monologues are never injected into subsequent rounds as "Current Draft Files".
+func hasValidCodeDeliverable(text string) bool {
+	t := strings.TrimSpace(text)
+	if t == "" {
+		return false
+	}
+	return strings.Contains(t, "=== FILE:") || strings.Contains(t, "```")
+}
+
 func BuildCoordinatorPlanContext(task string, coordinator Participant, maxChars int) []provider.Message {
 	baseSys := strings.TrimSpace(coordinator.SystemPrompt)
 	if baseSys == "" {
@@ -948,7 +958,8 @@ Your responsibilities:
 3. If the task requires a software project or deployment, instruct the Worker to output every required file using explicit file headers:
    === FILE: filename.ext ===
    (complete file content)
-4. Respond using ONLY valid JSON matching this schema:
+4. IMPORTANT FOR BINARY ASSETS (.png, .wav, .ogg): LLMs cannot reliably type raw binary image/audio bytes in text without exhausting token limits. If the project requires sprites, textures, or audio, instruct the Worker to either generate them procedurally in code at runtime OR provide a compact generator script, while keeping all text-based scene/code files 100% complete.
+5. Respond using ONLY valid JSON matching this schema:
 {
   "action": "continue",
   "message": "Your detailed implementation plan, file manifest, and instructions for the Worker",
@@ -984,8 +995,9 @@ func BuildWorkerExecutionContext(task, plan, latestCodebase string, history []Co
 Your responsibilities:
 1. Follow the Coordinator's implementation plan, QA Auditor findings, review instructions, and any direct User Revision Requests carefully.
 2. Produce complete, working, self-contained deliverables with zero placeholders or "// TODO" comments. Never omit unchanged files—always output the complete set of project files so the user's ZIP download has everything needed.
-3. CRITICAL REVISION RULE: When existing project files are provided under "CURRENT PROJECT FILES TO MODIFY", you MUST NOT build a different program from scratch. Keep the existing architecture, styling, and working features intact, and apply the requested modifications or new features directly to those files.
-4. MULTI-FILE PACKAGING RULE (CRITICAL): Do NOT wrap your code in a JSON object where quotes can break. Instead, output plain text starting with a 1-line summary, followed by EACH project file under its own exact header:
+3. NO PLANNING MONOLOGUES: Do NOT write long internal planning essays, hex/CRC32 calculations, or conversational preamble. Start your response IMMEDIATELY with the SUMMARY line followed by the first === FILE: ... === block.
+4. CRITICAL REVISION RULE: When existing project files are provided under "CURRENT PROJECT FILES TO MODIFY", you MUST NOT build a different program from scratch. Keep the existing architecture, styling, and working features intact, and apply the requested modifications or new features directly to those files.
+5. MULTI-FILE PACKAGING RULE (CRITICAL): Do NOT wrap your code in a JSON object where quotes can break. Instead, output plain text starting with a 1-line summary, followed by EACH project file under its own exact header:
 SUMMARY: Brief summary of the files and features you produced
 === FILE: main.go ===
 (complete Go code here)
@@ -1004,21 +1016,21 @@ SUMMARY: Brief summary of the files and features you produced
 		if incSummary {
 			sb.WriteString(buildCondensedDiscussionSummary(history, 10000) + "\n\n")
 		}
-		if incFullFiles && strings.TrimSpace(latestCodebase) != "" {
+		if incFullFiles && hasValidCodeDeliverable(latestCodebase) {
 			sb.WriteString(fmt.Sprintf("### CURRENT PROJECT FILES TO MODIFY (DO NOT REWRITE FROM SCRATCH — EDIT THESE FILES):\n%s\n\n", truncateText(latestCodebase, 85000)))
 		}
 		sb.WriteString(fmt.Sprintf("### IMPORTANT — LATEST USER REVISION REQUEST:\n%s\n\nModify the existing project above to fulfill this revision request while preserving all existing working functionality. Output all project files in full using === FILE: filename === headers.", latestUserRev))
 	} else {
-		if round > 1 && strings.TrimSpace(latestCodebase) != "" {
+		if round > 1 && hasValidCodeDeliverable(latestCodebase) {
 			sb.WriteString(fmt.Sprintf("### Current Draft Files (Round %d):\n%s\n\n", round-1, truncateText(latestCodebase, 65000)))
 		}
 		if len(history) > 1 {
 			sb.WriteString(formatBoundedHistory(history, 16000))
 		}
 		if round > 1 {
-			sb.WriteString("\nAddress all revision requests from the QA Auditor and Coordinator's latest review, and provide the complete updated deliverable using === FILE: filename === headers for every file.")
+			sb.WriteString("\nAddress all revision requests from the QA Auditor and Coordinator's latest review. Begin IMMEDIATELY with SUMMARY: and output every required project file in full using === FILE: filename === headers.")
 		} else {
-			sb.WriteString("\nExecute the Coordinator's plan now and provide every required project file using === FILE: filename === headers.")
+			sb.WriteString("\nExecute the Coordinator's plan now. Begin IMMEDIATELY with SUMMARY: and provide every required project file using === FILE: filename === headers.")
 		}
 	}
 

@@ -114,6 +114,9 @@ func classifyProviderError(err error, elapsedMs int64) error {
 	if strings.Contains(msg, "http 500") || strings.Contains(msg, "http 502") || strings.Contains(msg, "http 503") || strings.Contains(msg, "http 504") {
 		return fmt.Errorf("PROVIDER OVERLOADED (upstream server error): %v", err)
 	}
+	if strings.Contains(msg, "exhausted output tokens during internal reasoning") {
+		return fmt.Errorf("REASONING TRUNCATED after %.1fs: %v", sec, err)
+	}
 	if strings.Contains(msg, "empty content") || strings.Contains(msg, "empty response") {
 		return fmt.Errorf("EMPTY RESPONSE (model returned 0 tokens): %v", err)
 	}
@@ -136,7 +139,28 @@ func isRetryable(err error) bool {
 		strings.Contains(msg, "invalid json response") ||
 		strings.Contains(msg, "empty content") ||
 		strings.Contains(msg, "empty response") ||
+		strings.Contains(msg, "exhausted output tokens during internal reasoning") ||
 		strings.Contains(msg, "eof")
+}
+
+// validateOrSalvageReasoning ensures unfinished chain-of-thought scratchpads are never passed off as deliverables
+func validateOrSalvageReasoning(content, reasoning, label, model string) (string, error) {
+	c := strings.TrimSpace(content)
+	if c != "" {
+		return c, nil
+	}
+	r := strings.TrimSpace(reasoning)
+	if r == "" {
+		return "", fmt.Errorf("empty content returned by %s model %s", label, model)
+	}
+	// Only accept reasoning fallback if the model actually placed valid deliverables or structured JSON inside it
+	if strings.Contains(r, "=== FILE:") ||
+		strings.Contains(r, "```") ||
+		(strings.Contains(r, `"action"`) && strings.Contains(r, `"message"`)) ||
+		len(r) < 600 {
+		return r, nil
+	}
+	return "", fmt.Errorf("%s model %s exhausted output tokens during internal reasoning without writing final deliverable", label, model)
 }
 
 func (r *Router) Call(ctx context.Context, provider, key, model string, messages []Message, opts CallOpts) (string, int64, error) {
@@ -181,7 +205,6 @@ func (r *Router) Call(ctx context.Context, provider, key, model string, messages
 			}
 			aiPrimeOpts := opts
 			aiPrimeOpts.MaxTokens = 0
-			// Use standard non-streaming JSON first; if proxy resets at 30s, fallback to stream
 			streamMode := attempt > 0
 			reply, err = r.callOpenAI(ctx, baseURL, key, model, messages, aiPrimeOpts, "AIPrime", false, streamMode)
 		default:
@@ -384,7 +407,7 @@ func (r *Router) callOpenAI(ctx context.Context, endpoint, key, model string, me
 		req.Header.Set("HTTP-Referer", "https://github.com/sahand363/sahand-cortext")
 		req.Header.Set("X-Title", "Sahand-CorText")
 	}
-	req.Header.Set("User-Agent", "Sahand-CorText/0.5.5")
+	req.Header.Set("User-Agent", "Sahand-CorText/0.5.6")
 
 	resp, err := r.Client.Do(req)
 	if err != nil {
@@ -433,17 +456,11 @@ func (r *Router) callOpenAI(ctx context.Context, endpoint, key, model string, me
 	}
 
 	msg := parsed.Choices[0].Message
-	out := strings.TrimSpace(msg.Content)
-	if out == "" {
-		out = strings.TrimSpace(msg.ReasoningContent)
+	reasoning := strings.TrimSpace(msg.ReasoningContent)
+	if reasoning == "" {
+		reasoning = strings.TrimSpace(msg.Reasoning)
 	}
-	if out == "" {
-		out = strings.TrimSpace(msg.Reasoning)
-	}
-	if out == "" {
-		return "", fmt.Errorf("empty content returned by %s model %s", label, model)
-	}
-	return out, nil
+	return validateOrSalvageReasoning(msg.Content, reasoning, label, model)
 }
 
 func parseOpenAISSEStream(r io.Reader, label, model string) (string, error) {
@@ -505,19 +522,17 @@ func parseOpenAISSEStream(r io.Reader, label, model string) (string, error) {
 		}
 	}
 
-	out := strings.TrimSpace(contentSB.String())
-	if out == "" {
-		out = strings.TrimSpace(reasoningSB.String())
-	}
+	contentStr := strings.TrimSpace(contentSB.String())
+	reasoningStr := strings.TrimSpace(reasoningSB.String())
 
 	if err := scanner.Err(); err != nil {
-		if len(out) > 200 {
-			return out, nil
+		if len(contentStr) > 200 {
+			return contentStr, nil
 		}
 		return "", fmt.Errorf("%s stream error: %w", label, err)
 	}
 
-	if out == "" && rawFallbackSB.Len() > 0 {
+	if contentStr == "" && reasoningStr == "" && rawFallbackSB.Len() > 0 {
 		rawBytes := []byte(rawFallbackSB.String())
 		var single struct {
 			Error   any `json:"error"`
@@ -535,21 +550,16 @@ func parseOpenAISSEStream(r io.Reader, label, model string) (string, error) {
 			}
 			if len(single.Choices) > 0 {
 				m := single.Choices[0].Message
-				out = strings.TrimSpace(m.Content)
-				if out == "" {
-					out = strings.TrimSpace(m.ReasoningContent)
-				}
-				if out == "" {
-					out = strings.TrimSpace(m.Reasoning)
+				contentStr = strings.TrimSpace(m.Content)
+				reasoningStr = strings.TrimSpace(m.ReasoningContent)
+				if reasoningStr == "" {
+					reasoningStr = strings.TrimSpace(m.Reasoning)
 				}
 			}
 		}
 	}
 
-	if out == "" {
-		return "", fmt.Errorf("empty content returned by %s model %s", label, model)
-	}
-	return out, nil
+	return validateOrSalvageReasoning(contentStr, reasoningStr, label, model)
 }
 
 func extractAPIError(raw []byte) string {

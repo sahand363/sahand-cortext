@@ -401,7 +401,7 @@ func (a *App) status(w http.ResponseWriter, r *http.Request) {
 	aCfg := a.providerKey("aiprime") != ""
 	jsonOut(w, 200, map[string]any{
 		"status":                "online",
-		"version":               "0.5.5",
+		"version":               "0.5.6",
 		"gemini_configured":     gCfg,
 		"openrouter_configured": oCfg,
 		"codecraft_configured":  cCfg,
