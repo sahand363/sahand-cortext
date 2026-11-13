@@ -368,3 +368,92 @@ func TestUnknownProviderRejectedOnCall(t *testing.T) {
 		t.Fatalf("expected ErrUnknownProvider, got: %v", err)
 	}
 }
+
+func TestAnthropicSpecDynamicProviderAndStreaming(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("x-api-key") != "sk-ant-test" {
+			t.Errorf("expected x-api-key header, got %q", r.Header.Get("x-api-key"))
+		}
+		if r.Header.Get("anthropic-version") != "2023-06-01" {
+			t.Errorf("expected anthropic-version header, got %q", r.Header.Get("anthropic-version"))
+		}
+		if r.URL.Path == "/v1/messages" {
+			var payload struct {
+				Model     string `json:"model"`
+				System    string `json:"system"`
+				MaxTokens int    `json:"max_tokens"`
+				Stream    bool   `json:"stream"`
+				Messages  []struct {
+					Role    string `json:"role"`
+					Content string `json:"content"`
+				} `json:"messages"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode body: %v", err)
+			}
+			if payload.System != "Be concise." || payload.MaxTokens <= 0 {
+				t.Errorf("unexpected Anthropic payload system/max_tokens: %+v", payload)
+			}
+			if len(payload.Messages) != 1 || payload.Messages[0].Role != "user" {
+				t.Errorf("expected merged single user turn, got: %+v", payload.Messages)
+			}
+			if payload.Stream {
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = w.Write([]byte("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"Anthropic stream ok\"}}\n\n"))
+				_, _ = w.Write([]byte("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"))
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"content":[{"type":"text","text":"Anthropic spec reply"}]}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer ts.Close()
+
+	db := openTestDB(t)
+	router := NewRouter()
+	if err := router.AttachDB(context.Background(), db); err != nil {
+		t.Fatalf("AttachDB: %v", err)
+	}
+
+	created, err := router.Store().SaveDynamicProvider(context.Background(), router.Registry(), router.Client, DynamicProviderInput{
+		ID:               "my-anthropic",
+		Name:             "My Anthropic Gateway",
+		AdapterType:      "anthropic_compat",
+		BaseURL:          ts.URL + "/v1",
+		APIKey:           "sk-ant-test",
+		DisableDiscovery: true,
+		ManualModels:     []string{"claude-sonnet-4-20250514"},
+	})
+	if err != nil || created.AdapterType != "anthropic_compat" {
+		t.Fatalf("SaveDynamicProvider anthropic_compat failed: %+v, err=%v", created, err)
+	}
+
+	reply, _, err := router.Call(context.Background(), "my-anthropic", "", "claude-sonnet-4-20250514", []Message{
+		{Role: "system", Content: "Be concise."},
+		{Role: "user", Content: "Part 1"},
+		{Role: "user", Content: "Part 2"},
+	}, CallOpts{})
+	if err != nil || reply != "Anthropic spec reply" {
+		t.Fatalf("Anthropic sync call failed: reply=%q err=%v", reply, err)
+	}
+
+	streamReply, _, err := router.Call(context.Background(), "my-anthropic", "", "claude-sonnet-4-20250514", []Message{
+		{Role: "system", Content: "Be concise."},
+		{Role: "user", Content: "Stream test"},
+	}, CallOpts{Stream: true})
+	if err != nil || streamReply != "Anthropic stream ok" {
+		t.Fatalf("Anthropic stream call failed: reply=%q err=%v", streamReply, err)
+	}
+
+	// Verify persistence & reload across restart
+	router2 := NewRouter()
+	if err := router2.AttachDB(context.Background(), db); err != nil {
+		t.Fatalf("AttachDB restart: %v", err)
+	}
+	p2, _, err := router2.Registry().Get("my-anthropic")
+	if err != nil || p2.Metadata().AdapterType != "anthropic_compat" {
+		t.Fatalf("expected anthropic_compat adapter after restart, got: %+v, err=%v", p2, err)
+	}
+}

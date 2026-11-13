@@ -11,6 +11,55 @@ let freeOnlyFilter = true;
 let editingCustomProviderId = null;
 let deleteArmed = false;
 
+function applyTheme(theme, persist = true) {
+  const t = theme === "light" ? "light" : "dark";
+  document.documentElement.setAttribute("data-theme", t);
+  const meta = $("theme-color-meta");
+  if (meta) meta.setAttribute("content", t === "light" ? "#ffffff" : "#0b0d12");
+
+  const icon = t === "light" ? "☾" : "☀";
+  const label = t === "light" ? "Switch to Dark Mode" : "Switch to GitHub Light";
+  if ($("theme-toggle-btn")) {
+    $("theme-toggle-btn").textContent = icon;
+    $("theme-toggle-btn").title = label;
+  }
+  if ($("topbar-theme-btn")) {
+    $("topbar-theme-btn").textContent = icon;
+    $("topbar-theme-btn").title = label;
+  }
+  if ($("settings-theme-select")) {
+    $("settings-theme-select").value = t;
+  }
+  if (persist) {
+    try { localStorage.setItem("cortext_theme", t); } catch {}
+  }
+}
+
+function toggleTheme() {
+  const cur = document.documentElement.getAttribute("data-theme") === "light" ? "light" : "dark";
+  applyTheme(cur === "light" ? "dark" : "light", true);
+}
+
+applyTheme(document.documentElement.getAttribute("data-theme") || "dark", false);
+
+if ($("theme-toggle-btn")) $("theme-toggle-btn").onclick = toggleTheme;
+if ($("topbar-theme-btn")) $("topbar-theme-btn").onclick = toggleTheme;
+if ($("settings-theme-select")) {
+  $("settings-theme-select").addEventListener("change", e => applyTheme(e.target.value, true));
+}
+
+function setMobileSidebarOpen(open) {
+  $("sidebar")?.classList.toggle("open", open);
+  $("sidebar-backdrop")?.classList.toggle("open", open);
+}
+
+if ($("mobile-menu")) $("mobile-menu").onclick = () => setMobileSidebarOpen(true);
+if ($("mobile-close")) $("mobile-close").onclick = () => setMobileSidebarOpen(false);
+if ($("sidebar-backdrop")) $("sidebar-backdrop").onclick = () => setMobileSidebarOpen(false);
+document.addEventListener("keydown", e => {
+  if (e.key === "Escape") setMobileSidebarOpen(false);
+});
+
 let orchParticipantsDraft = [
   { role: "coordinator", name: "Coordinator / Architect", provider: "gemini", model: "gemini-2.0-flash" },
   { role: "worker", name: "Worker / Developer", provider: "gemini", model: "gemini-2.0-flash" },
@@ -121,6 +170,10 @@ function openCustomProviderForm(existingMeta) {
 
   if (existingMeta) {
     $("custom-provider-form-title").textContent = `Edit Provider · ${existingMeta.name}`;
+    if ($("cp-adapter-type")) {
+      $("cp-adapter-type").value = existingMeta.adapter_type || "openai_compat";
+      $("cp-adapter-type").disabled = true;
+    }
     $("cp-name").value = existingMeta.name || "";
     $("cp-id").value = existingMeta.id || "";
     $("cp-id").disabled = true;
@@ -131,7 +184,12 @@ function openCustomProviderForm(existingMeta) {
     $("cp-manual-models").value = (existingMeta.manual_models || []).join(", ");
     $("cp-enable-discovery").checked = existingMeta.models_path !== "";
   } else {
-    $("custom-provider-form-title").textContent = "Add OpenAI-Compatible Provider";
+    $("custom-provider-form-title").textContent = "Add Custom API Provider";
+    if ($("cp-adapter-type")) {
+      $("cp-adapter-type").value = "openai_compat";
+      $("cp-adapter-type").disabled = false;
+    }
+    syncCustomProviderSpecDefaults();
     $("cp-name").value = "";
     $("cp-id").value = "";
     $("cp-id").disabled = false;
@@ -160,6 +218,27 @@ function syncCustomProviderAuthFields() {
 
 if ($("cp-auth-type")) {
   $("cp-auth-type").addEventListener("change", syncCustomProviderAuthFields);
+}
+
+function syncCustomProviderSpecDefaults() {
+  const spec = $("cp-adapter-type")?.value || "openai_compat";
+  const isAnt = spec === "anthropic_compat";
+  if ($("cp-base-url") && !$("cp-base-url").dataset.touched) {
+    $("cp-base-url").placeholder = isAnt
+      ? "https://api.anthropic.com/v1 (or Anthropic-compatible proxy)"
+      : "https://api.openai.com/v1 (or Groq, Ollama, LM Studio…)";
+  }
+  if (editingCustomProviderId === "__new__" && $("cp-auth-type")) {
+    $("cp-auth-type").value = isAnt ? "header" : "bearer";
+    if ($("cp-auth-header") && isAnt && !$("cp-auth-header").value) {
+      $("cp-auth-header").value = "x-api-key";
+    }
+    syncCustomProviderAuthFields();
+  }
+}
+
+if ($("cp-adapter-type")) {
+  $("cp-adapter-type").addEventListener("change", syncCustomProviderSpecDefaults);
 }
 if ($("cp-name")) {
   $("cp-name").addEventListener("input", () => {
@@ -194,6 +273,7 @@ if ($("custom-provider-form")) {
       const res = await api("/api/providers", {
         method: "POST",
         body: JSON.stringify({
+          adapter_type: $("cp-adapter-type").value,
           id: $("cp-id").value.trim().toLowerCase(),
           name: $("cp-name").value.trim(),
           base_url: $("cp-base-url").value.trim(),
@@ -349,6 +429,16 @@ function switchProviderTab(provider) {
 
   $("edit-custom-provider-btn")?.classList.toggle("hidden", !!meta.built_in);
   $("delete-custom-provider-btn")?.classList.toggle("hidden", !!meta.built_in);
+
+  const specBadge = $("settings-provider-spec-badge");
+  if (specBadge) {
+    if (meta.built_in) {
+      specBadge.classList.add("hidden");
+    } else {
+      specBadge.classList.remove("hidden");
+      specBadge.textContent = meta.adapter_type === "anthropic_compat" ? "Anthropic Spec" : "OpenAI Spec";
+    }
+  }
 
   $("settings-explorer-title").textContent = `Available Models · ${meta.name}`;
   const hasHelp = Boolean(meta.help_url);
@@ -1279,7 +1369,7 @@ function switchPage(name) {
   $("page-" + name).classList.remove("hidden");
   document.querySelectorAll(".nav-link").forEach(b => b.classList.toggle("active", b.dataset.page === name));
   $("breadcrumb-page").textContent = pageNames[name];
-  $("sidebar").classList.remove("open");
+  setMobileSidebarOpen(false);
 
   if (name === "sessions") loadSessions();
   if (name === "settings" || name === "models") {

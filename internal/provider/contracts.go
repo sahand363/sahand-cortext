@@ -47,7 +47,7 @@ type ProviderMetadata struct {
 	HelpURL           string       `json:"help_url,omitempty"`
 	HelpButton        string       `json:"help_button,omitempty"`
 	BuiltIn           bool         `json:"built_in"`
-	AdapterType       string       `json:"adapter_type"` // "gemini" | "openai_compat"
+	AdapterType       string       `json:"adapter_type"` // "gemini" | "openai_compat" | "anthropic_compat"
 	RequiresAPIKey    bool         `json:"requires_api_key"`
 	SupportsFreeBadge bool         `json:"supports_free_badge"`
 	DefaultModel      string       `json:"default_model,omitempty"`

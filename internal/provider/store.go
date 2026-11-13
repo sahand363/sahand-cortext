@@ -115,8 +115,8 @@ func (s *Store) LoadIntoRegistry(ctx context.Context, reg *Registry, client *htt
 				continue
 			}
 
-			meta, cfg := buildDynamicMetadataAndConfig(id, name, shortName, icon, desc, baseURL, chatPath, modelsPath, authType, authHeader, extraHeaders, opts, enabledInt != 0, sortOrder)
-			adapter := NewOpenAICompatAdapter(meta, client)
+			meta, cfg := buildDynamicMetadataAndConfig(normalizeAdapterType(adapterType), id, name, shortName, icon, desc, baseURL, chatPath, modelsPath, authType, authHeader, extraHeaders, opts, enabledInt != 0, sortOrder)
+			adapter := instantiateDynamicAdapter(meta, client)
 			_ = reg.UpsertDynamic(adapter, cfg)
 		}
 	}
@@ -164,9 +164,14 @@ func (s *Store) SaveDynamicProvider(ctx context.Context, reg *Registry, client *
 	if icon == "" {
 		icon = "⚡"
 	}
+	adapterType := normalizeAdapterType(input.AdapterType)
 	chatPath := strings.TrimSpace(input.ChatPath)
 	if chatPath == "" {
-		chatPath = "/chat/completions"
+		if adapterType == "anthropic_compat" {
+			chatPath = "/messages"
+		} else {
+			chatPath = "/chat/completions"
+		}
 	}
 	modelsPath := strings.TrimSpace(input.ModelsPath)
 	if modelsPath == "" && !input.DisableDiscovery {
@@ -177,11 +182,18 @@ func (s *Store) SaveDynamicProvider(ctx context.Context, reg *Registry, client *
 	}
 	authType := strings.ToLower(strings.TrimSpace(input.AuthType))
 	if authType == "" {
-		authType = "bearer"
+		if adapterType == "anthropic_compat" {
+			authType = "header"
+		} else {
+			authType = "bearer"
+		}
 	}
 	authHeader := strings.TrimSpace(input.AuthHeader)
 	if authHeader == "" && authType == "bearer" {
 		authHeader = "Authorization"
+	}
+	if authHeader == "" && authType == "header" && adapterType == "anthropic_compat" {
+		authHeader = "x-api-key"
 	}
 
 	enabled := true
@@ -206,6 +218,7 @@ func (s *Store) SaveDynamicProvider(ctx context.Context, reg *Registry, client *
 	}
 
 	meta, cfg := buildDynamicMetadataAndConfig(
+		adapterType,
 		id, name, shortName, icon, strings.TrimSpace(input.Description),
 		strings.TrimSpace(input.BaseURL), chatPath, modelsPath,
 		authType, authHeader, input.ExtraHeaders, opts, enabled, sortOrder,
@@ -235,12 +248,13 @@ func (s *Store) SaveDynamicProvider(ctx context.Context, reg *Registry, client *
 			INSERT INTO provider_configs
 				(id, name, short_name, icon, description, adapter_type, base_url, chat_path, models_path,
 				 auth_type, auth_header, extra_headers_json, options_json, enabled, built_in, sort_order, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, 'openai_compat', ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
 			ON CONFLICT(id) DO UPDATE SET
 				name=excluded.name,
 				short_name=excluded.short_name,
 				icon=excluded.icon,
 				description=excluded.description,
+				adapter_type=excluded.adapter_type,
 				base_url=excluded.base_url,
 				chat_path=excluded.chat_path,
 				models_path=excluded.models_path,
@@ -251,7 +265,7 @@ func (s *Store) SaveDynamicProvider(ctx context.Context, reg *Registry, client *
 				enabled=excluded.enabled,
 				sort_order=excluded.sort_order,
 				updated_at=excluded.updated_at`,
-			id, meta.Name, meta.ShortName, meta.Icon, meta.Description,
+			id, meta.Name, meta.ShortName, meta.Icon, meta.Description, adapterType,
 			cfg.BaseURL, cfg.ChatPath, cfg.ModelsPath, cfg.AuthType, cfg.AuthHeader,
 			string(headersBytes), string(optsBytes), enabledInt, cfg.SortOrder, now, now)
 		if err == nil && strings.TrimSpace(input.APIKey) != "" {
@@ -270,7 +284,7 @@ func (s *Store) SaveDynamicProvider(ctx context.Context, reg *Registry, client *
 		}
 	}
 
-	adapter := NewOpenAICompatAdapter(meta, client)
+	adapter := instantiateDynamicAdapter(meta, client)
 	if err := reg.UpsertDynamic(adapter, cfg); err != nil {
 		return RegisteredProvider{}, err
 	}
@@ -374,6 +388,7 @@ type DynamicProviderInput struct {
 	ShortName         string            `json:"short_name"`
 	Icon              string            `json:"icon"`
 	Description       string            `json:"description"`
+	AdapterType       string            `json:"adapter_type"` // "openai_compat" (default) | "anthropic_compat"
 	BaseURL           string            `json:"base_url"`
 	ChatPath          string            `json:"chat_path"`
 	ModelsPath        string            `json:"models_path"`
@@ -394,7 +409,24 @@ type DynamicProviderInput struct {
 	SortOrder         int               `json:"sort_order"`
 }
 
+func normalizeAdapterType(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "anthropic", "anthropic_compat":
+		return "anthropic_compat"
+	default:
+		return "openai_compat"
+	}
+}
+
+func instantiateDynamicAdapter(meta ProviderMetadata, client *http.Client) Provider {
+	if meta.AdapterType == "anthropic_compat" {
+		return NewAnthropicCompatAdapter(meta, client)
+	}
+	return NewOpenAICompatAdapter(meta, client)
+}
+
 func buildDynamicMetadataAndConfig(
+	adapterType string,
 	id, name, shortName, icon, desc, baseURL, chatPath, modelsPath, authType, authHeader string,
 	extraHeaders map[string]string,
 	opts storedProviderOptions,
@@ -419,7 +451,11 @@ func buildDynamicMetadataAndConfig(
 		}
 	}
 	if desc == "" {
-		desc = fmt.Sprintf("OpenAI-compatible provider at %s", baseURL)
+		if adapterType == "anthropic_compat" {
+			desc = fmt.Sprintf("Anthropic-compatible provider at %s", baseURL)
+		} else {
+			desc = fmt.Sprintf("OpenAI-compatible provider at %s", baseURL)
+		}
 	}
 	defaultModel := opts.DefaultModel
 	if defaultModel == "" && len(opts.ManualModels) > 0 {
@@ -435,7 +471,7 @@ func buildDynamicMetadataAndConfig(
 		KeyLabel:          keyLabel,
 		KeyPlaceholder:    keyPlaceholder,
 		BuiltIn:           false,
-		AdapterType:       "openai_compat",
+		AdapterType:       adapterType,
 		RequiresAPIKey:    requiresKey,
 		SupportsFreeBadge: opts.SupportsFreeBadge,
 		DefaultModel:      defaultModel,
