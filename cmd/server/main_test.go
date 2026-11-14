@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"[github.com/sahand363/sahand-cortext/internal/orchestration](https://github.com/sahand363/sahand-cortext/internal/orchestration)"
-	"[github.com/sahand363/sahand-cortext/internal/provider](https://github.com/sahand363/sahand-cortext/internal/provider)"
+"github.com/sahand363/sahand-cortext/internal/orchestration"
+	"github.com/sahand363/sahand-cortext/internal/provider"
 	_ "modernc.org/sqlite"
 )
 
