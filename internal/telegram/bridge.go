@@ -3,6 +3,7 @@ package telegram
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -14,25 +15,23 @@ import (
 	"time"
 
 	"github.com/sahand363/sahand-cortext/internal/chat"
-	"github.com/sahand363/sahand-cortext/internal/orchestration"
 	"github.com/sahand363/sahand-cortext/internal/persona"
 	"github.com/sahand363/sahand-cortext/internal/provider"
 )
 
 type BridgeManager struct {
-	db           *provider.DBTX // or *sql.DB
-	dbConn       interface{}    // generic db handle
-	personaStore *persona.Store
-	router       *provider.Router
-	keyLookup    func(string) string
+	dbConn        interface{}
+	personaStore  *persona.Store
+	router        *provider.Router
+	keyLookup     func(string) string
 	activePollers map[string]*botPoller
-	mu           sync.Mutex
+	mu            sync.Mutex
 }
 
 type botPoller struct {
-	personaID   string
-	botToken    string
-	cancel      context.CancelFunc
+	personaID string
+	botToken  string
+	cancel    context.CancelFunc
 }
 
 func NewBridgeManager(db interface{}, personaStore *persona.Store, router *provider.Router, keyLookup func(string) string) *BridgeManager {
@@ -45,7 +44,6 @@ func NewBridgeManager(db interface{}, personaStore *persona.Store, router *provi
 	}
 }
 
-// StartSync scans SQLite for enabled personas with Telegram tokens and starts/stops background pollers.
 func (b *BridgeManager) StartSync(ctx context.Context) {
 	ticker := time.NewTicker(10 * time.Second)
 	go func() {
@@ -88,7 +86,6 @@ func (b *BridgeManager) syncPollers(ctx context.Context) {
 		}
 	}
 
-	// Stop pollers that were disabled or had tokens removed
 	for id, poller := range b.activePollers {
 		tok, ok := desired[id]
 		if !ok || tok != poller.botToken {
@@ -97,7 +94,6 @@ func (b *BridgeManager) syncPollers(ctx context.Context) {
 		}
 	}
 
-	// Start new pollers
 	for id, tok := range desired {
 		if _, exists := b.activePollers[id]; !exists {
 			pCtx, pCancel := context.WithCancel(ctx)
@@ -155,7 +151,7 @@ func pollTelegramBot(ctx context.Context, mgr *BridgeManager, personaID, token s
 		resp.Body.Close()
 
 		var res struct {
-			Ok     bool     `json:"ok"`
+			Ok     bool       `json:"ok"`
 			Result []tgUpdate `json:"result"`
 		}
 		if json.Unmarshal(body, &res) != nil || !res.Ok {
@@ -169,7 +165,6 @@ func pollTelegramBot(ctx context.Context, mgr *BridgeManager, personaID, token s
 				continue
 			}
 
-			// Verify User ID allowlist
 			p, err := mgr.personaStore.Get(ctx, personaID)
 			if err != nil || !p.Enabled {
 				continue
@@ -198,8 +193,8 @@ func pollTelegramBot(ctx context.Context, mgr *BridgeManager, personaID, token s
 func sendTelegramMessage(client *http.Client, apiBase string, chatID int64, text string) {
 	url := apiBase + "/sendMessage"
 	payload, _ := json.Marshal(map[string]any{
-		"chat_id": chatID,
-		"text":    text,
+		"chat_id":    chatID,
+		"text":       text,
 		"parse_mode": "Markdown",
 	})
 	_, _ = client.Post(url, "application/json", bytes.NewReader(payload))
@@ -221,7 +216,6 @@ func (b *BridgeManager) handleIncomingMessage(
 
 	trimmedText := strings.TrimSpace(text)
 
-	// Handle commands
 	if strings.HasPrefix(trimmedText, "/") {
 		parts := strings.Fields(trimmedText)
 		cmd := strings.ToLower(parts[0])
@@ -249,7 +243,6 @@ func (b *BridgeManager) handleIncomingMessage(
 		}
 	}
 
-	// Resolve or create persistent Telegram chat session per user chat ID
 	sessID := fmt.Sprintf("tg-%d", chatID)
 	var existingPersona string
 	err := db.QueryRow(`SELECT coalesce(persona_id,'') FROM sessions WHERE id = ?`, sessID).Scan(&existingPersona)
@@ -258,10 +251,8 @@ func (b *BridgeManager) handleIncomingMessage(
 			sessID, fmt.Sprintf("%s %s", p.Icon, p.Name), p.ID)
 	}
 
-	// Save user message
 	_, _ = db.Exec(`INSERT INTO messages(session_id, role, content) VALUES(?, 'user', ?)`, sessID, trimmedText)
 
-	// Load chat history
 	rows, err := db.Query(`SELECT role, content FROM messages WHERE session_id = ? ORDER BY id ASC`, sessID)
 	if err != nil {
 		sendTelegramMessage(client, apiBase, chatID, "⚠️ Database error loading history.")
@@ -307,7 +298,6 @@ func (b *BridgeManager) handleIncomingMessage(
 	}
 	mod = regProv.NormalizeModelID(mod)
 
-	// Enforce persona model allowlist
 	if p.ModelScopeMode == "selected" && !p.IsModelAllowed(b.router.Registry(), prov, mod) {
 		if len(p.AllowedModels) > 0 {
 			parts := strings.SplitN(p.AllowedModels[0], "::", 2)
@@ -325,7 +315,6 @@ func (b *BridgeManager) handleIncomingMessage(
 		return
 	}
 
-	// Save assistant reply
 	_, _ = db.Exec(`INSERT INTO messages(session_id, role, content) VALUES(?, 'assistant', ?)`, sessID, answer)
 	_, _ = db.Exec(`UPDATE sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = ?`, sessID)
 
