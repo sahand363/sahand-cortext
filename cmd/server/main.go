@@ -1092,7 +1092,7 @@ func (a *App) sendMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var currentTitle string
-	if a.db.QueryRow(`SELECT title FROM sessions WHERE id=?`, body.SessionID).Scan(currentTitle) != nil {
+	if a.db.QueryRow(`SELECT title FROM sessions WHERE id=?`, body.SessionID).Scan(&currentTitle) != nil {
 		jsonOut(w, 404, map[string]string{"error": "session not found"})
 		return
 	}
