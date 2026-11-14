@@ -2,6 +2,15 @@ const $ = id => document.getElementById(id);
 let currentSession = null, toastTimer, deleteConfirmTimer;
 let sessionsCache = [];
 
+const DEVICE_STATE_KEYS = {
+  page: "cortext_active_page",
+  session: "cortext_active_session",
+  orchJob: "cortext_active_orch_job",
+  orchSubView: "cortext_active_orch_subview",
+  settingsTab: "cortext_active_settings_tab",
+  selectedProvider: "cortext_selected_provider"
+};
+
 let providersList = [];
 let providerMap = {};
 let selectedProvider = "";
@@ -11,17 +20,25 @@ let freeOnlyFilter = true;
 let editingCustomProviderId = null;
 let deleteArmed = false;
 
+let chatModelScope = {
+  mode: "all",
+  allowed_models: []
+};
+
 let orchParticipantsDraft = [
   { role: "coordinator", name: "Coordinator / Architect", provider: "", model: "" },
   { role: "worker", name: "Worker / Developer", provider: "", model: "" },
   { role: "auditor", name: "Quality Assurance / Auditor", provider: "", model: "" }
 ];
 let orchJobsCache = [];
-let activeOrchJobId = localStorage.getItem("cortext_active_orch_job") || null;
+let activeOrchJobId = localStorage.getItem(DEVICE_STATE_KEYS.orchJob) || null;
 let orchPollTimer = null;
-let orchActiveSubView = "events";
+let orchActiveSubView = localStorage.getItem(DEVICE_STATE_KEYS.orchSubView) || "events";
 let orchSubmitting = false;
 let selectedDeliverableFileIdx = 0;
+
+// Cache full collaboration message bodies fetched on demand: key = `${jobId}:${msgId}`
+const loadedOrchMessagesCache = new Map();
 
 const contribPalette = [
   "#38bdf8",
@@ -109,7 +126,11 @@ async function api(url, opts = {}) {
     showLogin();
     throw new Error(d.error || "Session expired. Please sign in again.");
   }
-  if (!r.ok) throw new Error(d.error || "Request failed");
+  if (!r.ok) {
+    const err = new Error(d.error || "Request failed");
+    err.status = r.status;
+    throw err;
+  }
   return d;
 }
 
@@ -708,6 +729,7 @@ if ($("custom-provider-form")) {
       switchProviderTab(newId);
       syncModelDropdown();
       syncAuditorModelDropdown();
+      renderChatModelScopeSettings();
       ensureDefaultOrchParticipants();
       renderOrchParticipantsBuilder();
       $("setup-banner")?.classList.add("hidden");
@@ -741,6 +763,7 @@ if ($("delete-custom-provider-btn")) {
       if (selectedProvider) switchProviderTab(selectedProvider);
       syncModelDropdown();
       syncAuditorModelDropdown();
+      renderChatModelScopeSettings();
       renderOrchParticipantsBuilder();
       toast(`🗑 Removed ${meta.name}`);
     } catch (err) {
@@ -750,7 +773,7 @@ if ($("delete-custom-provider-btn")) {
 }
 
 /* ============================================================================
-   AUTH & STATUS
+   AUTH, STATUS & PER-DEVICE RESUME
    ============================================================================ */
 
 function showLogin() {
@@ -768,14 +791,22 @@ async function checkAuth() {
     const s = await api("/api/status");
     showApp();
     applyStatus(s);
+
+    const savedProv = localStorage.getItem(DEVICE_STATE_KEYS.selectedProvider);
+    if (savedProv && providerMap[savedProv]) {
+      selectedProvider = savedProv;
+    }
+
     await loadSessions();
     await loadAllConfiguredModels();
     await loadOrchJobsList();
+
     if (!s.any_configured) {
       $("setup-banner")?.classList.remove("hidden");
       showSetupNudge();
     }
-    const savedPage = localStorage.getItem("cortext_active_page");
+
+    const savedPage = localStorage.getItem(DEVICE_STATE_KEYS.page);
     if (savedPage && pageNames[savedPage]) {
       switchPage(savedPage);
     }
@@ -791,6 +822,13 @@ function applyStatus(s) {
     Object.keys(s.providers).forEach(pid => {
       if (providerMap[pid]) providerMap[pid].configured = !!s.providers[pid];
     });
+  }
+  if (s.chat_model_scope && typeof s.chat_model_scope === "object") {
+    chatModelScope = {
+      mode: s.chat_model_scope.mode === "selected" ? "selected" : "all",
+      allowed_models: Array.isArray(s.chat_model_scope.allowed_models) ? s.chat_model_scope.allowed_models : []
+    };
+    renderChatModelScopeSettings();
   }
   if (s.active_provider && s.active_model) {
     setActiveSelectionUI(s.active_provider, s.active_model);
@@ -812,12 +850,16 @@ function setActiveSelectionUI(provider, modelId) {
   const composite = `${provider}::${modelId}`;
   if (sel) {
     if (![...sel.options].some(o => o.value === composite)) {
-      const opt = document.createElement("option");
-      opt.value = composite;
-      opt.textContent = `✓ [${info.short_name}] ${modelId}`;
-      sel.prepend(opt);
+      if (isModelAllowedInMainChat(provider, modelId) || sel.options.length === 0) {
+        const opt = document.createElement("option");
+        opt.value = composite;
+        opt.textContent = `✓ [${info.short_name}] ${modelId}`;
+        sel.prepend(opt);
+      }
     }
-    sel.value = composite;
+    if ([...sel.options].some(o => o.value === composite)) {
+      sel.value = composite;
+    }
   }
 }
 
@@ -844,6 +886,9 @@ function updateProviderBadges() {
 function switchProviderTab(provider) {
   if (!provider && providersList.length > 0) provider = providersList[0].id;
   selectedProvider = provider;
+  if (provider) {
+    try { localStorage.setItem(DEVICE_STATE_KEYS.selectedProvider, provider); } catch {}
+  }
   const meta = getProviderMeta(provider);
 
   $("settings-provider-title").textContent = `${meta.name} Connection`;
@@ -1061,10 +1106,13 @@ async function loadSessions() {
 
   if (currentSession && !sessionsCache.some(s => s.id === currentSession)) {
     currentSession = null;
+    try { localStorage.removeItem(DEVICE_STATE_KEYS.session); } catch {}
   }
 
   if (!currentSession && sessionsCache.length) {
-    await openSession(sessionsCache[0].id, false);
+    const savedSessId = localStorage.getItem(DEVICE_STATE_KEYS.session);
+    const targetSess = sessionsCache.find(s => s.id === savedSessId) || sessionsCache[0];
+    await openSession(targetSess.id, false);
   } else if (!sessionsCache.length) {
     $("chat-active").classList.add("hidden");
     $("chat-empty").classList.remove("hidden");
@@ -1076,6 +1124,7 @@ async function loadSessions() {
 async function newSession() {
   const s = await api("/api/sessions", { method: "POST" });
   currentSession = s.id;
+  try { localStorage.setItem(DEVICE_STATE_KEYS.session, s.id); } catch {}
   $("chat-empty").classList.add("hidden");
   $("chat-active").classList.remove("hidden");
   $("conversation-title").textContent = "New conversation";
@@ -1086,6 +1135,7 @@ async function newSession() {
 
 async function openSession(id, refresh = true) {
   currentSession = id;
+  try { localStorage.setItem(DEVICE_STATE_KEYS.session, id); } catch {}
   const msgs = await api("/api/messages?session_id=" + encodeURIComponent(id));
   $("chat-empty").classList.add("hidden");
   $("chat-active").classList.remove("hidden");
@@ -1176,7 +1226,10 @@ async function deleteSessionById(id) {
   try {
     await api("/api/sessions?id=" + encodeURIComponent(id), { method: "DELETE" });
     resetDeleteButton();
-    if (currentSession === id) currentSession = null;
+    if (currentSession === id) {
+      currentSession = null;
+      try { localStorage.removeItem(DEVICE_STATE_KEYS.session); } catch {}
+    }
     toast("🗑 Conversation deleted");
     await loadSessions();
   } catch (err) {
@@ -1259,11 +1312,24 @@ $("message-input").addEventListener("keydown", e => {
 });
 
 /* ============================================================================
-   PAGE NAVIGATION & MODELS MANAGEMENT
+   PAGE NAVIGATION, MAIN CHAT MODEL ALLOWLIST & MODELS MANAGEMENT
    ============================================================================ */
 
+function switchSettingsTab(tabId) {
+  if (!tabId || !$(tabId)) return;
+  document.querySelectorAll(".settings-tab").forEach(x => x.classList.toggle("active", x.dataset.tab === tabId));
+  document.querySelectorAll(".settings-panel").forEach(x => x.classList.add("hidden"));
+  $(tabId).classList.remove("hidden");
+  try { localStorage.setItem(DEVICE_STATE_KEYS.settingsTab, tabId); } catch {}
+  if (tabId === "general-settings") {
+    renderChatModelScopeSettings();
+  }
+}
+
+document.querySelectorAll(".settings-tab").forEach(b => b.onclick = () => switchSettingsTab(b.dataset.tab));
+
 function switchPage(name) {
-  localStorage.setItem("cortext_active_page", name);
+  try { localStorage.setItem(DEVICE_STATE_KEYS.page, name); } catch {}
   document.querySelectorAll(".page").forEach(p => p.classList.add("hidden"));
   $("page-" + name).classList.remove("hidden");
   document.querySelectorAll(".nav-link").forEach(b => b.classList.toggle("active", b.dataset.page === name));
@@ -1273,6 +1339,12 @@ function switchPage(name) {
   if (name === "sessions") loadSessions();
   if (name === "settings" || name === "models") {
     refreshStatus();
+    if (name === "settings") {
+      const savedSettingsTab = localStorage.getItem(DEVICE_STATE_KEYS.settingsTab);
+      if (savedSettingsTab && $(savedSettingsTab)) {
+        switchSettingsTab(savedSettingsTab);
+      }
+    }
     if (!editingCustomProviderId) switchProviderTab(selectedProvider);
   }
   if (name === "orchestration") {
@@ -1302,6 +1374,7 @@ async function loadAllConfiguredModels() {
   syncModelDropdown();
   syncAuditorModelDropdown();
   renderModelGrids();
+  renderChatModelScopeSettings();
   ensureDefaultOrchParticipants();
 }
 
@@ -1320,6 +1393,7 @@ async function loadProviderModels(provider, showToastMsg = false) {
     syncModelDropdown();
     syncAuditorModelDropdown();
     renderModelGrids();
+    renderChatModelScopeSettings();
     if (showToastMsg) {
       toast(`Loaded ${(providerMap[provider]?.models || []).length} models from ${getProviderMeta(provider).name}`);
     }
@@ -1328,10 +1402,19 @@ async function loadProviderModels(provider, showToastMsg = false) {
   }
 }
 
-function buildUnifiedModelOptions(sel) {
+function isModelAllowedInMainChat(providerId, modelId) {
+  if (chatModelScope.mode !== "selected") return true;
+  const composite = `${providerId}::${modelId}`;
+  return chatModelScope.allowed_models.includes(composite);
+}
+
+function buildUnifiedModelOptions(sel, opts = {}) {
   if (!sel) return;
+  const applyChatScope = !!opts.applyChatScope;
   const prevVal = sel.value;
   sel.innerHTML = "";
+
+  const isAllowed = (pId, mId) => !applyChatScope || isModelAllowedInMainChat(pId, mId);
 
   const workingGroup = document.createElement("optgroup");
   workingGroup.label = "★ Verified & Enabled Working Models";
@@ -1339,18 +1422,20 @@ function buildUnifiedModelOptions(sel) {
 
   providersList.forEach(p => {
     const short = p.short_name || p.id.toUpperCase();
-    (p.models || []).filter(m => m.status === "working" && m.enabled !== false).forEach(m => {
-      hasWorking = true;
-      const opt = document.createElement("option");
-      opt.value = `${p.id}::${m.id}`;
-      opt.textContent = `✓ [${short}] ${m.display_name} (${m.latency_ms} ms)`;
-      workingGroup.appendChild(opt);
-    });
+    (p.models || [])
+      .filter(m => m.status === "working" && m.enabled !== false && isAllowed(p.id, m.id))
+      .forEach(m => {
+        hasWorking = true;
+        const opt = document.createElement("option");
+        opt.value = `${p.id}::${m.id}`;
+        opt.textContent = `✓ [${short}] ${m.display_name} (${m.latency_ms} ms)`;
+        workingGroup.appendChild(opt);
+      });
   });
   if (hasWorking) sel.appendChild(workingGroup);
 
   providersList.forEach(p => {
-    const list = (p.models || []).filter(m => m.enabled !== false);
+    const list = (p.models || []).filter(m => m.enabled !== false && isAllowed(p.id, m.id));
     if (!list.length) return;
     const grp = document.createElement("optgroup");
     grp.label = p.name;
@@ -1374,7 +1459,7 @@ function buildUnifiedModelOptions(sel) {
 function syncModelDropdown() {
   const sel = $("model");
   if (!sel) return;
-  buildUnifiedModelOptions(sel);
+  buildUnifiedModelOptions(sel, { applyChatScope: true });
 
   const targetVal = `${activeProvider}::${activeModel}`;
   if ([...sel.options].some(o => o.value === targetVal)) {
@@ -1398,6 +1483,134 @@ function syncAuditorModelDropdown() {
     }
   }
 }
+
+function renderChatModelScopeSettings() {
+  const modeSel = $("chat-scope-mode");
+  const pickerWrap = $("chat-scope-picker-wrap");
+  const listEl = $("chat-scope-models-list");
+  const summaryEl = $("chat-scope-summary");
+  if (!modeSel || !pickerWrap || !listEl) return;
+
+  modeSel.value = chatModelScope.mode === "selected" ? "selected" : "all";
+  pickerWrap.classList.toggle("hidden", modeSel.value !== "selected");
+  if (modeSel.value !== "selected") return;
+
+  listEl.innerHTML = "";
+  const allowedSet = new Set(chatModelScope.allowed_models || []);
+  let totalAvailable = 0;
+
+  providersList.forEach(p => {
+    if (!p.configured) return;
+    const enabledModels = (p.models || []).filter(m => m.enabled !== false);
+    if (!enabledModels.length) return;
+
+    const group = document.createElement("div");
+    group.className = "chat-scope-group";
+
+    const groupTitle = document.createElement("div");
+    groupTitle.className = "chat-scope-group-title";
+    groupTitle.textContent = `${p.icon || "⚡"} ${p.name}`;
+    group.appendChild(groupTitle);
+
+    enabledModels.forEach(m => {
+      totalAvailable++;
+      const composite = `${p.id}::${m.id}`;
+      const row = document.createElement("label");
+      row.className = "chat-scope-item";
+
+      const chk = document.createElement("input");
+      chk.type = "checkbox";
+      chk.value = composite;
+      chk.checked = allowedSet.has(composite);
+      chk.onchange = () => {
+        if (chk.checked) {
+          allowedSet.add(composite);
+        } else {
+          allowedSet.delete(composite);
+        }
+        chatModelScope.allowed_models = [...allowedSet];
+        if (summaryEl) {
+          summaryEl.textContent = `${chatModelScope.allowed_models.length} of ${totalAvailable} enabled models selected for Main Chat`;
+        }
+      };
+
+      const nameSpan = document.createElement("span");
+      nameSpan.textContent = `${m.display_name || m.id} (${m.id})`;
+
+      row.append(chk, nameSpan);
+      if (m.status === "working") {
+        const badge = document.createElement("span");
+        badge.className = "model-badge badge-working";
+        badge.textContent = `✓ ${m.latency_ms} ms`;
+        row.appendChild(badge);
+      }
+      group.appendChild(row);
+    });
+
+    listEl.appendChild(group);
+  });
+
+  if (totalAvailable === 0) {
+    const empty = document.createElement("div");
+    empty.className = "muted-note";
+    empty.textContent = "No globally enabled models loaded yet. Connect a provider and enable models in Models & providers first.";
+    listEl.appendChild(empty);
+  } else if (summaryEl) {
+    summaryEl.textContent = `${chatModelScope.allowed_models.length} of ${totalAvailable} enabled models selected for Main Chat`;
+  }
+}
+
+async function persistChatModelScope() {
+  const btn = $("save-chat-scope-btn");
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = "Saving…";
+  }
+  try {
+    const saved = await api("/api/chat/model-scope", {
+      method: "POST",
+      body: JSON.stringify(chatModelScope)
+    });
+    chatModelScope = saved;
+    syncModelDropdown();
+    renderChatModelScopeSettings();
+    toast(saved.mode === "selected"
+      ? `✓ Main Chat restricted to ${saved.allowed_models.length} selected model(s)`
+      : "✓ Main Chat set to all enabled models");
+  } catch (err) {
+    toast("Failed saving chat model settings: " + err.message);
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = "Save Chat Models";
+    }
+  }
+}
+
+$("chat-scope-mode")?.addEventListener("change", async e => {
+  chatModelScope.mode = e.target.value === "selected" ? "selected" : "all";
+  renderChatModelScopeSettings();
+  if (chatModelScope.mode === "all") {
+    await persistChatModelScope();
+  }
+});
+
+$("chat-scope-select-all")?.addEventListener("click", () => {
+  const all = [];
+  providersList.forEach(p => {
+    if (!p.configured) return;
+    (p.models || []).filter(m => m.enabled !== false).forEach(m => all.push(`${p.id}::${m.id}`));
+  });
+  chatModelScope.allowed_models = all;
+  renderChatModelScopeSettings();
+});
+
+$("chat-scope-clear-all")?.addEventListener("click", () => {
+  chatModelScope.allowed_models = [];
+  renderChatModelScopeSettings();
+});
+
+$("save-chat-scope-btn")?.addEventListener("click", () => persistChatModelScope());
 
 function getDisplayedModels(provider) {
   const meta = getProviderMeta(provider);
@@ -1428,6 +1641,7 @@ async function toggleModelEnabledState(provider, modelId, enabled) {
   syncModelDropdown();
   syncAuditorModelDropdown();
   renderModelGrids();
+  renderChatModelScopeSettings();
   renderOrchParticipantsBuilder();
 }
 
@@ -1456,6 +1670,7 @@ async function batchToggleShownModels(enabled) {
   syncModelDropdown();
   syncAuditorModelDropdown();
   renderModelGrids();
+  renderChatModelScopeSettings();
   renderOrchParticipantsBuilder();
 }
 
@@ -1618,6 +1833,7 @@ async function testSingleModel(provider, modelId, setActive = true) {
   syncModelDropdown();
   syncAuditorModelDropdown();
   renderModelGrids();
+  renderChatModelScopeSettings();
   renderOrchParticipantsBuilder();
 }
 
@@ -1675,6 +1891,7 @@ $("api-key-form").addEventListener("submit", async e => {
     syncModelDropdown();
     syncAuditorModelDropdown();
     renderModelGrids();
+    renderChatModelScopeSettings();
     ensureDefaultOrchParticipants();
     $("setup-banner")?.classList.add("hidden");
 
@@ -1721,6 +1938,7 @@ if ($("custom-model-form")) {
       syncModelDropdown();
       syncAuditorModelDropdown();
       renderModelGrids();
+      renderChatModelScopeSettings();
       renderOrchParticipantsBuilder();
     } catch (err) {
       toast(err.message);
@@ -1746,14 +1964,8 @@ $("toggle-key").onclick = () => {
   $("toggle-key").textContent = i.type === "password" ? "Show" : "Hide";
 };
 
-document.querySelectorAll(".settings-tab").forEach(b => b.onclick = () => {
-  document.querySelectorAll(".settings-tab").forEach(x => x.classList.toggle("active", x === b));
-  document.querySelectorAll(".settings-panel").forEach(x => x.classList.add("hidden"));
-  $(b.dataset.tab).classList.remove("hidden");
-});
-
 /* ============================================================================
-   AI ORCHESTRATION FRONTEND INTEGRATION
+   AI ORCHESTRATION FRONTEND INTEGRATION (LAZY 50-CHAR TRANSCRIPT)
    ============================================================================ */
 
 function getConfiguredProvidersList() {
@@ -1792,10 +2004,24 @@ function ensureDefaultOrchParticipants() {
   });
 }
 
+function setOrchSubView(viewName) {
+  const v = viewName === "messages" ? "messages" : "events";
+  orchActiveSubView = v;
+  document.querySelectorAll(".orch-view-tab").forEach(b => b.classList.toggle("active", b.dataset.orchview === v));
+  $("orch-messages-view")?.classList.toggle("hidden", v !== "messages");
+  $("orch-events-view")?.classList.toggle("hidden", v !== "events");
+  try { localStorage.setItem(DEVICE_STATE_KEYS.orchSubView, v); } catch {}
+}
+
+document.querySelectorAll(".orch-view-tab").forEach(btn => {
+  btn.onclick = () => setOrchSubView(btn.dataset.orchview);
+});
+
 async function initOrchestrationPage() {
   ensureDefaultOrchParticipants();
   syncAuditorModelDropdown();
   renderOrchParticipantsBuilder();
+  setOrchSubView(localStorage.getItem(DEVICE_STATE_KEYS.orchSubView) || orchActiveSubView);
   await loadOrchJobsList();
 
   if (activeOrchJobId) {
@@ -1808,7 +2034,7 @@ async function initOrchestrationPage() {
 function showOrchBuilder() {
   stopOrchPolling();
   activeOrchJobId = null;
-  localStorage.removeItem("cortext_active_orch_job");
+  try { localStorage.removeItem(DEVICE_STATE_KEYS.orchJob); } catch {}
   $("orch-monitor-panel").classList.add("hidden");
   $("orch-builder-panel").classList.remove("hidden");
   renderOrchParticipantsBuilder();
@@ -2020,15 +2246,6 @@ $("orch-refresh-btn").onclick = async () => {
   toast("Orchestration state refreshed");
 };
 
-document.querySelectorAll(".orch-view-tab").forEach(btn => {
-  btn.onclick = () => {
-    orchActiveSubView = btn.dataset.orchview;
-    document.querySelectorAll(".orch-view-tab").forEach(b => b.classList.toggle("active", b === btn));
-    $("orch-messages-view").classList.toggle("hidden", orchActiveSubView !== "messages");
-    $("orch-events-view").classList.toggle("hidden", orchActiveSubView !== "events");
-  };
-});
-
 $("orch-create-form").addEventListener("submit", async e => {
   e.preventDefault();
   if (orchSubmitting) return;
@@ -2187,7 +2404,7 @@ async function openOrchJobMonitor(jobId) {
     selectedDeliverableFileIdx = 0;
   }
   activeOrchJobId = jobId;
-  localStorage.setItem("cortext_active_orch_job", jobId);
+  try { localStorage.setItem(DEVICE_STATE_KEYS.orchJob, jobId); } catch {}
   $("orch-builder-panel").classList.add("hidden");
   $("orch-monitor-panel").classList.remove("hidden");
   if ($("orch-preview-wrap")) $("orch-preview-wrap").classList.add("hidden");
@@ -2222,6 +2439,10 @@ async function fetchAndRenderOrchJob(jobId) {
       orchPollTimer = setTimeout(() => fetchAndRenderOrchJob(jobId), 1500);
     }
   } catch (err) {
+    if (err.status === 404) {
+      showOrchBuilder();
+      return;
+    }
     toast("Could not load orchestration job: " + err.message);
   }
 }
@@ -2292,7 +2513,8 @@ function renderAIContributionBar(participants, messages, events) {
       });
     }
     const st = modelStats.get(key);
-    st.chars += (m.content || "").length;
+    const charLen = m.content_length > 0 ? m.content_length : (m.content || "").length;
+    st.chars += charLen;
     st.msgs += 1;
   });
 
@@ -2658,11 +2880,31 @@ function renderOrchJobDetails(d) {
         const provShort = getProviderMeta(latestAuditMsg.provider).name;
         $("orch-audit-model-title").textContent = `${provShort} · ${latestAuditMsg.model} (${latestAuditMsg.latency_ms || 0} ms)`;
         $("orch-audit-summary").textContent = latestAuditMsg.completion_summary || "See full auditor report below.";
-        $("orch-audit-body").textContent = latestAuditMsg.content || "";
 
         const applyAuditBtn = $("orch-apply-audit-btn");
+        const cachedAuditContent = latestAuditMsg.has_full_content
+          ? latestAuditMsg.content
+          : (loadedOrchMessagesCache.get(`${d.id}:${latestAuditMsg.id}`) || "");
+        $("orch-audit-body").textContent = cachedAuditContent || latestAuditMsg.preview || "Click to load full audit report…";
+
+        const auditDetailsEl = auditReportEl.querySelector("details");
+        if (auditDetailsEl && !latestAuditMsg.has_full_content && !loadedOrchMessagesCache.has(`${d.id}:${latestAuditMsg.id}`) && latestAuditMsg.id) {
+          auditDetailsEl.ontoggle = async () => {
+            if (!auditDetailsEl.open || loadedOrchMessagesCache.has(`${d.id}:${latestAuditMsg.id}`)) return;
+            try {
+              const fullAudit = await api(`/api/orchestration/jobs/${encodeURIComponent(d.id)}/messages/${encodeURIComponent(latestAuditMsg.id)}`);
+              loadedOrchMessagesCache.set(`${d.id}:${latestAuditMsg.id}`, fullAudit.content || "");
+              $("orch-audit-body").textContent = fullAudit.content || "";
+              if (applyAuditBtn) {
+                const hasCode = fullAudit.action === "revise" || (fullAudit.content || "").includes("=== FILE:") || (fullAudit.content || "").includes("```");
+                applyAuditBtn.classList.toggle("hidden", !hasCode);
+              }
+            } catch {}
+          };
+        }
+
         if (applyAuditBtn) {
-          const hasCodeInAudit = latestAuditMsg.action === "revise" || latestAuditMsg.content.includes("=== FILE:") || latestAuditMsg.content.includes("```");
+          const hasCodeInAudit = latestAuditMsg.action === "revise" || cachedAuditContent.includes("=== FILE:") || cachedAuditContent.includes("```");
           applyAuditBtn.classList.toggle("hidden", !hasCodeInAudit);
           applyAuditBtn.onclick = () => applyAuditorFixes(d.id, latestAuditMsg.id);
         }
@@ -2670,7 +2912,7 @@ function renderOrchJobDetails(d) {
         const sendToWorkerBtn = $("orch-send-audit-worker-btn");
         if (sendToWorkerBtn) {
           sendToWorkerBtn.onclick = () => {
-            const summaryText = latestAuditMsg.completion_summary || latestAuditMsg.content;
+            const summaryText = latestAuditMsg.completion_summary || cachedAuditContent || latestAuditMsg.preview;
             if ($("orch-revision-input")) {
               $("orch-revision-input").value = `Please fix all issues identified by the Independent Auditor (${latestAuditMsg.model}):\n${summaryText}`;
               $("orch-revision-input").focus();
@@ -2795,10 +3037,11 @@ function renderOrchJobDetails(d) {
     revCard.classList.toggle("hidden", isActive);
   }
 
+  // Render Collapsible Collaboration Transcript with 50-char previews & click-to-load full message
   $("orch-msg-count").textContent = String(messages.length);
   const msgContainer = $("orch-messages-view");
-  const openTurnIndices = new Set(
-    [...msgContainer.querySelectorAll("details[open]")].map(el => el.dataset.turnIdx)
+  const openTurnKeys = new Set(
+    [...msgContainer.querySelectorAll("details[open]")].map(el => el.dataset.turnKey)
   );
   msgContainer.innerHTML = "";
 
@@ -2811,10 +3054,13 @@ function renderOrchJobDetails(d) {
     msgContainer.appendChild(emptyMsg);
   } else {
     messages.forEach((m, idx) => {
+      const turnKey = m.id ? `id_${m.id}` : `idx_${idx}`;
+      const cacheKey = `${d.id}:${m.id}`;
+
       const detailsEl = document.createElement("details");
       detailsEl.className = `orch-msg-collapsible role-${m.sender_role}`;
-      detailsEl.dataset.turnIdx = String(idx);
-      if (openTurnIndices.has(String(idx))) {
+      detailsEl.dataset.turnKey = turnKey;
+      if (openTurnKeys.has(turnKey)) {
         detailsEl.open = true;
       }
 
@@ -2839,12 +3085,16 @@ function renderOrchJobDetails(d) {
       modelBold.textContent = modelLabel;
       left.append(roleBadge, modelBold);
 
-      const displayContent = m.sender_role === "user" ? stripRevOptsTag(m.content) : m.content;
-      const previewSnippet = (m.completion_summary || displayContent || "").replace(/\s+/g, " ").trim().slice(0, 95);
+      const rawPreview = m.preview || m.completion_summary || (m.sender_role === "user" ? stripRevOptsTag(m.content) : m.content) || "";
+      const normalizedPreview = rawPreview.replace(/\s+/g, " ").trim();
+      const preview50 = [...normalizedPreview].slice(0, 50).join("");
+      const sizeHint = m.content_length > 0 ? ` (${(m.content_length / 1024).toFixed(1)} KB)` : "";
 
       const previewSpan = document.createElement("span");
       previewSpan.className = "orch-msg-preview";
-      previewSpan.textContent = previewSnippet ? `— ${previewSnippet}… (click to expand)` : "(click to expand)";
+      previewSpan.textContent = preview50
+        ? `— ${preview50}${[...normalizedPreview].length > 50 || m.content_length > 50 ? "…" : ""}${sizeHint}`
+        : `(click to load${sizeHint})`;
 
       const right = document.createElement("div");
       right.className = "orch-msg-meta";
@@ -2865,52 +3115,100 @@ function renderOrchJobDetails(d) {
       const innerCard = document.createElement("div");
       innerCard.style.padding = "12px 14px";
 
-      const toolsBar = document.createElement("div");
-      toolsBar.style.display = "flex";
-      toolsBar.style.gap = "8px";
-      toolsBar.style.marginBottom = "10px";
+      const renderLoadedTurnBody = fullText => {
+        innerCard.innerHTML = "";
+        const displayContent = m.sender_role === "user" ? stripRevOptsTag(fullText) : fullText;
 
-      const copyTurnBtn = document.createElement("button");
-      copyTurnBtn.type = "button";
-      copyTurnBtn.className = "mini-turn-btn";
-      copyTurnBtn.textContent = "📋 Copy Turn";
-      copyTurnBtn.onclick = async () => {
-        const ok = await copyTextToClipboard(displayContent);
-        toast(ok ? `✓ Turn #${idx + 1} copied` : "Copy failed");
-      };
+        const toolsBar = document.createElement("div");
+        toolsBar.style.display = "flex";
+        toolsBar.style.gap = "8px";
+        toolsBar.style.marginBottom = "10px";
 
-      const dlTurnBtn = document.createElement("button");
-      dlTurnBtn.type = "button";
-      dlTurnBtn.className = "mini-turn-btn";
-      dlTurnBtn.textContent = "⬇ Save Turn";
-      dlTurnBtn.onclick = () => {
-        const turnFiles = extractProjectFiles(displayContent, `${d.id}-turn-${idx + 1}`).files;
-        if (turnFiles.length > 1) {
-          downloadProjectZip(turnFiles, `${d.id}-turn-${idx + 1}`);
-        } else {
-          downloadSingleFileObj(turnFiles[0]);
+        const copyTurnBtn = document.createElement("button");
+        copyTurnBtn.type = "button";
+        copyTurnBtn.className = "mini-turn-btn";
+        copyTurnBtn.textContent = "📋 Copy Turn";
+        copyTurnBtn.onclick = async () => {
+          const ok = await copyTextToClipboard(displayContent);
+          toast(ok ? `✓ Turn #${idx + 1} copied` : "Copy failed");
+        };
+
+        const dlTurnBtn = document.createElement("button");
+        dlTurnBtn.type = "button";
+        dlTurnBtn.className = "mini-turn-btn";
+        dlTurnBtn.textContent = "⬇ Save Turn";
+        dlTurnBtn.onclick = () => {
+          const turnFiles = extractProjectFiles(displayContent, `${d.id}-turn-${idx + 1}`).files;
+          if (turnFiles.length > 1) {
+            downloadProjectZip(turnFiles, `${d.id}-turn-${idx + 1}`);
+          } else {
+            downloadSingleFileObj(turnFiles[0]);
+          }
+        };
+
+        toolsBar.append(copyTurnBtn, dlTurnBtn);
+
+        const body = document.createElement("div");
+        body.className = "orch-msg-body";
+        body.setAttribute("dir", "auto");
+        body.textContent = displayContent;
+
+        innerCard.append(toolsBar, body);
+
+        if (m.completion_summary) {
+          const sum = document.createElement("div");
+          sum.className = "orch-msg-summary";
+          sum.setAttribute("dir", "auto");
+          const sumBold = document.createElement("b");
+          sumBold.textContent = "Summary: ";
+          const span = document.createElement("span");
+          span.textContent = m.completion_summary;
+          sum.append(sumBold, span);
+          innerCard.appendChild(sum);
         }
       };
 
-      toolsBar.append(copyTurnBtn, dlTurnBtn);
+      const initialFull = m.has_full_content ? m.content : loadedOrchMessagesCache.get(cacheKey);
+      if (initialFull !== undefined) {
+        renderLoadedTurnBody(initialFull);
+      } else {
+        const placeholder = document.createElement("div");
+        placeholder.className = "muted-note";
+        placeholder.textContent = "Click to load full message from database…";
+        innerCard.appendChild(placeholder);
+      }
 
-      const body = document.createElement("div");
-      body.className = "orch-msg-body";
-      body.setAttribute("dir", "auto");
-      body.textContent = displayContent;
+      let loadingTurn = false;
+      const loadFullTurnIfNeeded = async () => {
+        if (!detailsEl.open || loadingTurn) return;
+        if (m.has_full_content || loadedOrchMessagesCache.has(cacheKey)) return;
+        if (!m.id) return;
 
-      innerCard.append(toolsBar, body);
+        loadingTurn = true;
+        innerCard.innerHTML = "";
+        const loadingNote = document.createElement("div");
+        loadingNote.className = "muted-note";
+        loadingNote.textContent = "Loading full message from database…";
+        innerCard.appendChild(loadingNote);
 
-      if (m.completion_summary) {
-        const sum = document.createElement("div");
-        sum.className = "orch-msg-summary";
-        sum.setAttribute("dir", "auto");
-        const sumBold = document.createElement("b");
-        sumBold.textContent = "Summary: ";
-        const span = document.createElement("span");
-        span.textContent = m.completion_summary;
-        sum.append(sumBold, span);
-        innerCard.appendChild(sum);
+        try {
+          const fullMsg = await api(`/api/orchestration/jobs/${encodeURIComponent(d.id)}/messages/${encodeURIComponent(m.id)}`);
+          loadedOrchMessagesCache.set(cacheKey, fullMsg.content || "");
+          renderLoadedTurnBody(fullMsg.content || "");
+        } catch (err) {
+          innerCard.innerHTML = "";
+          const errNote = document.createElement("div");
+          errNote.className = "orch-error-banner";
+          errNote.textContent = "Failed loading message: " + err.message;
+          innerCard.appendChild(errNote);
+        } finally {
+          loadingTurn = false;
+        }
+      };
+
+      detailsEl.addEventListener("toggle", loadFullTurnIfNeeded);
+      if (detailsEl.open && initialFull === undefined) {
+        loadFullTurnIfNeeded();
       }
 
       detailsEl.append(summaryEl, innerCard);
