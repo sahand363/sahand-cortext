@@ -24,6 +24,7 @@ import (
 	"github.com/sahand363/sahand-cortext/internal/orchestration"
 	"github.com/sahand363/sahand-cortext/internal/persona"
 	"github.com/sahand363/sahand-cortext/internal/provider"
+	"github.com/sahand363/sahand-cortext/internal/telegram"
 	"golang.org/x/crypto/bcrypt"
 	_ "modernc.org/sqlite"
 )
@@ -528,10 +529,6 @@ func (a *App) status(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// ============================================================================
-// PERSONAS / PLUGGABLE CHATBOTS & VOICE TRAINER ENDPOINTS
-// ============================================================================
-
 func (a *App) handlePersonas(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -635,11 +632,6 @@ func (a *App) handleTrainPersona(w http.ResponseWriter, r *http.Request) {
 	jsonOut(w, 200, res)
 }
 
-// ============================================================================
-// DYNAMIC PROVIDERS & MODELS ENDPOINTS
-// ============================================================================
-
-// GET /api/providers & POST /api/providers
 func (a *App) handleProviders(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -683,7 +675,6 @@ func (a *App) handleProviders(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// DELETE /api/providers/{id}
 func (a *App) handleProviderByID(w http.ResponseWriter, r *http.Request) {
 	id := provider.CanonicalID(strings.TrimPrefix(r.URL.Path, "/api/providers/"))
 	if id == "" {
@@ -1088,10 +1079,6 @@ func statusRank(s string) int {
 	}
 }
 
-// ============================================================================
-// SESSIONS & CHAT MESSAGES (WITH PERSONA SUPPORT)
-// ============================================================================
-
 func (a *App) listSessions(w http.ResponseWriter, r *http.Request) {
 	rows, err := a.db.Query(`SELECT id,title,coalesce(persona_id,''),pinned,updated_at FROM sessions ORDER BY pinned DESC, updated_at DESC`)
 	if err != nil {
@@ -1243,7 +1230,7 @@ func (a *App) sendMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var currentTitle, sessionPersonaID string
-	if a.db.QueryRow(`SELECT title, coalesce(persona_id,'') FROM sessions WHERE id=?`, body.SessionID).Scan(&currentTitle, &sessionPersonaID) != nil {
+	if a.db.QueryRow(`SELECT title, coalesce(persona_id,'') FROM sessions WHERE id=?`, body.SessionID).Scan(¤tTitle, &sessionPersonaID) != nil {
 		jsonOut(w, 404, map[string]string{"error": "session not found"})
 		return
 	}
@@ -1290,7 +1277,6 @@ func (a *App) sendMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	chosenModel = p.NormalizeModelID(chosenModel)
 
-	// Enforce either the active Persona's model allowlist or the Main Chat allowlist
 	if activeBot != nil && activeBot.ModelScopeMode == "selected" {
 		if !activeBot.IsModelAllowed(a.router.Registry(), normProvider, chosenModel) {
 			jsonOut(w, 403, map[string]string{"error": fmt.Sprintf("Model %s is not enabled for chatbot %q. Update its allowed models in Settings.", chosenModel, activeBot.Name)})
@@ -1399,10 +1385,6 @@ func (a *App) sendMessage(w http.ResponseWriter, r *http.Request) {
 		"persona_id": activePersonaID,
 	})
 }
-
-// ============================================================================
-// ORCHESTRATION REST ENDPOINTS
-// ============================================================================
 
 func (a *App) orchCreateJob(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -1847,6 +1829,11 @@ func main() {
 		orchStorage:  orchStorage,
 	}
 
+	// Initialize and start background Telegram Bot Bridge manager
+	tgBridge := telegram.NewBridgeManager(db, personaStore, router, app.providerKey)
+	bridgeCtx, bridgeCancel := context.WithCancel(context.Background())
+	tgBridge.StartSync(bridgeCtx)
+
 	collabEngine := orchestration.NewCollaborationEngine(
 		orchStorage,
 		router,
@@ -1933,7 +1920,8 @@ func main() {
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 	go func() {
 		<-sigChan
-		log.Println("[Server] Graceful shutdown signal received. Stopping worker pool...")
+		log.Println("[Server] Graceful shutdown signal received. Stopping services...")
+		bridgeCancel()
 		workerCancel()
 		orchPool.Stop()
 
