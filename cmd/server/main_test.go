@@ -2,15 +2,17 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
-	"github.com/sahand363/sahand-cortext/internal/orchestration"
-	"github.com/sahand363/sahand-cortext/internal/provider"
+	"[github.com/sahand363/sahand-cortext/internal/orchestration](https://github.com/sahand363/sahand-cortext/internal/orchestration)"
+	"[github.com/sahand363/sahand-cortext/internal/provider](https://github.com/sahand363/sahand-cortext/internal/provider)"
 	_ "modernc.org/sqlite"
 )
 
@@ -19,7 +21,7 @@ func TestChatContinuityAndOrchestrationAPIs(t *testing.T) {
 	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"choices":[{"message":{"content":"{\"action\":\"complete\",\"message\":\"Acknowledged.\",\"completion_summary\":\"Done\"}"}}]}`))
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"action\":\"complete\",\"message\":\"Acknowledged.\",\"completion_summary\":\"Done\"}"}}]}`))
 	}))
 	defer mockServer.Close()
 
@@ -58,7 +60,7 @@ func TestChatContinuityAndOrchestrationAPIs(t *testing.T) {
 	}
 	_ = app.setSetting("openrouter_api_key", "sk-test-key")
 
-	// 3. Test Orchestration Job REST Endpoints with Participants
+	// 3. Test Orchestration Job REST Endpoints & Lazy 50-char Transcript Loading
 	t.Run("Orchestration Job Lifecycle", func(t *testing.T) {
 		createBody, _ := json.Marshal(map[string]any{
 			"task":       "Perform architectural audit",
@@ -81,6 +83,46 @@ func TestChatContinuityAndOrchestrationAPIs(t *testing.T) {
 		_ = json.Unmarshal(w.Body.Bytes(), &created)
 		if created.ID == "" || created.Status != orchestration.StatusQueued {
 			t.Fatalf("invalid created job: %+v", created)
+		}
+
+		// Save a long collaboration message and verify /details returns 50-char preview while /messages/{id} returns full body
+		longText := "This is a detailed architectural plan exceeding fifty characters so we verify lazy transcript loading."
+		savedMsg, err := orchStorage.SaveCollaborationMessage(context.Background(), orchestration.CollaborationMessage{
+			JobID:      created.ID,
+			Round:      1,
+			TurnIndex:  1,
+			SenderRole: orchestration.RoleCoordinator,
+			Provider:   "openrouter",
+			Model:      "model-a",
+			Action:     orchestration.ActionContinue,
+			Content:    longText,
+		})
+		if err != nil {
+			t.Fatalf("SaveCollaborationMessage: %v", err)
+		}
+
+		req = httptest.NewRequest(http.MethodGet, "/api/orchestration/jobs/"+created.ID+"/details", nil)
+		w = httptest.NewRecorder()
+		app.orchGetJob(w, req)
+		if w.Code != 200 {
+			t.Fatalf("get details failed code %d: %s", w.Code, w.Body.String())
+		}
+		var details orchestration.JobDetails
+		_ = json.Unmarshal(w.Body.Bytes(), &details)
+		if len(details.Messages) != 1 || details.Messages[0].HasFullContent || len([]rune(details.Messages[0].Preview)) != 50 {
+			t.Fatalf("expected 50-char preview without full body in /details, got: %+v", details.Messages)
+		}
+
+		req = httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/orchestration/jobs/%s/messages/%d", created.ID, savedMsg.ID), nil)
+		w = httptest.NewRecorder()
+		app.orchGetJob(w, req)
+		if w.Code != 200 {
+			t.Fatalf("get single message failed code %d: %s", w.Code, w.Body.String())
+		}
+		var fullMsg orchestration.CollaborationMessage
+		_ = json.Unmarshal(w.Body.Bytes(), &fullMsg)
+		if !fullMsg.HasFullContent || fullMsg.Content != longText {
+			t.Fatalf("expected full message body on demand, got: %+v", fullMsg)
 		}
 
 		// Get Job by ID
@@ -134,6 +176,58 @@ func TestChatContinuityAndOrchestrationAPIs(t *testing.T) {
 		}
 	})
 
+	// 4. Test Main Chat Model Scope Enforcement
+	t.Run("Main Chat Model Scope Enforcement", func(t *testing.T) {
+		scopeBody, _ := json.Marshal(ChatModelScope{
+			Mode:          "selected",
+			AllowedModels: []string{"openrouter::allowed-model"},
+		})
+		req := httptest.NewRequest(http.MethodPost, "/api/chat/model-scope", bytes.NewReader(scopeBody))
+		w := httptest.NewRecorder()
+		app.handleChatModelScope(w, req)
+		if w.Code != 200 {
+			t.Fatalf("save chat model scope failed (%d): %s", w.Code, w.Body.String())
+		}
+
+		req = httptest.NewRequest(http.MethodPost, "/api/sessions", nil)
+		w = httptest.NewRecorder()
+		app.createSession(w, req)
+		var sess Session
+		_ = json.Unmarshal(w.Body.Bytes(), &sess)
+
+		// Blocked model must return 403
+		blockedMsg, _ := json.Marshal(map[string]any{
+			"session_id": sess.ID,
+			"message":    "Hello",
+			"provider":   "openrouter",
+			"model":      "blocked-model",
+		})
+		req = httptest.NewRequest(http.MethodPost, "/api/messages", bytes.NewReader(blockedMsg))
+		w = httptest.NewRecorder()
+		app.sendMessage(w, req)
+		if w.Code != 403 {
+			t.Fatalf("expected 403 for unallowed Main Chat model, got %d: %s", w.Code, w.Body.String())
+		}
+
+		// Allowed model must succeed
+		allowedMsg, _ := json.Marshal(map[string]any{
+			"session_id": sess.ID,
+			"message":    "Hello",
+			"provider":   "openrouter",
+			"model":      "allowed-model",
+		})
+		req = httptest.NewRequest(http.MethodPost, "/api/messages", bytes.NewReader(allowedMsg))
+		w = httptest.NewRecorder()
+		app.sendMessage(w, req)
+		if w.Code != 200 {
+			t.Fatalf("expected 200 for allowed Main Chat model, got %d: %s", w.Code, w.Body.String())
+		}
+
+		// Reset back to "all" so subsequent tests remain unaffected
+		_ = app.saveChatModelScope(ChatModelScope{Mode: "all"})
+	})
+
+	// 5. Test Dynamic 5th OpenAI-Compatible Provider End-to-End
 	t.Run("Dynamic 5th OpenAI-Compatible Provider End-to-End", func(t *testing.T) {
 		dynServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
@@ -148,7 +242,6 @@ func TestChatContinuityAndOrchestrationAPIs(t *testing.T) {
 		}))
 		defer dynServer.Close()
 
-		// 1. Register 5th provider via REST API
 		createProvBody, _ := json.Marshal(map[string]any{
 			"id":       "mistral-custom",
 			"name":     "Mistral Custom",
@@ -162,7 +255,6 @@ func TestChatContinuityAndOrchestrationAPIs(t *testing.T) {
 			t.Fatalf("create dynamic provider failed (%d): %s", w.Code, w.Body.String())
 		}
 
-		// 2. Verify /api/status exposes the new provider dynamically
 		req = httptest.NewRequest(http.MethodGet, "/api/status", nil)
 		w = httptest.NewRecorder()
 		app.status(w, req)
@@ -173,7 +265,6 @@ func TestChatContinuityAndOrchestrationAPIs(t *testing.T) {
 			t.Fatalf("expected mistral-custom to be configured in /api/status, got: %+v", statusResp)
 		}
 
-		// 3. Create a chat session and send a message routed to the 5th provider
 		req = httptest.NewRequest(http.MethodPost, "/api/sessions", nil)
 		w = httptest.NewRecorder()
 		app.createSession(w, req)
@@ -196,7 +287,6 @@ func TestChatContinuityAndOrchestrationAPIs(t *testing.T) {
 			t.Fatalf("unexpected chat response: %s", w.Body.String())
 		}
 
-		// 4. Delete dynamic provider via REST API
 		req = httptest.NewRequest(http.MethodDelete, "/api/providers/mistral-custom", nil)
 		w = httptest.NewRecorder()
 		app.handleProviderByID(w, req)
