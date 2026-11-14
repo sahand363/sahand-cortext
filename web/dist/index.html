@@ -25,7 +25,7 @@
     <div class="wordmark"><span class="logo-symbol">c.</span><span class="wordmark-name"><b>Sahand</b><i>—</i><b>CorText</b></span></div>
     <div class="eyebrow">YOUR PRIVATE INTELLIGENCE SPACE</div>
     <h1>Good to have<br>you back.</h1><p class="muted">Sign in to continue to your workspace.</p>
-    <form id="login-form"><label>Username<input id="username" autocomplete="username" value="admin" placeholder="admin" required></label><label>Password<input id="password" type="password" autocomplete="current-password" required></label><button class="btn btn-primary full">Enter workspace <span>↗</span></button><div id="login-error" class="form-error"></div></form>
+    <form id="login-form"><label>Username<input id="username" autocomplete="username" placeholder="admin" required></label><label>Password<input id="password" type="password" autocomplete="current-password" required></label><button class="btn btn-primary full">Enter workspace <span>↗</span></button><div id="login-error" class="form-error"></div></form>
     <div class="auth-foot"><span class="secure-dot"></span> Private connection · Single-user workspace</div>
   </div>
   <div class="auth-orbit orbit-one"></div><div class="auth-orbit orbit-two"></div>
@@ -65,9 +65,8 @@
       <div class="top-left"><button id="mobile-menu" class="icon-btn mobile-menu" aria-label="Open menu">☰</button><div class="breadcrumb"><span>Workspace</span><i>/</i><b id="breadcrumb-page">Chat</b></div></div>
       <div class="top-right">
         <button type="button" id="topbar-theme-btn" class="icon-btn mobile-theme-btn" title="Switch theme" aria-label="Toggle theme">☀</button>
-        <div class="server-state"><span class="live-dot"></span><span>System operational</span></div>
-        <div class="top-divider"></div>
-        <div class="provider-chip"><span class="gemini-glyph">✳</span> <span id="header-provider-name">AI HUB</span> <span class="chip-state" id="header-provider-state">SETUP</span></div>
+        <div class="server-state"><span class="live-dot" title="System operational"></span></div>
+        <div class="provider-chip"><span id="header-provider-name">AI HUB</span> <span class="chip-state" id="header-provider-state">SETUP</span></div>
       </div>
     </header>
 
@@ -89,7 +88,6 @@
         <div id="chat-active" class="chat-active hidden">
           <div class="conversation-head">
             <div class="conversation-title-area">
-              <div class="eyebrow">ORDINARY CHAT · PERSISTENT CONTEXT</div>
               <div class="title-display-row" id="title-display-row">
                 <span id="pinned-indicator" class="pinned-badge hidden" title="Pinned conversation">📌</span>
                 <h2 id="conversation-title" dir="auto">New conversation</h2>
@@ -109,19 +107,15 @@
           </div>
           <div class="messages" id="messages"></div>
           <div class="composer-area">
-            <div class="composer-context"><span><i class="live-dot"></i> <b id="active-provider-label">Gemini</b> · <span id="active-model-label">gemini-2.0-flash</span></span><span class="ctx-hint">Multi-turn session context enabled</span></div>
             <form id="chat-form" class="composer">
-              <textarea id="message-input" dir="auto" rows="1" placeholder="Ask anything in Persian or English… / پیام خود را بنویسید…" required></textarea>
+              <textarea id="message-input" dir="auto" rows="1" placeholder="Type here" required></textarea>
               <div class="composer-bottom">
                 <div class="composer-left">
-                  <div class="model-picker"><span class="gemini-glyph">✳</span><select id="model"></select><span class="select-arrow">⌄</span></div>
-                  <button type="button" class="btn-link" data-goto="models" title="Check which models work">Test models ↗</button>
-                  <span class="composer-hint">↵ to send · Shift + ↵ for new line</span>
+                  <div class="model-picker"><span class="gemini-glyph">✳</span><select id="model" aria-label="Select model"></select><span class="select-arrow">⌄</span></div>
                 </div>
                 <button class="send-button" aria-label="Send message">↑</button>
               </div>
             </form>
-            <div class="composer-disclaimer">Sahand-CorText can make mistakes. Verify important information.</div>
           </div>
         </div>
       </section>
