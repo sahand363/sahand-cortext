@@ -13,6 +13,10 @@ const DEVICE_STATE_KEYS = {
 
 let providersList = [];
 let providerMap = {};
+let personasList = [];
+let personaMap = {};
+let editingPersonaId = null;
+
 let selectedProvider = "";
 let activeProvider = "";
 let activeModel = "";
@@ -26,9 +30,9 @@ let chatModelScope = {
 };
 
 let orchParticipantsDraft = [
-  { role: "coordinator", name: "Coordinator / Architect", provider: "", model: "" },
-  { role: "worker", name: "Worker / Developer", provider: "", model: "" },
-  { role: "auditor", name: "Quality Assurance / Auditor", provider: "", model: "" }
+  { role: "coordinator", name: "Coordinator / Architect", provider: "", model: "", persona_id: "" },
+  { role: "worker", name: "Worker / Developer", provider: "", model: "", persona_id: "" },
+  { role: "auditor", name: "Quality Assurance / Auditor", provider: "", model: "", persona_id: "" }
 ];
 let orchJobsCache = [];
 let activeOrchJobId = localStorage.getItem(DEVICE_STATE_KEYS.orchJob) || null;
@@ -518,6 +522,441 @@ function downloadProjectZip(files, jobId) {
 }
 
 /* ============================================================================
+   PLUGGABLE CHATBOTS / PERSONAS REGISTRY & VOICE TRAINER
+   ============================================================================ */
+
+function hydratePersonas(list) {
+  if (!Array.isArray(list)) return;
+  personasList = list;
+  personaMap = {};
+  personasList.forEach(p => {
+    personaMap[p.id] = p;
+  });
+  syncChatPersonaDropdown();
+  renderPersonasGrid();
+  renderOrchParticipantsBuilder();
+}
+
+function getPersonaById(id) {
+  return id ? (personaMap[id] || null) : null;
+}
+
+function getActiveSessionPersona() {
+  const cur = sessionsCache.find(s => s.id === currentSession);
+  if (cur && cur.persona_id) {
+    return getPersonaById(cur.persona_id);
+  }
+  const selVal = $("chat-persona-select")?.value || "";
+  return getPersonaById(selVal);
+}
+
+function syncChatPersonaDropdown() {
+  const sel = $("chat-persona-select");
+  if (!sel) return;
+  const cur = sessionsCache.find(s => s.id === currentSession);
+  const targetPersonaId = cur ? (cur.persona_id || "") : (sel.value || "");
+
+  sel.innerHTML = "";
+  const defOpt = document.createElement("option");
+  defOpt.value = "";
+  defOpt.textContent = "Default Assistant";
+  sel.appendChild(defOpt);
+
+  personasList.filter(p => p.enabled !== false).forEach(p => {
+    const opt = document.createElement("option");
+    opt.value = p.id;
+    opt.textContent = `${p.icon || "🤖"} ${p.name}`;
+    sel.appendChild(opt);
+  });
+
+  if ([...sel.options].some(o => o.value === targetPersonaId)) {
+    sel.value = targetPersonaId;
+  } else {
+    sel.value = "";
+  }
+}
+
+$("chat-persona-select")?.addEventListener("change", async e => {
+  const pid = e.target.value || "";
+  const bot = getPersonaById(pid);
+  if (currentSession) {
+    try {
+      await api("/api/sessions", {
+        method: "PATCH",
+        body: JSON.stringify({ id: currentSession, persona_id: pid })
+      });
+      const sess = sessionsCache.find(s => s.id === currentSession);
+      if (sess) sess.persona_id = pid;
+    } catch (err) {
+      toast("Could not switch chatbot: " + err.message);
+    }
+  }
+  syncModelDropdown();
+  if (bot && bot.default_provider && bot.default_model) {
+    const comp = `${bot.default_provider}::${bot.default_model}`;
+    if ([...$("model").options].some(o => o.value === comp)) {
+      setActiveSelectionUI(bot.default_provider, bot.default_model);
+    }
+  }
+  toast(bot ? `Switched to ${bot.icon || "🤖"} ${bot.name}` : "Switched to Default Assistant");
+});
+
+function renderPersonasGrid() {
+  const grid = $("personas-list-grid");
+  if (!grid) return;
+  grid.innerHTML = "";
+
+  if (!personasList.length) {
+    const empty = document.createElement("div");
+    empty.className = "orch-empty-note";
+    empty.textContent = "No custom chatbots yet. Click \"＋ New Chatbot / Voice Clone\" to create a specialist assistant or train a bot to talk like you.";
+    grid.appendChild(empty);
+    return;
+  }
+
+  personasList.forEach(p => {
+    const card = document.createElement("div");
+    card.className = "persona-card";
+
+    const top = document.createElement("div");
+    top.className = "persona-card-top";
+
+    const titleArea = document.createElement("div");
+    titleArea.className = "persona-card-title";
+    const iconSpan = document.createElement("span");
+    iconSpan.className = "persona-card-icon";
+    iconSpan.textContent = p.icon || "🤖";
+
+    const infoDiv = document.createElement("div");
+    const nameB = document.createElement("b");
+    nameB.textContent = p.name;
+    const descSmall = document.createElement("small");
+    descSmall.textContent = p.description || (p.voice_blueprint ? "Trained Voice & Style Persona" : "Custom AI Persona");
+    infoDiv.append(nameB, descSmall);
+    titleArea.append(iconSpan, infoDiv);
+
+    const badges = document.createElement("div");
+    badges.className = "api-model-badges";
+    if (p.voice_blueprint) {
+      const vBadge = document.createElement("span");
+      vBadge.className = "model-badge badge-working";
+      vBadge.textContent = "🎙️ VOICE TRAINED";
+      badges.appendChild(vBadge);
+    }
+    if (p.telegram_enabled) {
+      const tgBadge = document.createElement("span");
+      tgBadge.className = "model-badge free-badge";
+      tgBadge.textContent = p.has_telegram_token ? "✈ TG READY" : "✈ TG NO TOKEN";
+      badges.appendChild(tgBadge);
+    }
+    const scopeBadge = document.createElement("span");
+    scopeBadge.className = "model-badge badge-untested";
+    scopeBadge.textContent = p.model_scope_mode === "selected"
+      ? `${(p.allowed_models || []).length} ALLOWED MODELS`
+      : "ALL MODELS";
+    badges.appendChild(scopeBadge);
+
+    top.append(titleArea, badges);
+
+    const metaLine = document.createElement("div");
+    metaLine.className = "api-model-meta";
+    const defText = (p.default_provider && p.default_model)
+      ? `Default: ${getProviderMeta(p.default_provider).short_name} · ${p.default_model}`
+      : "Default: Workspace active model";
+    const exCount = (p.few_shot_examples || []).length;
+    metaLine.textContent = `${defText}${exCount > 0 ? ` · ${exCount} style anchor example(s)` : ""}`;
+
+    const actions = document.createElement("div");
+    actions.className = "session-card-tools";
+
+    const chatBtn = document.createElement("button");
+    chatBtn.type = "button";
+    chatBtn.className = "btn btn-primary btn-small";
+    chatBtn.textContent = "💬 Chat Now";
+    chatBtn.onclick = async () => {
+      switchPage("chat");
+      await newSession(p.id);
+    };
+
+    const editBtn = document.createElement("button");
+    editBtn.type = "button";
+    editBtn.className = "tool-btn small";
+    editBtn.textContent = "✎ Edit / Train";
+    editBtn.onclick = () => openPersonaEditor(p);
+
+    const delBtn = document.createElement("button");
+    delBtn.type = "button";
+    delBtn.className = "tool-btn small danger";
+    delBtn.textContent = "🗑 Delete";
+    delBtn.onclick = async () => {
+      try {
+        const res = await api(`/api/personas/${encodeURIComponent(p.id)}`, { method: "DELETE" });
+        hydratePersonas(res.personas || []);
+        toast(`🗑 Deleted ${p.name}`);
+      } catch (err) {
+        toast("Delete failed: " + err.message);
+      }
+    };
+
+    actions.append(chatBtn, editBtn, delBtn);
+    card.append(top, metaLine, actions);
+    grid.appendChild(card);
+  });
+}
+
+function renderPersonaAllowedModelsCheckboxes(selectedList) {
+  const listEl = $("per-allowed-models-list");
+  if (!listEl) return;
+  listEl.innerHTML = "";
+  const allowedSet = new Set(selectedList || []);
+
+  providersList.forEach(p => {
+    if (!p.configured) return;
+    const enabledModels = (p.models || []).filter(m => m.enabled !== false);
+    if (!enabledModels.length) return;
+
+    const group = document.createElement("div");
+    group.className = "chat-scope-group";
+
+    const groupTitle = document.createElement("div");
+    groupTitle.className = "chat-scope-group-title";
+    groupTitle.textContent = `${p.icon || "⚡"} ${p.name}`;
+    group.appendChild(groupTitle);
+
+    enabledModels.forEach(m => {
+      const composite = `${p.id}::${m.id}`;
+      const row = document.createElement("label");
+      row.className = "chat-scope-item";
+
+      const chk = document.createElement("input");
+      chk.type = "checkbox";
+      chk.value = composite;
+      chk.checked = allowedSet.has(composite);
+
+      const nameSpan = document.createElement("span");
+      nameSpan.textContent = `${m.display_name || m.id} (${m.id})`;
+      row.append(chk, nameSpan);
+
+      if (m.status === "working") {
+        const badge = document.createElement("span");
+        badge.className = "model-badge badge-working";
+        badge.textContent = `✓ ${m.latency_ms} ms`;
+        row.appendChild(badge);
+      }
+      group.appendChild(row);
+    });
+
+    listEl.appendChild(group);
+  });
+}
+
+function openPersonaEditor(existing) {
+  editingPersonaId = existing ? existing.id : "__new__";
+  $("persona-editor-form")?.classList.remove("hidden");
+
+  buildUnifiedModelOptions($("per-train-model"));
+  buildUnifiedModelOptions($("per-default-model"));
+  if ($("per-default-model")) {
+    const autoOpt = document.createElement("option");
+    autoOpt.value = "";
+    autoOpt.textContent = "Use Workspace Active Model";
+    $("per-default-model").prepend(autoOpt);
+  }
+
+  if (existing) {
+    $("persona-form-title").textContent = `Edit Chatbot · ${existing.name}`;
+    $("per-name").value = existing.name || "";
+    $("per-icon").value = existing.icon || "🤖";
+    $("per-desc").value = existing.description || "";
+    $("per-system-prompt").value = existing.system_prompt || "";
+    $("per-voice-blueprint").value = existing.voice_blueprint || "";
+    $("per-few-shot").value = JSON.stringify(existing.few_shot_examples || [], null, 2);
+    $("per-knowledge").value = existing.knowledge_notes || "";
+
+    const defComp = (existing.default_provider && existing.default_model)
+      ? `${existing.default_provider}::${existing.default_model}`
+      : "";
+    $("per-default-model").value = [...$("per-default-model").options].some(o => o.value === defComp) ? defComp : "";
+
+    $("per-scope-mode").value = existing.model_scope_mode === "selected" ? "selected" : "all";
+    $("per-allowed-models-wrap").classList.toggle("hidden", $("per-scope-mode").value !== "selected");
+    renderPersonaAllowedModelsCheckboxes(existing.allowed_models || []);
+
+    $("per-tg-enabled").checked = !!existing.telegram_enabled;
+    $("per-tg-fields").classList.toggle("hidden", !existing.telegram_enabled);
+    $("per-tg-token").value = "";
+    $("per-tg-token-status").textContent = existing.has_telegram_token ? "Saved on server" : "Not set";
+    $("per-tg-users").value = (existing.telegram_allowed_users || []).join(", ");
+  } else {
+    $("persona-form-title").textContent = "Create Chatbot / Voice Clone";
+    $("per-name").value = "";
+    $("per-icon").value = "🤖";
+    $("per-desc").value = "";
+    $("per-system-prompt").value = "";
+    $("per-voice-blueprint").value = "";
+    $("per-few-shot").value = "[]";
+    $("per-knowledge").value = "";
+    $("per-default-model").value = "";
+    $("per-scope-mode").value = "all";
+    $("per-allowed-models-wrap").classList.add("hidden");
+    renderPersonaAllowedModelsCheckboxes([]);
+    $("per-tg-enabled").checked = false;
+    $("per-tg-fields").classList.add("hidden");
+    $("per-tg-token").value = "";
+    $("per-tg-token-status").textContent = "Not set";
+    $("per-tg-users").value = "";
+  }
+
+  $("per-train-log").value = "";
+  $("per-train-status").textContent = "";
+  $("persona-editor-form")?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+function closePersonaEditor() {
+  editingPersonaId = null;
+  $("persona-editor-form")?.classList.add("hidden");
+}
+
+$("new-persona-btn")?.addEventListener("click", () => openPersonaEditor(null));
+$("cancel-persona-btn")?.addEventListener("click", () => closePersonaEditor());
+
+$("per-scope-mode")?.addEventListener("change", e => {
+  const isSel = e.target.value === "selected";
+  $("per-allowed-models-wrap")?.classList.toggle("hidden", !isSel);
+  if (isSel && !$("per-allowed-models-list")?.children.length) {
+    renderPersonaAllowedModelsCheckboxes([]);
+  }
+});
+
+$("per-models-select-all")?.addEventListener("click", () => {
+  $("per-allowed-models-list")?.querySelectorAll("input[type='checkbox']").forEach(c => { c.checked = true; });
+});
+$("per-models-clear-all")?.addEventListener("click", () => {
+  $("per-allowed-models-list")?.querySelectorAll("input[type='checkbox']").forEach(c => { c.checked = false; });
+});
+
+$("per-tg-enabled")?.addEventListener("change", e => {
+  $("per-tg-fields")?.classList.toggle("hidden", !e.target.checked);
+});
+
+$("per-train-file")?.addEventListener("change", async e => {
+  const file = e.target.files?.[0];
+  if (!file) return;
+  try {
+    const text = await file.text();
+    $("per-train-log").value = text.slice(0, 250000);
+    toast(`📂 Loaded ${file.name} (${(file.size / 1024).toFixed(1)} KB)`);
+  } catch (err) {
+    toast("Could not read file: " + err.message);
+  }
+});
+
+$("per-run-train-btn")?.addEventListener("click", async () => {
+  const rawChatLog = $("per-train-log").value.trim();
+  if (!rawChatLog) {
+    toast("Please paste or upload a chat log first.");
+    return;
+  }
+  const btn = $("per-run-train-btn");
+  const statusEl = $("per-train-status");
+  btn.disabled = true;
+  btn.textContent = "⏳ Analyzing your voice & rhythm…";
+  statusEl.textContent = "Extracting your messages and distilling style blueprint…";
+
+  const trainerModel = $("per-train-model")?.value || "";
+  const [tProv, tMod] = trainerModel.includes("::") ? trainerModel.split("::") : [activeProvider, activeModel];
+
+  try {
+    const res = await api("/api/personas/train", {
+      method: "POST",
+      body: JSON.stringify({
+        target_name: $("per-train-speaker").value.trim() || $("per-name").value.trim() || "Me",
+        raw_chat_log: rawChatLog,
+        extra_notes: $("per-train-hints").value.trim(),
+        provider: tProv,
+        model: tMod,
+        max_examples: 6
+      })
+    });
+    $("per-voice-blueprint").value = res.voice_blueprint || "";
+    $("per-few-shot").value = JSON.stringify(res.few_shot_examples || [], null, 2);
+    statusEl.textContent = `✓ Distilled from ${res.matched_replies} matched replies (${res.detected_format})`;
+    toast("✨ Voice Blueprint & Style Anchor Examples generated!");
+  } catch (err) {
+    statusEl.textContent = `✗ ${err.message}`;
+    toast("Training failed: " + err.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "✨ Distill Voice Blueprint & Examples";
+  }
+});
+
+$("persona-editor-form")?.addEventListener("submit", async e => {
+  e.preventDefault();
+  const btn = $("save-persona-btn");
+  btn.disabled = true;
+  btn.textContent = "Saving Chatbot…";
+
+  let fewShotParsed = [];
+  try {
+    const rawFS = $("per-few-shot").value.trim();
+    if (rawFS) {
+      const parsed = JSON.parse(rawFS);
+      if (Array.isArray(parsed)) fewShotParsed = parsed;
+    }
+  } catch {
+    toast("Invalid JSON in Style Anchor Examples — fix formatting before saving.");
+    btn.disabled = false;
+    btn.innerHTML = 'Save Chatbot Persona <span>↗</span>';
+    return;
+  }
+
+  const defComp = $("per-default-model").value || "";
+  const [defProv, defMod] = defComp.includes("::") ? defComp.split("::") : ["", ""];
+
+  const allowedModels = [];
+  $("per-allowed-models-list")?.querySelectorAll("input[type='checkbox']:checked").forEach(chk => {
+    allowedModels.push(chk.value);
+  });
+
+  const tgUsers = ($("per-tg-users").value || "")
+    .split(",")
+    .map(s => s.trim())
+    .filter(Boolean);
+
+  try {
+    const res = await api("/api/personas", {
+      method: "POST",
+      body: JSON.stringify({
+        id: editingPersonaId && editingPersonaId !== "__new__" ? editingPersonaId : "",
+        name: $("per-name").value.trim(),
+        icon: $("per-icon").value.trim() || "🤖",
+        description: $("per-desc").value.trim(),
+        system_prompt: $("per-system-prompt").value.trim(),
+        voice_blueprint: $("per-voice-blueprint").value.trim(),
+        few_shot_examples: fewShotParsed,
+        knowledge_notes: $("per-knowledge").value.trim(),
+        default_provider: defProv,
+        default_model: defMod,
+        model_scope_mode: $("per-scope-mode").value,
+        allowed_models: allowedModels,
+        telegram_enabled: $("per-tg-enabled").checked,
+        telegram_bot_token: $("per-tg-token").value.trim(),
+        telegram_allowed_users: tgUsers
+      })
+    });
+    hydratePersonas(res.personas || []);
+    closePersonaEditor();
+    toast(`✓ Saved chatbot "${res.persona.name}"`);
+  } catch (err) {
+    toast("Save failed: " + err.message);
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = 'Save Chatbot Persona <span>↗</span>';
+  }
+});
+
+/* ============================================================================
    DYNAMIC PROVIDER REGISTRY & CUSTOM SPEC BUILDER
    ============================================================================ */
 
@@ -823,6 +1262,9 @@ function applyStatus(s) {
       if (providerMap[pid]) providerMap[pid].configured = !!s.providers[pid];
     });
   }
+  if (Array.isArray(s.personas)) {
+    hydratePersonas(s.personas);
+  }
   if (s.chat_model_scope && typeof s.chat_model_scope === "object") {
     chatModelScope = {
       mode: s.chat_model_scope.mode === "selected" ? "selected" : "all",
@@ -991,6 +1433,8 @@ function updateCurrentSessionHeader() {
   const cur = sessionsCache.find(s => s.id === currentSession);
   resetDeleteButton();
   closeRenameBar();
+  syncChatPersonaDropdown();
+  syncModelDropdown();
   if (!cur) return;
   $("conversation-title").textContent = cur.title;
   $("pinned-indicator").classList.toggle("hidden", !cur.pinned);
@@ -1071,7 +1515,8 @@ async function loadSessions() {
     title.setAttribute("dir", "auto");
     title.textContent = (s.pinned ? "📌 " : "") + s.title;
     const meta = document.createElement("span");
-    meta.textContent = "Open conversation →";
+    const bot = getPersonaById(s.persona_id);
+    meta.textContent = bot ? `${bot.icon || "🤖"} ${bot.name} · Open →` : "Open conversation →";
     cardMain.append(title, meta);
 
     const cardTools = document.createElement("div");
@@ -1121,15 +1566,25 @@ async function loadSessions() {
   }
 }
 
-async function newSession() {
-  const s = await api("/api/sessions", { method: "POST" });
+async function newSession(personaId = "") {
+  const s = await api("/api/sessions", {
+    method: "POST",
+    body: JSON.stringify({ persona_id: personaId })
+  });
   currentSession = s.id;
   try { localStorage.setItem(DEVICE_STATE_KEYS.session, s.id); } catch {}
   $("chat-empty").classList.add("hidden");
   $("chat-active").classList.remove("hidden");
-  $("conversation-title").textContent = "New conversation";
+  $("conversation-title").textContent = s.title || "New conversation";
   $("messages").innerHTML = "";
   await loadSessions();
+  const bot = getPersonaById(s.persona_id);
+  if (bot && bot.default_provider && bot.default_model) {
+    const comp = `${bot.default_provider}::${bot.default_model}`;
+    if ([...$("model").options].some(o => o.value === comp)) {
+      setActiveSelectionUI(bot.default_provider, bot.default_model);
+    }
+  }
   $("message-input").focus();
 }
 
@@ -1273,7 +1728,8 @@ $("chat-form").addEventListener("submit", async e => {
   e.preventDefault();
   const input = $("message-input"), message = input.value.trim();
   if (!message) return;
-  if (!currentSession) await newSession();
+  const selectedPersonaId = $("chat-persona-select")?.value || "";
+  if (!currentSession) await newSession(selectedPersonaId);
   input.value = "";
   resizeMessageInput();
   addMessage({ role: "user", content: message });
@@ -1289,7 +1745,13 @@ $("chat-form").addEventListener("submit", async e => {
     }
     const out = await api("/api/messages", {
       method: "POST",
-      body: JSON.stringify({ session_id: currentSession, message, provider, model })
+      body: JSON.stringify({
+        session_id: currentSession,
+        persona_id: selectedPersonaId,
+        message,
+        provider,
+        model
+      })
     });
     $("messages").lastElementChild.remove();
     addMessage({ role: "assistant", content: out.reply });
@@ -1323,6 +1785,9 @@ function switchSettingsTab(tabId) {
   try { localStorage.setItem(DEVICE_STATE_KEYS.settingsTab, tabId); } catch {}
   if (tabId === "general-settings") {
     renderChatModelScopeSettings();
+  }
+  if (tabId === "personas-settings") {
+    renderPersonasGrid();
   }
 }
 
@@ -1403,6 +1868,10 @@ async function loadProviderModels(provider, showToastMsg = false) {
 }
 
 function isModelAllowedInMainChat(providerId, modelId) {
+  const activeBot = getActiveSessionPersona();
+  if (activeBot && activeBot.model_scope_mode === "selected") {
+    return (activeBot.allowed_models || []).includes(`${providerId}::${modelId}`);
+  }
   if (chatModelScope.mode !== "selected") return true;
   const composite = `${providerId}::${modelId}`;
   return chatModelScope.allowed_models.includes(composite);
@@ -1460,6 +1929,15 @@ function syncModelDropdown() {
   const sel = $("model");
   if (!sel) return;
   buildUnifiedModelOptions(sel, { applyChatScope: true });
+
+  const activeBot = getActiveSessionPersona();
+  if (activeBot && activeBot.default_provider && activeBot.default_model) {
+    const botComp = `${activeBot.default_provider}::${activeBot.default_model}`;
+    if ([...sel.options].some(o => o.value === botComp)) {
+      sel.value = botComp;
+      return;
+    }
+  }
 
   const targetVal = `${activeProvider}::${activeModel}`;
   if ([...sel.options].some(o => o.value === targetVal)) {
@@ -1965,7 +2443,7 @@ $("toggle-key").onclick = () => {
 };
 
 /* ============================================================================
-   AI ORCHESTRATION FRONTEND INTEGRATION (LAZY 50-CHAR TRANSCRIPT)
+   AI ORCHESTRATION FRONTEND INTEGRATION (WITH PERSONAS & 50-CHAR TRANSCRIPT)
    ============================================================================ */
 
 function getConfiguredProvidersList() {
@@ -2134,6 +2612,26 @@ function renderOrchParticipantsBuilder() {
     const gridRow = document.createElement("div");
     gridRow.className = "orch-part-grid";
 
+    // Optional Persona / Chatbot selector
+    const botWrap = document.createElement("label");
+    const botSpan = document.createElement("span");
+    botSpan.textContent = "Chatbot Persona (Optional)";
+    botWrap.appendChild(botSpan);
+
+    const botSelect = document.createElement("select");
+    const defaultBotOpt = document.createElement("option");
+    defaultBotOpt.value = "";
+    defaultBotOpt.textContent = "Standard Role Prompt";
+    botSelect.appendChild(defaultBotOpt);
+
+    personasList.filter(b => b.enabled !== false).forEach(b => {
+      const o = document.createElement("option");
+      o.value = b.id;
+      o.textContent = `${b.icon || "🤖"} ${b.name}`;
+      if (part.persona_id === b.id) o.selected = true;
+      botSelect.appendChild(o);
+    });
+
     const provWrap = document.createElement("label");
     const provSpan = document.createElement("span");
     provSpan.textContent = "Provider";
@@ -2206,6 +2704,16 @@ function renderOrchParticipantsBuilder() {
       }
     }
 
+    botSelect.onchange = () => {
+      part.persona_id = botSelect.value;
+      const chosenBot = getPersonaById(part.persona_id);
+      if (chosenBot && chosenBot.default_provider && chosenBot.default_model) {
+        part.provider = chosenBot.default_provider;
+        part.model = chosenBot.default_model;
+        provSelect.value = part.provider;
+        populateModelsForPart();
+      }
+    };
     provSelect.onchange = () => {
       part.provider = provSelect.value;
       part.model = getDefaultModelForProvider(part.provider);
@@ -2216,9 +2724,10 @@ function renderOrchParticipantsBuilder() {
     };
 
     populateModelsForPart();
+    botWrap.appendChild(botSelect);
     provWrap.appendChild(provSelect);
     modWrap.appendChild(modSelect);
-    gridRow.append(provWrap, modWrap);
+    gridRow.append(botWrap, provWrap, modWrap);
 
     row.append(topBar, gridRow);
     container.appendChild(row);
@@ -2233,7 +2742,8 @@ $("orch-add-participant").onclick = () => {
     role: "worker",
     name: "Worker / Developer",
     provider: defProv,
-    model: defMod
+    model: defMod,
+    persona_id: ""
   });
   renderOrchParticipantsBuilder();
 };
@@ -2311,17 +2821,22 @@ $("orch-create-form").addEventListener("submit", async e => {
         auto_retry: autoRetry,
         switch_participant: switchParticipant,
         allow_global_fallback: allowGlobalFallback,
-        participants: orchParticipantsDraft.map((p, idx) => ({
-          role: p.role,
-          name: p.role === "coordinator"
+        participants: orchParticipantsDraft.map((p, idx) => {
+          const bot = getPersonaById(p.persona_id);
+          const baseName = p.role === "coordinator"
             ? "Coordinator / Architect"
             : p.role === "auditor"
               ? "Quality Assurance / Auditor"
-              : "Worker / Developer",
-          provider: p.provider,
-          model: p.model,
-          sort_order: idx
-        }))
+              : "Worker / Developer";
+          return {
+            role: p.role,
+            name: bot ? `${bot.icon || "🤖"} ${bot.name} (${baseName})` : baseName,
+            provider: p.provider,
+            model: p.model,
+            system_prompt: bot ? (bot.voice_blueprint || bot.system_prompt || "") : "",
+            sort_order: idx
+          };
+        })
       })
     });
 
@@ -2785,9 +3300,11 @@ function renderOrchJobDetails(d) {
     const answeredLastTurn = !!(lastAIMsg && lastAIMsg.sender_role === p.role && lastAIMsg.provider === p.provider && lastAIMsg.model === p.model);
 
     pill.className = `orch-roster-pill${isWorkingNow ? " working-now" : ""}`;
-    let roleLabel = "Worker / Developer";
-    if (p.role === "coordinator") roleLabel = "Coordinator / Architect";
-    if (p.role === "auditor") roleLabel = "Quality Assurance / Auditor";
+    let roleLabel = p.name || "Worker / Developer";
+    if (!p.name) {
+      if (p.role === "coordinator") roleLabel = "Coordinator / Architect";
+      if (p.role === "auditor") roleLabel = "Quality Assurance / Auditor";
+    }
     const provName = getProviderMeta(p.provider).name;
     const modelMsgs = messages.filter(m => m.provider === p.provider && m.model === p.model && m.sender_role === p.role).length;
     const failCount = slotFailures[`slot_${i}`] || slotFailures[`${p.provider}::${p.model}`] || 0;
