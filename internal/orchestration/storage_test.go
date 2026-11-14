@@ -171,3 +171,55 @@ func TestDurableEventsRecord(t *testing.T) {
 		t.Errorf("first event not job_created: %s", events[0].EventType)
 	}
 }
+
+func TestCollaborationMessage50CharPreviewAndOnDemandLoad(t *testing.T) {
+	s, cleanup := setupTestStorage(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	job, err := s.CreateJob(ctx, "Build a web service", 3, 10, "{}")
+	if err != nil {
+		t.Fatalf("CreateJob: %v", err)
+	}
+
+	longBody := "SUMMARY: Implemented the complete REST server with SQLite persistence\n=== FILE: main.go ===\npackage main\nfunc main() { println(\"hello world from a very long codebase\") }\n"
+	saved, err := s.SaveCollaborationMessage(ctx, CollaborationMessage{
+		JobID:      job.ID,
+		Round:      1,
+		TurnIndex:  1,
+		SenderRole: RoleWorker,
+		Provider:   "openrouter",
+		Model:      "model-x",
+		Action:     ActionContinue,
+		Content:    longBody,
+	})
+	if err != nil {
+		t.Fatalf("SaveCollaborationMessage: %v", err)
+	}
+
+	details, err := s.GetJobDetails(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("GetJobDetails: %v", err)
+	}
+	if len(details.Messages) != 1 {
+		t.Fatalf("expected 1 message summary, got %d", len(details.Messages))
+	}
+	summaryMsg := details.Messages[0]
+	if summaryMsg.HasFullContent || summaryMsg.Content != "" {
+		t.Errorf("expected GetJobDetails to omit full Content, got has_full=%v len=%d", summaryMsg.HasFullContent, len(summaryMsg.Content))
+	}
+	if len([]rune(summaryMsg.Preview)) > 50 || summaryMsg.Preview == "" {
+		t.Errorf("expected non-empty preview <= 50 runes, got %q (len=%d)", summaryMsg.Preview, len([]rune(summaryMsg.Preview)))
+	}
+	if summaryMsg.ContentLength != len(longBody) {
+		t.Errorf("expected content_length=%d, got %d", len(longBody), summaryMsg.ContentLength)
+	}
+
+	fullMsg, err := s.GetCollaborationMessageByID(ctx, job.ID, saved.ID)
+	if err != nil {
+		t.Fatalf("GetCollaborationMessageByID: %v", err)
+	}
+	if !fullMsg.HasFullContent || fullMsg.Content != longBody {
+		t.Errorf("expected full message content on demand, got: %+v", fullMsg)
+	}
+}
