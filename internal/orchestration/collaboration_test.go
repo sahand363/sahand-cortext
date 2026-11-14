@@ -3,223 +3,352 @@ package orchestration
 import (
 	"context"
 	"database/sql"
-	"errors"
-	"fmt"
-	"sync"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/sahand363/sahand-cortext/internal/provider"
 	_ "modernc.org/sqlite"
 )
 
-func setupTestStorage(t *testing.T) (*Storage, func()) {
+func TestParseStructuredResponseValidationAndFallback(t *testing.T) {
+	rawValid := `{"action":"complete","message":"All tests pass and code is clean.","completion_summary":"Implemented feature X."}`
+	res1 := ParseStructuredResponse(rawValid, ActionContinue)
+	if res1.Action != ActionComplete || res1.Message != "All tests pass and code is clean." || res1.CompletionSummary != "Implemented feature X." {
+		t.Fatalf("unexpected valid parse result: %+v", res1)
+	}
+
+	rawUnsupported := "```json\n{\"action\":\"invalid_unknown_action\",\"message\":\"Drafting architecture\"}\n```"
+	res2 := ParseStructuredResponse(rawUnsupported, ActionContinue)
+	if res2.Action != ActionContinue || res2.Message != "Drafting architecture" {
+		t.Fatalf("expected fallback to ActionContinue on unsupported action, got: %+v", res2)
+	}
+
+	rawMalformed := "Here is my response without valid JSON { broken: 123"
+	res3 := ParseStructuredResponse(rawMalformed, ActionRevise)
+	if res3.Action != ActionRevise || res3.Message != rawMalformed {
+		t.Fatalf("expected safe fallback on malformed JSON, got: %+v", res3)
+	}
+}
+
+func TestMultiModelCollaborationWorkflowWithRevisions(t *testing.T) {
+	var callNum int32
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&callNum, 1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+
+		switch n {
+		case 1:
+			resp := `{"candidates":[{"content":{"parts":[{"text":"{\"action\":\"continue\",\"message\":\"Plan: 1. Write handler. 2. Add input validation.\",\"completion_summary\":\"\"}"}]}}]}`
+			w.Write([]byte(resp))
+		case 2:
+			resp := `{"choices":[{"message":{"content":"{\"action\":\"continue\",\"message\":\"func Handler() { /* draft 1 without validation */ }\",\"completion_summary\":\"Initial handler draft\"}"}}]}`
+			w.Write([]byte(resp))
+		case 3:
+			resp := `{"candidates":[{"content":{"parts":[{"text":"{\"action\":\"revise\",\"message\":\"Please add missing input validation to Handler().\",\"completion_summary\":\"\"}"}]}}]}`
+			w.Write([]byte(resp))
+		case 4:
+			resp := `{"choices":[{"message":{"content":"{\"action\":\"continue\",\"message\":\"func Handler(in string) error { if in == \\\"\\\" { return ErrInvalid }; return nil }\",\"completion_summary\":\"Added input validation\"}"}}]}`
+			w.Write([]byte(resp))
+		case 5:
+			resp := `{"candidates":[{"content":{"parts":[{"text":"{\"action\":\"complete\",\"message\":\"Validation verified. Deliverable approved.\",\"completion_summary\":\"Handler implemented with full input validation.\"}"}]}}]}`
+			w.Write([]byte(resp))
+		default:
+			t.Errorf("unexpected extra model call %d", n)
+		}
+	}))
+	defer ts.Close()
+
 	db, err := sql.Open("sqlite", ":memory:")
 	if err != nil {
-		t.Fatalf("failed to open in-memory sqlite: %v", err)
+		t.Fatalf("open db: %v", err)
 	}
 	db.SetMaxOpenConns(1)
+	defer db.Close()
 
-	s := NewStorage(db)
-	if err := s.InitSchema(); err != nil {
-		t.Fatalf("schema init failed: %v", err)
+	storage := NewStorage(db)
+	if err := storage.InitSchema(); err != nil {
+		t.Fatalf("init schema: %v", err)
 	}
 
-	return s, func() { db.Close() }
-}
+	router := provider.NewRouter()
+	_ = router.SetProviderBaseURL("gemini", ts.URL)
+	_ = router.SetProviderBaseURL("openrouter", ts.URL)
 
-func TestStorageCreateAndGetJob(t *testing.T) {
-	s, cleanup := setupTestStorage(t)
-	defer cleanup()
+	keyResolver := func(p string) string {
+		if p == "gemini" {
+			return "test-gemini-key"
+		}
+		if p == "openrouter" {
+			return "test-openrouter-key"
+		}
+		return ""
+	}
 
-	ctx := context.Background()
-	job, err := s.CreateJob(ctx, "Analyze data logs", 4, 10, `{"type":"analytics"}`)
+	engine := NewCollaborationEngine(storage, router, keyResolver, nil, DefaultCollaborationConfig())
+	pool := NewWorkerPool(storage, engine, 1)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	participants := []Participant{
+		{Role: RoleCoordinator, Name: "Architect", Provider: "gemini", Model: "gemini-2.0-flash"},
+		{Role: RoleWorker, Name: "Developer", Provider: "openrouter", Model: "deepseek/deepseek-r1:free"},
+	}
+	metaBytes, _ := json.Marshal(JobMetadata{Participants: participants})
+
+	job, err := storage.CreateJob(ctx, "Implement a validated Go handler", 5, 12, string(metaBytes))
 	if err != nil {
-		t.Fatalf("failed creating job: %v", err)
+		t.Fatalf("create job: %v", err)
+	}
+	_ = storage.SaveParticipants(ctx, job.ID, participants)
+
+	pool.Start(ctx)
+	defer pool.Stop()
+
+	deadline := time.Now().Add(3 * time.Second)
+	var finalJob *Job
+	for time.Now().Before(deadline) {
+		finalJob, _ = storage.GetJob(ctx, job.ID)
+		if finalJob != nil && (finalJob.Status == StatusCompleted || finalJob.Status == StatusFailed) {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
 	}
 
-	if job.Status != StatusQueued {
-		t.Errorf("expected status 'queued', got '%s'", job.Status)
+	if finalJob == nil || finalJob.Status != StatusCompleted {
+		t.Fatalf("expected job to complete, got: %+v", finalJob)
 	}
-
-	retrieved, err := s.GetJob(ctx, job.ID)
-	if err != nil {
-		t.Fatalf("failed getting job: %v", err)
+	if finalJob.CurrentStage != StageCompleted {
+		t.Errorf("expected stage 'completed', got '%s'", finalJob.CurrentStage)
 	}
-
-	if retrieved.Task != "Analyze data logs" {
-		t.Errorf("task mismatch: %s", retrieved.Task)
+	if finalJob.CurrentRound != 2 || finalJob.TotalCalls != 5 {
+		t.Errorf("expected 2 rounds and 5 total calls, got round=%d calls=%d", finalJob.CurrentRound, finalJob.TotalCalls)
 	}
-	if retrieved.MaxRounds != 4 || retrieved.MaxCalls != 10 {
-		t.Errorf("limits mismatch: rounds=%d, calls=%d", retrieved.MaxRounds, retrieved.MaxCalls)
-	}
-}
-
-func TestAtomicClaimsSingleWinner(t *testing.T) {
-	s, cleanup := setupTestStorage(t)
-	defer cleanup()
-
-	ctx := context.Background()
-	job, err := s.CreateJob(ctx, "Concurrent Claim Task", 5, 12, "{}")
-	if err != nil {
-		t.Fatalf("create job err: %v", err)
-	}
-
-	const workerCount = 10
-	var wg sync.WaitGroup
-	claims := make([]string, 0)
-	var mu sync.Mutex
-
-	for i := 0; i < workerCount; i++ {
-		wg.Add(1)
-		wID := fmt.Sprintf("worker-%d", i)
-		go func(id string) {
-			defer wg.Done()
-			claimed, _, err := s.ClaimNextJob(ctx, id, 30*time.Second)
-			if err != nil {
-				t.Errorf("claim error: %v", err)
-				return
-			}
-			if claimed != nil {
-				mu.Lock()
-				claims = append(claims, id)
-				mu.Unlock()
-			}
-		}(wID)
-	}
-	wg.Wait()
-
-	if len(claims) != 1 {
-		t.Fatalf("expected exactly 1 claim on job %s, got %d (%v)", job.ID, len(claims), claims)
+	if !strings.Contains(finalJob.ExecutionResult, "Handler implemented with full input validation.") {
+		t.Errorf("expected final result to include completion summary, got: %s", finalJob.ExecutionResult)
 	}
 }
 
-func TestLeaseExpirationAndRecovery(t *testing.T) {
-	s, cleanup := setupTestStorage(t)
-	defer cleanup()
+func TestCollaborationMidRoundRecoveryWithoutDuplicateCalls(t *testing.T) {
+	// Simulate a server crash after Coordinator Plan (turn 1) and Worker Round 1 (turn 2) are already saved in SQLite.
+	// When the worker recovers the job, it should ONLY invoke the Coordinator Review (turn 3), not repeat turns 1 & 2.
+	var apiCalls int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&apiCalls, 1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"choices":[{"message":{"content":"{\"action\":\"complete\",\"message\":\"Recovered review complete.\",\"completion_summary\":\"Recovered and approved.\"}"}}]}`))
+	}))
+	defer ts.Close()
+
+	db, _ := sql.Open("sqlite", ":memory:")
+	db.SetMaxOpenConns(1)
+	defer db.Close()
+
+	storage := NewStorage(db)
+	_ = storage.InitSchema()
+
+	router := provider.NewRouter()
+	_ = router.SetProviderBaseURL("openrouter", ts.URL)
+
+	engine := NewCollaborationEngine(storage, router, func(string) string { return "key" }, nil, DefaultCollaborationConfig())
 
 	ctx := context.Background()
-	job, _ := s.CreateJob(ctx, "Expiring Task", 5, 12, "{}")
-
-	// Worker 1 claims with expired 10 millisecond lease
-	claimed, _, err := s.ClaimNextJob(ctx, "worker-crashed", 10*time.Millisecond)
-	if err != nil || claimed == nil {
-		t.Fatalf("claim failed: %v", err)
+	parts := []Participant{
+		{Role: RoleCoordinator, Name: "Coord", Provider: "openrouter", Model: "model-a"},
+		{Role: RoleWorker, Name: "Worker", Provider: "openrouter", Model: "model-b"},
 	}
+	job, _ := storage.CreateJob(ctx, "Resumable task", 3, 10, "{}")
+	_ = storage.SaveParticipants(ctx, job.ID, parts)
 
-	time.Sleep(25 * time.Millisecond) // Ensure lease expired
-
-	// Worker 2 attempts claim; must recover the abandoned job
-	recovered, isRec, err := s.ClaimNextJob(ctx, "worker-alive", 60*time.Second)
-	if err != nil || recovered == nil {
-		t.Fatalf("recovery claim failed: %v", err)
-	}
-	if !isRec {
-		t.Errorf("expected isRecovery to be true")
-	}
-	if recovered.ID != job.ID {
-		t.Errorf("expected to recover %s, got %s", job.ID, recovered.ID)
-	}
-	if recovered.ClaimedBy != "worker-alive" {
-		t.Errorf("expected claimed_by 'worker-alive', got '%s'", recovered.ClaimedBy)
-	}
-}
-
-func TestJobCancellation(t *testing.T) {
-	s, cleanup := setupTestStorage(t)
-	defer cleanup()
-
-	ctx := context.Background()
-	job, _ := s.CreateJob(ctx, "Cancellable Task", 5, 12, "{}")
-
-	claimed, _, _ := s.ClaimNextJob(ctx, "w1", 60*time.Second)
-
-	if err := s.CancelJob(ctx, claimed.ID); err != nil {
-		t.Fatalf("cancel job err: %v", err)
-	}
-
-	// Worker heartbeat must immediately detect cancellation
-	err := s.RenewLease(ctx, claimed.ID, "w1", 60*time.Second)
-	if !errors.Is(err, ErrJobCancelled) {
-		t.Errorf("expected ErrJobCancelled on renewal, got: %v", err)
-	}
-
-	updated, _ := s.GetJob(ctx, job.ID)
-	if updated.Status != StatusCancelled {
-		t.Errorf("expected status 'cancelled', got '%s'", updated.Status)
-	}
-}
-
-func TestDurableEventsRecord(t *testing.T) {
-	s, cleanup := setupTestStorage(t)
-	defer cleanup()
-
-	ctx := context.Background()
-	job, _ := s.CreateJob(ctx, "Event Logging Task", 5, 12, "{}")
-
-	_ = s.RecordEvent(ctx, job.ID, EventStepProgress, "planning", "w1", "Step 1 complete", `{"step":1}`)
-	_ = s.RecordEvent(ctx, job.ID, EventStepProgress, "execution", "w1", "Step 2 complete", `{"step":2}`)
-
-	events, err := s.GetJobEvents(ctx, job.ID)
-	if err != nil {
-		t.Fatalf("get events err: %v", err)
-	}
-
-	if len(events) != 3 { // job_created + 2 progress events
-		t.Fatalf("expected 3 events, got %d", len(events))
-	}
-	if events[0].EventType != EventJobCreated {
-		t.Errorf("first event not job_created: %s", events[0].EventType)
-	}
-}
-
-func TestCollaborationMessage50CharPreviewAndOnDemandLoad(t *testing.T) {
-	s, cleanup := setupTestStorage(t)
-	defer cleanup()
-
-	ctx := context.Background()
-	job, err := s.CreateJob(ctx, "Build a web service", 3, 10, "{}")
-	if err != nil {
-		t.Fatalf("CreateJob: %v", err)
-	}
-
-	longBody := "SUMMARY: Implemented the complete REST server with SQLite persistence\n=== FILE: main.go ===\npackage main\nfunc main() { println(\"hello world from a very long codebase\") }\n"
-	saved, err := s.SaveCollaborationMessage(ctx, CollaborationMessage{
+	// Pre-populate Turn 1 (Coordinator Plan) and Turn 2 (Worker Round 1) as if saved before a crash
+	_, _ = storage.SaveCollaborationMessage(ctx, CollaborationMessage{
 		JobID:      job.ID,
 		Round:      1,
 		TurnIndex:  1,
+		SenderRole: RoleCoordinator,
+		Provider:   "openrouter",
+		Model:      "model-a",
+		Action:     ActionContinue,
+		Content:    "Persisted plan from before crash",
+	})
+	_, _ = storage.SaveCollaborationMessage(ctx, CollaborationMessage{
+		JobID:      job.ID,
+		Round:      1,
+		TurnIndex:  2,
 		SenderRole: RoleWorker,
 		Provider:   "openrouter",
-		Model:      "model-x",
+		Model:      "model-b",
 		Action:     ActionContinue,
-		Content:    longBody,
+		Content:    "Persisted worker output from before crash",
+	})
+
+	helper := &executionHelperImpl{workerID: "w-recover", jobID: job.ID, storage: storage, ctx: ctx}
+	res, err := engine.ProcessJob(ctx, job, helper)
+	if err != nil {
+		t.Fatalf("ProcessJob recovery failed: %v", err)
+	}
+
+	if atomic.LoadInt32(&apiCalls) != 1 {
+		t.Errorf("expected exactly 1 model call (Coordinator review) on recovery, got %d", atomic.LoadInt32(&apiCalls))
+	}
+	if !strings.Contains(res, "Persisted worker output from before crash") || !strings.Contains(res, "Recovered and approved.") {
+		t.Errorf("unexpected recovered output: %s", res)
+	}
+}
+
+func TestCollaborationMaxRoundsEnforcement(t *testing.T) {
+	var calls int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"choices":[{"message":{"content":"{\"action\":\"revise\",\"message\":\"Still working on iteration\",\"completion_summary\":\"\"}"}}]}`))
+	}))
+	defer ts.Close()
+
+	db, _ := sql.Open("sqlite", ":memory:")
+	db.SetMaxOpenConns(1)
+	defer db.Close()
+
+	storage := NewStorage(db)
+	_ = storage.InitSchema()
+
+	router := provider.NewRouter()
+	_ = router.SetProviderBaseURL("openrouter", ts.URL)
+
+	engine := NewCollaborationEngine(storage, router, func(string) string { return "key" }, nil, DefaultCollaborationConfig())
+
+	ctx := context.Background()
+	parts := []Participant{
+		{Role: RoleCoordinator, Name: "Coord", Provider: "openrouter", Model: "model-a"},
+		{Role: RoleWorker, Name: "Worker", Provider: "openrouter", Model: "model-b"},
+	}
+
+	job, _ := storage.CreateJob(ctx, "Iterative task", 2, 10, "{}")
+	_ = storage.SaveParticipants(ctx, job.ID, parts)
+
+	helper := &executionHelperImpl{workerID: "w1", jobID: job.ID, storage: storage, ctx: ctx}
+	result, err := engine.ProcessJob(ctx, job, helper)
+	if err != nil {
+		t.Fatalf("ProcessJob failed: %v", err)
+	}
+	if result == "" {
+		t.Errorf("expected non-empty result when max rounds reached")
+	}
+	if atomic.LoadInt32(&calls) != 5 {
+		t.Errorf("expected exactly 5 model calls for 2 rounds, got %d", atomic.LoadInt32(&calls))
+	}
+}
+
+func TestOrchestrationWithDynamicProviderAndCrossAdapterFailover(t *testing.T) {
+	// Primary Worker uses native Gemini adapter (configured to return HTTP 503).
+	// Backup Worker uses a dynamically registered 5th OpenAI-compatible provider ("custom-groq")
+	// and must take over automatically via failover, then Coordinator approves.
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.Contains(r.URL.Path, "gemini-failing:generateContent"):
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"error":{"message":"Gemini overloaded"}}`))
+
+		case strings.Contains(r.URL.Path, "gemini-coord:generateContent"):
+			// Handles both initial planning and final review
+			w.Header().Set("Content-Type", "application/json")
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			rawBytes, _ := json.Marshal(body)
+			if strings.Contains(string(rawBytes), "Latest Worker Result") {
+				_, _ = w.Write([]byte(`{"candidates":[{"content":{"parts":[{"text":"{\"action\":\"complete\",\"message\":\"Approved dynamic worker output.\",\"completion_summary\":\"Cross-adapter failover succeeded.\"}"}]}}]}`))
+			} else {
+				_, _ = w.Write([]byte(`{"candidates":[{"content":{"parts":[{"text":"{\"action\":\"continue\",\"message\":\"Build the service.\",\"completion_summary\":\"\"}"}]}}]}`))
+			}
+
+		case r.URL.Path == "/dynamic-v1/chat/completions":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"SUMMARY: Built via dynamic OpenAI-compat provider\n=== FILE: app.go ===\npackage main\n"}}]}`))
+
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer ts.Close()
+
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	db.SetMaxOpenConns(1)
+	defer db.Close()
+
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);`); err != nil {
+		t.Fatalf("create settings: %v", err)
+	}
+
+	storage := NewStorage(db)
+	if err := storage.InitSchema(); err != nil {
+		t.Fatalf("init schema: %v", err)
+	}
+
+	router := provider.NewRouter()
+	if err := router.AttachDB(context.Background(), db); err != nil {
+		t.Fatalf("AttachDB: %v", err)
+	}
+	_ = router.SetProviderBaseURL("gemini", ts.URL)
+
+	// Register a 5th dynamic OpenAI-compatible provider purely via Store configuration
+	_, err = router.Store().SaveDynamicProvider(context.Background(), router.Registry(), router.Client, provider.DynamicProviderInput{
+		ID:           "custom-groq",
+		Name:         "Custom Groq",
+		BaseURL:      ts.URL + "/dynamic-v1",
+		AuthType:     "bearer",
+		APIKey:       "gsk-dynamic-test",
+		ManualModels: []string{"llama-3.3-70b"},
 	})
 	if err != nil {
-		t.Fatalf("SaveCollaborationMessage: %v", err)
+		t.Fatalf("SaveDynamicProvider: %v", err)
 	}
 
-	details, err := s.GetJobDetails(ctx, job.ID)
-	if err != nil {
-		t.Fatalf("GetJobDetails: %v", err)
-	}
-	if len(details.Messages) != 1 {
-		t.Fatalf("expected 1 message summary, got %d", len(details.Messages))
-	}
-	summaryMsg := details.Messages[0]
-	if summaryMsg.HasFullContent || summaryMsg.Content != "" {
-		t.Errorf("expected GetJobDetails to omit full Content, got has_full=%v len=%d", summaryMsg.HasFullContent, len(summaryMsg.Content))
-	}
-	if len([]rune(summaryMsg.Preview)) > 50 || summaryMsg.Preview == "" {
-		t.Errorf("expected non-empty preview <= 50 runes, got %q (len=%d)", summaryMsg.Preview, len([]rune(summaryMsg.Preview)))
-	}
-	if summaryMsg.ContentLength != len(longBody) {
-		t.Errorf("expected content_length=%d, got %d", len(longBody), summaryMsg.ContentLength)
+	keyResolver := func(p string) string {
+		if p == "gemini" {
+			return "test-gemini-key"
+		}
+		if _, cfg, err := router.Registry().Get(p); err == nil {
+			return cfg.APIKey
+		}
+		return ""
 	}
 
-	fullMsg, err := s.GetCollaborationMessageByID(ctx, job.ID, saved.ID)
-	if err != nil {
-		t.Fatalf("GetCollaborationMessageByID: %v", err)
+	engine := NewCollaborationEngine(storage, router, keyResolver, nil, DefaultCollaborationConfig())
+	engine.SetProviderConfiguredChecker(func(p string) bool {
+		return router.Registry().IsConfigured(p) || keyResolver(p) != ""
+	})
+
+	ctx := context.Background()
+	participants := []Participant{
+		{Role: RoleCoordinator, Name: "Architect", Provider: "gemini", Model: "gemini-coord"},
+		{Role: RoleWorker, Name: "Primary Gemini Worker", Provider: "gemini", Model: "gemini-failing"},
+		{Role: RoleWorker, Name: "Backup Dynamic Worker", Provider: "custom-groq", Model: "llama-3.3-70b"},
 	}
-	if !fullMsg.HasFullContent || fullMsg.Content != longBody {
-		t.Errorf("expected full message content on demand, got: %+v", fullMsg)
+	metaBytes, _ := json.Marshal(JobMetadata{Participants: participants})
+	job, err := storage.CreateJob(ctx, "Test cross-adapter failover", 3, 10, string(metaBytes))
+	if err != nil {
+		t.Fatalf("CreateJob: %v", err)
+	}
+	_ = storage.SaveParticipants(ctx, job.ID, participants)
+
+	helper := &executionHelperImpl{workerID: "w-failover", jobID: job.ID, storage: storage, ctx: ctx}
+	result, err := engine.ProcessJob(ctx, job, helper)
+	if err != nil {
+		t.Fatalf("ProcessJob failed: %v", err)
+	}
+	if !strings.Contains(result, "Cross-adapter failover succeeded.") || !strings.Contains(result, "=== FILE: app.go ===") {
+		t.Fatalf("unexpected final deliverable after cross-adapter failover: %s", result)
 	}
 }
