@@ -22,26 +22,29 @@ import (
 
 	"github.com/sahand363/sahand-cortext/internal/chat"
 	"github.com/sahand363/sahand-cortext/internal/orchestration"
+	"github.com/sahand363/sahand-cortext/internal/persona"
 	"github.com/sahand363/sahand-cortext/internal/provider"
 	"golang.org/x/crypto/bcrypt"
 	_ "modernc.org/sqlite"
 )
 
-const AppVersion = "0.6.1"
+const AppVersion = "0.7.0"
 
 type App struct {
-	db          *sql.DB
-	mu          sync.RWMutex
-	sessions    map[string]time.Time
-	router      *provider.Router
-	orchStorage *orchestration.Storage
-	orchEngine  *orchestration.CollaborationEngine
-	orchPool    *orchestration.WorkerPool
+	db           *sql.DB
+	mu           sync.RWMutex
+	sessions     map[string]time.Time
+	router       *provider.Router
+	personaStore *persona.Store
+	orchStorage  *orchestration.Storage
+	orchEngine   *orchestration.CollaborationEngine
+	orchPool     *orchestration.WorkerPool
 }
 
 type Session struct {
 	ID        string `json:"id"`
 	Title     string `json:"title"`
+	PersonaID string `json:"persona_id"`
 	Pinned    bool   `json:"pinned"`
 	UpdatedAt string `json:"updated_at"`
 }
@@ -115,6 +118,7 @@ func (a *App) initDB() error {
 		`CREATE TABLE IF NOT EXISTS sessions(
 			id TEXT PRIMARY KEY,
 			title TEXT NOT NULL DEFAULT 'New conversation',
+			persona_id TEXT NOT NULL DEFAULT '',
 			pinned INTEGER NOT NULL DEFAULT 0,
 			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -138,6 +142,9 @@ func (a *App) initDB() error {
 		}
 	}
 	_, _ = a.db.Exec(`ALTER TABLE sessions ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;`)
+	if err := a.personaStore.InitSchema(); err != nil {
+		return err
+	}
 	if err := a.orchStorage.InitSchema(); err != nil {
 		return err
 	}
@@ -503,6 +510,7 @@ func (a *App) status(w http.ResponseWriter, r *http.Request) {
 			anyConfigured = true
 		}
 	}
+	personas, _ := a.personaStore.List(r.Context(), false)
 	jsonOut(w, 200, map[string]any{
 		"status":                "online",
 		"version":               AppVersion,
@@ -516,8 +524,120 @@ func (a *App) status(w http.ResponseWriter, r *http.Request) {
 		"chat_model_scope":      a.loadChatModelScope(),
 		"providers":             provMap,
 		"providers_list":        registered,
+		"personas":              personas,
 	})
 }
+
+// ============================================================================
+// PERSONAS / PLUGGABLE CHATBOTS & VOICE TRAINER ENDPOINTS
+// ============================================================================
+
+func (a *App) handlePersonas(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		list, err := a.personaStore.List(r.Context(), false)
+		if err != nil {
+			jsonOut(w, 500, map[string]string{"error": "Failed loading chatbots: " + err.Error()})
+			return
+		}
+		jsonOut(w, 200, map[string]any{"personas": list})
+	case http.MethodPost:
+		var input persona.PersonaInput
+		if json.NewDecoder(http.MaxBytesReader(w, r.Body, 512*1024)).Decode(&input) != nil {
+			jsonOut(w, 400, map[string]string{"error": "Invalid chatbot configuration payload"})
+			return
+		}
+		saved, err := a.personaStore.Save(r.Context(), a.router.Registry(), input)
+		if err != nil {
+			jsonOut(w, 400, map[string]string{"error": err.Error()})
+			return
+		}
+		list, _ := a.personaStore.List(r.Context(), false)
+		jsonOut(w, 201, map[string]any{
+			"ok":       true,
+			"persona":  saved,
+			"personas": list,
+		})
+	default:
+		http.Error(w, "method not allowed", 405)
+	}
+}
+
+func (a *App) handlePersonaByID(w http.ResponseWriter, r *http.Request) {
+	id := persona.CanonicalID(strings.TrimPrefix(r.URL.Path, "/api/personas/"))
+	if id == "" {
+		jsonOut(w, 400, map[string]string{"error": "Chatbot ID is required"})
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		p, err := a.personaStore.Get(r.Context(), id)
+		if err != nil {
+			status := 500
+			if errors.Is(err, persona.ErrPersonaNotFound) {
+				status = 404
+			}
+			jsonOut(w, status, map[string]string{"error": err.Error()})
+			return
+		}
+		jsonOut(w, 200, p)
+	case http.MethodDelete:
+		if err := a.personaStore.Delete(r.Context(), id); err != nil {
+			status := 500
+			if errors.Is(err, persona.ErrPersonaNotFound) {
+				status = 404
+			}
+			jsonOut(w, status, map[string]string{"error": err.Error()})
+			return
+		}
+		list, _ := a.personaStore.List(r.Context(), false)
+		jsonOut(w, 200, map[string]any{
+			"ok":       true,
+			"deleted":  id,
+			"personas": list,
+		})
+	default:
+		http.Error(w, "method not allowed", 405)
+	}
+}
+
+func (a *App) handleTrainPersona(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", 405)
+		return
+	}
+	var req persona.TrainRequest
+	if json.NewDecoder(http.MaxBytesReader(w, r.Body, 4*1024*1024)).Decode(&req) != nil {
+		jsonOut(w, 400, map[string]string{"error": "Invalid training payload (max 4 MB)"})
+		return
+	}
+	if strings.Contains(req.Model, "::") {
+		parts := strings.SplitN(req.Model, "::", 2)
+		req.Provider = parts[0]
+		req.Model = parts[1]
+	}
+	if strings.TrimSpace(req.Provider) == "" {
+		req.Provider = a.activeProvider()
+	}
+	if strings.TrimSpace(req.Model) == "" {
+		req.Model = a.activeModel()
+	}
+	if !a.isProviderConfigured(req.Provider) {
+		jsonOut(w, 400, map[string]string{"error": "Selected trainer provider is not configured yet"})
+		return
+	}
+
+	res, err := persona.DistillVoicePersona(r.Context(), a.router, a.providerKey, req)
+	if err != nil {
+		jsonOut(w, 400, map[string]string{"error": err.Error()})
+		return
+	}
+	jsonOut(w, 200, res)
+}
+
+// ============================================================================
+// DYNAMIC PROVIDERS & MODELS ENDPOINTS
+// ============================================================================
 
 // GET /api/providers & POST /api/providers
 func (a *App) handleProviders(w http.ResponseWriter, r *http.Request) {
@@ -968,8 +1088,12 @@ func statusRank(s string) int {
 	}
 }
 
+// ============================================================================
+// SESSIONS & CHAT MESSAGES (WITH PERSONA SUPPORT)
+// ============================================================================
+
 func (a *App) listSessions(w http.ResponseWriter, r *http.Request) {
-	rows, err := a.db.Query(`SELECT id,title,pinned,updated_at FROM sessions ORDER BY pinned DESC, updated_at DESC`)
+	rows, err := a.db.Query(`SELECT id,title,coalesce(persona_id,''),pinned,updated_at FROM sessions ORDER BY pinned DESC, updated_at DESC`)
 	if err != nil {
 		jsonOut(w, 500, map[string]string{"error": "database error"})
 		return
@@ -979,7 +1103,7 @@ func (a *App) listSessions(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var s Session
 		var pinnedInt int
-		if rows.Scan(&s.ID, &s.Title, &pinnedInt, &s.UpdatedAt) == nil {
+		if rows.Scan(&s.ID, &s.Title, &s.PersonaID, &pinnedInt, &s.UpdatedAt) == nil {
 			s.Pinned = pinnedInt != 0
 			out = append(out, s)
 		}
@@ -988,24 +1112,39 @@ func (a *App) listSessions(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) createSession(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		PersonaID string `json:"persona_id"`
+	}
+	_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&body)
+	personaID := persona.CanonicalID(body.PersonaID)
+	title := "New conversation"
+	if personaID != "" {
+		if p, err := a.personaStore.Get(r.Context(), personaID); err == nil {
+			title = p.Icon + " " + p.Name
+		} else {
+			personaID = ""
+		}
+	}
+
 	id, e := randomToken()
 	if e != nil {
 		jsonOut(w, 500, map[string]string{"error": "session error"})
 		return
 	}
 	id = id[:16]
-	if _, e = a.db.Exec(`INSERT INTO sessions(id,title,pinned) VALUES(?,?,0)`, id, "New conversation"); e != nil {
+	if _, e = a.db.Exec(`INSERT INTO sessions(id,title,persona_id,pinned) VALUES(?,?,?,0)`, id, title, personaID); e != nil {
 		jsonOut(w, 500, map[string]string{"error": "database error"})
 		return
 	}
-	jsonOut(w, 201, Session{ID: id, Title: "New conversation", Pinned: false})
+	jsonOut(w, 201, Session{ID: id, Title: title, PersonaID: personaID, Pinned: false})
 }
 
 func (a *App) updateSession(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		ID     string  `json:"id"`
-		Title  *string `json:"title"`
-		Pinned *bool   `json:"pinned"`
+		ID        string  `json:"id"`
+		Title     *string `json:"title"`
+		PersonaID *string `json:"persona_id"`
+		Pinned    *bool   `json:"pinned"`
 	}
 	if json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&body) != nil || strings.TrimSpace(body.ID) == "" {
 		jsonOut(w, 400, map[string]string{"error": "Session ID is required"})
@@ -1023,6 +1162,17 @@ func (a *App) updateSession(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if body.PersonaID != nil {
+		pid := persona.CanonicalID(*body.PersonaID)
+		if pid != "" {
+			if _, err := a.personaStore.Get(r.Context(), pid); err != nil {
+				jsonOut(w, 404, map[string]string{"error": "Chatbot persona not found"})
+				return
+			}
+		}
+		_, _ = a.db.Exec(`UPDATE sessions SET persona_id=? WHERE id=?`, pid, id)
+	}
+
 	if body.Pinned != nil {
 		pinVal := 0
 		if *body.Pinned {
@@ -1033,7 +1183,7 @@ func (a *App) updateSession(w http.ResponseWriter, r *http.Request) {
 
 	var s Session
 	var pinnedInt int
-	if err := a.db.QueryRow(`SELECT id,title,pinned,updated_at FROM sessions WHERE id=?`, id).Scan(&s.ID, &s.Title, &pinnedInt, &s.UpdatedAt); err != nil {
+	if err := a.db.QueryRow(`SELECT id,title,coalesce(persona_id,''),pinned,updated_at FROM sessions WHERE id=?`, id).Scan(&s.ID, &s.Title, &s.PersonaID, &pinnedInt, &s.UpdatedAt); err != nil {
 		jsonOut(w, 404, map[string]string{"error": "Session not found"})
 		return
 	}
@@ -1083,6 +1233,7 @@ func (a *App) getMessages(w http.ResponseWriter, r *http.Request) {
 func (a *App) sendMessage(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		SessionID string `json:"session_id"`
+		PersonaID string `json:"persona_id"`
 		Message   string `json:"message"`
 		Provider  string `json:"provider"`
 		Model     string `json:"model"`
@@ -1091,10 +1242,24 @@ func (a *App) sendMessage(w http.ResponseWriter, r *http.Request) {
 		jsonOut(w, 400, map[string]string{"error": "Invalid message text"})
 		return
 	}
-	var currentTitle string
-	if a.db.QueryRow(`SELECT title FROM sessions WHERE id=?`, body.SessionID).Scan(&currentTitle) != nil {
+	var currentTitle, sessionPersonaID string
+	if a.db.QueryRow(`SELECT title, coalesce(persona_id,'') FROM sessions WHERE id=?`, body.SessionID).Scan(¤tTitle, &sessionPersonaID) != nil {
 		jsonOut(w, 404, map[string]string{"error": "session not found"})
 		return
+	}
+
+	activePersonaID := persona.CanonicalID(body.PersonaID)
+	if activePersonaID == "" {
+		activePersonaID = sessionPersonaID
+	} else if activePersonaID != sessionPersonaID {
+		_, _ = a.db.Exec(`UPDATE sessions SET persona_id=? WHERE id=?`, activePersonaID, body.SessionID)
+	}
+
+	var activeBot *persona.Persona
+	if activePersonaID != "" {
+		if bot, err := a.personaStore.Get(r.Context(), activePersonaID); err == nil {
+			activeBot = bot
+		}
 	}
 
 	normProvider := strings.TrimSpace(body.Provider)
@@ -1103,6 +1268,9 @@ func (a *App) sendMessage(w http.ResponseWriter, r *http.Request) {
 		parts := strings.SplitN(chosenModel, "::", 2)
 		normProvider = parts[0]
 		chosenModel = parts[1]
+	}
+	if normProvider == "" && activeBot != nil && activeBot.DefaultProvider != "" {
+		normProvider = activeBot.DefaultProvider
 	}
 	if normProvider == "" {
 		normProvider = a.activeProvider()
@@ -1114,12 +1282,21 @@ func (a *App) sendMessage(w http.ResponseWriter, r *http.Request) {
 		jsonOut(w, 400, map[string]string{"error": regErr.Error()})
 		return
 	}
+	if chosenModel == "" && activeBot != nil && activeBot.DefaultModel != "" && activeBot.DefaultProvider == normProvider {
+		chosenModel = activeBot.DefaultModel
+	}
 	if chosenModel == "" {
 		chosenModel = a.activeModel()
 	}
 	chosenModel = p.NormalizeModelID(chosenModel)
 
-	if !a.isModelAllowedForChat(normProvider, chosenModel) {
+	// Enforce either the active Persona's model allowlist or the Main Chat allowlist
+	if activeBot != nil && activeBot.ModelScopeMode == "selected" {
+		if !activeBot.IsModelAllowed(a.router.Registry(), normProvider, chosenModel) {
+			jsonOut(w, 403, map[string]string{"error": fmt.Sprintf("Model %s is not enabled for chatbot %q. Update its allowed models in Settings.", chosenModel, activeBot.Name)})
+			return
+		}
+	} else if !a.isModelAllowedForChat(normProvider, chosenModel) {
 		if strings.TrimSpace(body.Model) == "" {
 			scope := a.loadChatModelScope()
 			switched := false
@@ -1164,6 +1341,11 @@ func (a *App) sendMessage(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 
 	var history []provider.Message
+	if activeBot != nil {
+		if sysPrompt := activeBot.BuildCombinedSystemPrompt(); sysPrompt != "" {
+			history = append(history, provider.Message{Role: "system", Content: sysPrompt})
+		}
+	}
 	for rows.Next() {
 		var role, content string
 		if rows.Scan(&role, &content) == nil {
@@ -1180,7 +1362,9 @@ func (a *App) sendMessage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	a.saveTestRecord(normProvider, chosenModel, ModelTestRecord{Status: "working", LatencyMs: elapsed})
-	a.setActiveSelection(normProvider, chosenModel)
+	if activeBot == nil {
+		a.setActiveSelection(normProvider, chosenModel)
+	}
 
 	_, err = a.db.Exec(`INSERT INTO messages(session_id,role,content) VALUES(?,?,?)`, body.SessionID, "assistant", answer)
 	if err != nil {
@@ -1190,10 +1374,17 @@ func (a *App) sendMessage(w http.ResponseWriter, r *http.Request) {
 
 	var count int
 	_ = a.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE session_id=?`, body.SessionID).Scan(&count)
-	if count <= 2 && (currentTitle == "" || currentTitle == "New conversation") {
+	defaultBotTitle := ""
+	if activeBot != nil {
+		defaultBotTitle = activeBot.Icon + " " + activeBot.Name
+	}
+	if count <= 2 && (currentTitle == "" || currentTitle == "New conversation" || currentTitle == defaultBotTitle) {
 		title := strings.TrimSpace(body.Message)
 		if len([]rune(title)) > 42 {
 			title = string([]rune(title)[:42]) + "…"
+		}
+		if activeBot != nil {
+			title = activeBot.Icon + " " + title
 		}
 		_, _ = a.db.Exec(`UPDATE sessions SET title=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`, title, body.SessionID)
 	} else {
@@ -1205,10 +1396,14 @@ func (a *App) sendMessage(w http.ResponseWriter, r *http.Request) {
 		"latency_ms": elapsed,
 		"provider":   normProvider,
 		"model":      chosenModel,
+		"persona_id": activePersonaID,
 	})
 }
 
-// Orchestration REST Endpoints
+// ============================================================================
+// ORCHESTRATION REST ENDPOINTS
+// ============================================================================
+
 func (a *App) orchCreateJob(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", 405)
@@ -1641,13 +1836,15 @@ func main() {
 	db.SetMaxOpenConns(1)
 
 	router := provider.NewRouter()
+	personaStore := persona.NewStore(db)
 	orchStorage := orchestration.NewStorage(db)
 
 	app := &App{
-		db:          db,
-		sessions:    map[string]time.Time{},
-		router:      router,
-		orchStorage: orchStorage,
+		db:           db,
+		sessions:     map[string]time.Time{},
+		router:       router,
+		personaStore: personaStore,
+		orchStorage:  orchStorage,
 	}
 
 	collabEngine := orchestration.NewCollaborationEngine(
@@ -1677,6 +1874,9 @@ func main() {
 	mux.HandleFunc("/api/status", app.auth(app.status))
 	mux.HandleFunc("/api/providers", app.auth(app.handleProviders))
 	mux.HandleFunc("/api/providers/", app.auth(app.handleProviderByID))
+	mux.HandleFunc("/api/personas", app.auth(app.handlePersonas))
+	mux.HandleFunc("/api/personas/train", app.auth(app.handleTrainPersona))
+	mux.HandleFunc("/api/personas/", app.auth(app.handlePersonaByID))
 	mux.HandleFunc("/api/setup/gemini", app.auth(app.saveProviderKey))
 	mux.HandleFunc("/api/setup/provider", app.auth(app.saveProviderKey))
 	mux.HandleFunc("/api/models", app.auth(app.handleModels))
