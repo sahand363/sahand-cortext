@@ -13,12 +13,12 @@ import (
 
 // TrainRequest describes raw chat logs and target speaker details for distilling a Voice Blueprint.
 type TrainRequest struct {
-	TargetName   string `json:"target_name"`   // e.g. "Sahand" (the person whose voice the bot should learn)
-	RawChatLog   string `json:"raw_chat_log"`  // Telegram Desktop JSON export, WhatsApp .txt export, or plain transcript
-	ExtraNotes   string `json:"extra_notes"`   // Optional hints (e.g. "Use casual Tehran Persian + English tech terms")
-	Provider     string `json:"provider"`      // LLM provider used to distill the voice blueprint
-	Model        string `json:"model"`         // LLM model used to distill the voice blueprint
-	MaxExamples  int    `json:"max_examples"`  // Number of few-shot anchor pairs to extract (default 6)
+	TargetName  string `json:"target_name"`  // e.g. "Sahand" (the person whose voice the bot should learn)
+	RawChatLog  string `json:"raw_chat_log"` // Telegram Desktop JSON export, WhatsApp .txt export, or plain transcript
+	ExtraNotes  string `json:"extra_notes"`  // Optional hints (e.g. "Use casual Tehran Persian + English tech terms")
+	Provider    string `json:"provider"`     // LLM provider used to distill the voice blueprint
+	Model       string `json:"model"`        // LLM model used to distill the voice blueprint
+	MaxExamples int    `json:"max_examples"` // Number of few-shot anchor pairs to extract (default 6)
 }
 
 // TrainResult holds the distilled Voice Blueprint, extracted few-shot pairs, and sample stats.
@@ -36,8 +36,9 @@ type chatTurn struct {
 }
 
 var (
-	// Matches WhatsApp exports like: "12/31/2025, 9:41 PM - Sahand: message" or "[14:22, 05/03/2026] Sahand: message"
-	whatsappLineRe = regexp.MustCompile(`^(?:\[?\d{1,4}[./-]\d{1,2}[./-]\d{2,4},?\s+\d{1,2}:\d{2}(?::\d{2})?(?:\s*[APap][Mm])?\]?\s*[-\x{2013}]\s*|\[\d{1,2}:\d{2}(?::\d{2})?,\s*\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\]\s*)([^:]{1,60}):\s*(.+)$`)
+	// Matches WhatsApp timestamp prefixes:
+	// e.g. "11/10/2026, 8:15 PM - " or "[14:22, 05/03/2026] " or "2026-11-10, 20:15 - "
+	whatsappPrefixRe = regexp.MustCompile(`^(?:\[?\d{1,4}[./-]\d{1,2}[./-]\d{2,4},?\s+\d{1,2}:\d{2}(?::\d{2})?(?:\s*[APap][Mm])?\]?\s*[-\x{2013}]\s*|\[\d{1,2}:\d{2}(?::\d{2})?,\s*\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\]\s*)`)
 	// Matches plain dialogue lines like: "Sahand: message" or "[Sahand] message"
 	plainLineRe = regexp.MustCompile(`^(?:\[([^\]]{1,50})\]|([^:\[\]]{1,50}):)\s*(.+)$`)
 )
@@ -66,14 +67,20 @@ func ParseChatExport(raw string) ([]chatTurn, string) {
 		if line == "" {
 			continue
 		}
-		if m := whatsappLineRe.FindStringSubmatch(line); len(m) == 4 {
-			detected = "whatsapp_txt"
-			turns = append(turns, chatTurn{
-				Sender: strings.TrimSpace(m[1]),
-				Text:   strings.TrimSpace(m[3]),
-			})
-			continue
+
+		// Strip WhatsApp date/time header first if present
+		if loc := whatsappPrefixRe.FindStringIndex(line); loc != nil {
+			rest := strings.TrimSpace(line[loc[1]:])
+			if colonIdx := strings.Index(rest, ":"); colonIdx > 0 && colonIdx <= 60 {
+				detected = "whatsapp_txt"
+				turns = append(turns, chatTurn{
+					Sender: strings.TrimSpace(rest[:colonIdx]),
+					Text:   strings.TrimSpace(rest[colonIdx+1:]),
+				})
+				continue
+			}
 		}
+
 		if m := plainLineRe.FindStringSubmatch(line); len(m) == 4 {
 			sender := strings.TrimSpace(m[1])
 			if sender == "" {
@@ -85,6 +92,7 @@ func ParseChatExport(raw string) ([]chatTurn, string) {
 			})
 			continue
 		}
+
 		// Continuation line of the previous turn
 		if len(turns) > 0 {
 			turns[len(turns)-1].Text += "\n" + line
