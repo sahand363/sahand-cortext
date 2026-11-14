@@ -81,9 +81,9 @@
           <div class="hero-mark"><span>c.</span><i></i></div>
           <div class="eyebrow">THINK WITHOUT LIMITS</div>
           <h1>A space for<br><em>what’s next.</em></h1>
-          <p>Gemini, OpenRouter, AIPrime, CodeCraft & custom OpenAI / Anthropic endpoints.</p>
+          <p>Gemini, OpenRouter, AIPrime, CodeCraft, custom chatbots & multi-model orchestration.</p>
           <div class="hero-actions"><button class="btn btn-primary" id="hero-start">Start a conversation <span>↗</span></button><button class="btn btn-quiet" data-goto="orchestration">Launch AI Orchestration <span>→</span></button></div>
-          <div class="capability-row"><span><i>✳</i> Google Gemini</span><span><i>⇄</i> OpenRouter</span><span><i>◈</i> AIPrime</span><span><i>⌘</i> Multi-Model Orchestration</span></div>
+          <div class="capability-row"><span><i>✳</i> Google Gemini</span><span><i>⇄</i> OpenRouter</span><span><i>🤖</i> Pluggable Chatbots</span><span><i>⌘</i> Multi-Model Orchestration</span></div>
         </div>
         <div id="chat-active" class="chat-active hidden">
           <div class="conversation-head">
@@ -111,6 +111,12 @@
               <textarea id="message-input" dir="auto" rows="1" placeholder="Type here" required></textarea>
               <div class="composer-bottom">
                 <div class="composer-left">
+                  <div class="model-picker persona-picker-wrap" id="chat-persona-picker-wrap">
+                    <select id="chat-persona-select" aria-label="Select chatbot persona">
+                      <option value="">Default Assistant</option>
+                    </select>
+                    <span class="select-arrow">⌄</span>
+                  </div>
                   <div class="model-picker"><span class="gemini-glyph">✳</span><select id="model" aria-label="Select model"></select><span class="select-arrow">⌄</span></div>
                 </div>
                 <button class="send-button" aria-label="Send message">↑</button>
@@ -179,7 +185,7 @@
                 <div>
                   <div class="eyebrow">TEAM & TASK CONFIGURATION</div>
                   <h2>Configure Collaboration Team</h2>
-                  <p>Assign your Coordinator, Worker(s), and optional QA Auditor. Workers execute sequentially by round or act as instant backup failovers.</p>
+                  <p>Assign your Coordinator, Worker(s), and optional QA Auditor. You can also assign a trained Chatbot Persona to any role.</p>
                 </div>
               </div>
 
@@ -425,10 +431,11 @@
       <section id="page-usage" class="page module-page hidden"><div class="page-heading"><div><div class="eyebrow">OBSERVABILITY</div><h1>Usage & analytics</h1><p>Understand model activity, response times and token usage.</p></div><span class="status-pill planned">IN DEVELOPMENT</span></div><div class="metric-grid"><div class="metric-card"><span>Tokens used</span><b>—</b><small>Waiting for telemetry module</small></div><div class="metric-card"><span>Requests</span><b>—</b><small>Waiting for telemetry module</small></div><div class="metric-card"><span>Average latency</span><b>—</b><small>Response timing will appear here</small></div></div><div class="chart-placeholder"><div class="chart-bars"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div><span>ACTIVITY VISUALIZATION · COMING SOON</span></div></section>
 
       <section id="page-settings" class="page module-page hidden">
-        <div class="page-heading"><div><div class="eyebrow">YOUR HUB, YOUR RULES</div><h1>Settings</h1><p>Configure providers, add custom OpenAI or Anthropic-compatible APIs, and personalize your workspace.</p></div></div>
+        <div class="page-heading"><div><div class="eyebrow">YOUR HUB, YOUR RULES</div><h1>Settings</h1><p>Configure providers, build pluggable chatbots & voice clones, and personalize your workspace.</p></div></div>
         <div class="settings-layout">
           <div class="settings-nav">
             <button class="settings-tab active" data-tab="provider-settings">AI providers</button>
+            <button class="settings-tab" data-tab="personas-settings">Chatbots & personas</button>
             <button class="settings-tab" data-tab="general-settings">General</button>
             <button class="settings-tab" data-tab="security-settings">Security</button>
           </div>
@@ -575,6 +582,161 @@
               </div>
             </div>
 
+            <div id="personas-settings" class="settings-panel hidden">
+              <div class="settings-section-head">
+                <div>
+                  <h2>Pluggable Chatbots & Voice Clones</h2>
+                  <p>Create specialized AI assistants or train a chatbot to talk and act like you from your own Telegram/WhatsApp chat exports, with per-bot model allowlists.</p>
+                </div>
+                <button type="button" class="btn btn-primary btn-small" id="new-persona-btn">＋ New Chatbot / Voice Clone</button>
+              </div>
+
+              <div id="personas-list-grid" class="personas-grid" style="margin-top:16px"></div>
+
+              <form id="persona-editor-form" class="api-key-box hidden" style="margin-top:18px;padding-top:18px;border-top:1px solid var(--line)">
+                <div class="settings-section-head" style="padding-bottom:12px;margin-bottom:14px">
+                  <div>
+                    <h2 id="persona-form-title">Create Chatbot / Persona</h2>
+                    <p>Configure personality, reference knowledge, allowed models, and Telegram bot bindings.</p>
+                  </div>
+                  <button type="button" id="cancel-persona-btn" class="btn btn-quiet btn-small">Cancel</button>
+                </div>
+
+                <div class="orch-part-grid" style="margin-bottom:12px">
+                  <label>
+                    <span>Chatbot Name</span>
+                    <input id="per-name" type="text" class="form-control" placeholder="e.g. Sahand Clone, Senior Go Reviewer" required>
+                  </label>
+                  <label>
+                    <span>Icon / Emoji</span>
+                    <input id="per-icon" type="text" class="form-control" maxlength="6" placeholder="🤖 or 😎" value="🤖">
+                  </label>
+                  <label>
+                    <span>Short Description</span>
+                    <input id="per-desc" type="text" class="form-control" placeholder="e.g. Digital twin trained on my chats">
+                  </label>
+                </div>
+
+                <div style="margin-bottom:12px">
+                  <label style="display:grid;gap:6px;font-size:13px;color:var(--muted)">
+                    <span>Role & System Instructions</span>
+                    <textarea id="per-system-prompt" dir="auto" rows="3" class="form-control" placeholder="Define who this bot is, its rules, and what it should or shouldn't do…"></textarea>
+                  </label>
+                </div>
+
+                <!-- Voice & Style Trainer Box -->
+                <div class="voice-trainer-box" style="margin-bottom:14px">
+                  <div class="voice-trainer-head">
+                    <div>
+                      <b>🎙️ Voice & Style Trainer (Learn How You Speak)</b>
+                      <small>Upload a Telegram Desktop <code>result.json</code>, WhatsApp <code>.txt</code> chat export, or paste a conversation sample below. The trainer isolates your replies and distills your exact tone and phrasing.</small>
+                    </div>
+                    <label class="btn btn-quiet btn-small" style="cursor:pointer">
+                      📂 Upload Chat Export (.json / .txt)
+                      <input type="file" id="per-train-file" accept=".json,.txt,.log" class="hidden">
+                    </label>
+                  </div>
+
+                  <div class="orch-part-grid" style="margin:10px 0">
+                    <label>
+                      <span>Your Name in Chat Log</span>
+                      <input id="per-train-speaker" type="text" class="form-control" placeholder="e.g. Sahand">
+                    </label>
+                    <label>
+                      <span>Trainer Model (Analyzes Your Style)</span>
+                      <select id="per-train-model" class="form-control"></select>
+                    </label>
+                    <label>
+                      <span>Extra Style Hints (Optional)</span>
+                      <input id="per-train-hints" type="text" class="form-control" placeholder="e.g. Casual Tehran Persian + English tech slang">
+                    </label>
+                  </div>
+
+                  <textarea id="per-train-log" dir="auto" rows="4" class="form-control" placeholder="Paste chat messages here or upload a file above… e.g.
+Ali: سلام داداش سرور اوکی شد؟
+Sahand: آره ردیفه الان دارم تستش میکنم 🚀"></textarea>
+
+                  <div class="key-actions" style="margin-top:10px">
+                    <button type="button" class="btn btn-primary btn-small" id="per-run-train-btn">✨ Distill Voice Blueprint & Examples</button>
+                    <span id="per-train-status" class="muted-note"></span>
+                  </div>
+                </div>
+
+                <div style="margin-bottom:12px">
+                  <label style="display:grid;gap:6px;font-size:13px;color:var(--muted)">
+                    <span>Voice, Tone & Personality Blueprint (Editable)</span>
+                    <textarea id="per-voice-blueprint" dir="auto" rows="4" class="form-control" placeholder="Generated automatically by the Voice Trainer above, or write custom voice/style rules here…"></textarea>
+                  </label>
+                </div>
+
+                <div style="margin-bottom:12px">
+                  <label style="display:grid;gap:6px;font-size:13px;color:var(--muted)">
+                    <span>Style Anchor Examples (JSON array of <code>{"user":"...","assistant":"..."}</code> pairs)</span>
+                    <textarea id="per-few-shot" dir="auto" rows="3" class="form-control" style="font-family:monospace;font-size:12.5px" placeholder='[{"user":"چطوری؟","assistant":"هستم داداش 😅"}]'></textarea>
+                  </label>
+                </div>
+
+                <div style="margin-bottom:14px">
+                  <label style="display:grid;gap:6px;font-size:13px;color:var(--muted)">
+                    <span>Reference Knowledge & Facts (Optional)</span>
+                    <textarea id="per-knowledge" dir="auto" rows="3" class="form-control" placeholder="Facts, coding standards, or background knowledge this chatbot should know…"></textarea>
+                  </label>
+                </div>
+
+                <!-- Per-Bot Model Allowlist -->
+                <div class="chat-scope-box" style="margin-bottom:14px">
+                  <div class="orch-part-grid">
+                    <label>
+                      <span>Default Model for This Bot</span>
+                      <select id="per-default-model" class="form-control"></select>
+                    </label>
+                    <label>
+                      <span>Allowed Models Scope (Web & Telegram)</span>
+                      <select id="per-scope-mode" class="form-control">
+                        <option value="all">All globally enabled models</option>
+                        <option value="selected">Only selected models below</option>
+                      </select>
+                    </label>
+                  </div>
+                  <div id="per-allowed-models-wrap" class="hidden" style="margin-top:8px">
+                    <div class="chat-scope-toolbar">
+                      <span class="muted-note">Check the exact models this bot is allowed to use:</span>
+                      <div class="heading-actions">
+                        <button type="button" class="btn btn-quiet btn-small" id="per-models-select-all">✓ All</button>
+                        <button type="button" class="btn btn-quiet btn-small" id="per-models-clear-all">☐ Clear</button>
+                      </div>
+                    </div>
+                    <div id="per-allowed-models-list" class="chat-scope-list"></div>
+                  </div>
+                </div>
+
+                <!-- Telegram Bot Binding (Prepared for Phase 3 Bridge) -->
+                <div class="chat-scope-box" style="margin-bottom:14px">
+                  <label class="orch-check-row">
+                    <input type="checkbox" id="per-tg-enabled">
+                    <div>
+                      <b>Enable Dedicated Telegram Bot for This Persona</b>
+                      <small>Attach a <code>@BotFather</code> token so you (or authorized friends) can chat with this persona directly inside Telegram.</small>
+                    </div>
+                  </label>
+                  <div id="per-tg-fields" class="orch-part-grid hidden" style="margin-top:8px">
+                    <label>
+                      <span>Telegram Bot Token (<span id="per-tg-token-status">Not set</span>)</span>
+                      <input id="per-tg-token" type="password" class="form-control" placeholder="123456789:ABCdefGHIjklMNOpqrSTUvwxYZ" autocomplete="off">
+                    </label>
+                    <label>
+                      <span>Allowed Telegram User IDs (comma-separated)</span>
+                      <input id="per-tg-users" type="text" class="form-control" placeholder="e.g. 123456789, 987654321">
+                    </label>
+                  </div>
+                </div>
+
+                <div class="key-actions">
+                  <button type="submit" class="btn btn-primary btn-small" id="save-persona-btn">Save Chatbot Persona <span>↗</span></button>
+                </div>
+              </form>
+            </div>
+
             <div id="general-settings" class="settings-panel hidden">
               <div class="settings-section-head"><div><h2>Workspace preferences</h2><p>Personalize how your workspace looks and behaves.</p></div></div>
               <div class="setting-row">
@@ -609,15 +771,15 @@
                 </div>
               </div>
               <div class="setting-row"><div><b>Persian & BiDi typography</b><small>Vazirmatn font + automatic RTL/LTR mixed sentence alignment.</small></div><span class="status-pill connected">Enabled</span></div>
-              <div class="setting-row"><div><b>Pluggable provider registry</b><small>Gemini, OpenRouter, AIPrime, CodeCraft, plus dynamic OpenAI & Anthropic spec APIs.</small></div><span class="status-pill connected">Active</span></div>
+              <div class="setting-row"><div><b>Pluggable provider & chatbot registry</b><small>Gemini, OpenRouter, AIPrime, CodeCraft, custom APIs, and trainable personas.</small></div><span class="status-pill connected">Active</span></div>
             </div>
 
-            <div id="security-settings" class="settings-panel hidden"><div class="settings-section-head"><div><h2>Security & access</h2><p>Controls for your private, single-user installation.</p></div></div><div class="setting-row"><div><b>Single-user authentication</b><small>Login protected with a bcrypt password hash and persistent SQLite session.</small></div><span class="status-pill connected">Enabled</span></div><div class="setting-row"><div><b>Server-side provider keys</b><small>API credentials are never stored in browser storage.</small></div><span class="status-pill connected">Enabled</span></div><div class="setting-row"><div><b>Change login credentials</b><small>Use the SSH control center: <code>sudo cortext</code></small></div><span class="status-pill">SSH menu</span></div></div>
+            <div id="security-settings" class="settings-panel hidden"><div class="settings-section-head"><div><h2>Security & access</h2><p>Controls for your private, single-user installation.</p></div></div><div class="setting-row"><div><b>Single-user authentication</b><small>Login protected with a bcrypt password hash and persistent SQLite session.</small></div><span class="status-pill connected">Enabled</span></div><div class="setting-row"><div><b>Server-side provider & bot keys</b><small>API credentials and Telegram bot tokens are never stored in browser storage.</small></div><span class="status-pill connected">Enabled</span></div><div class="setting-row"><div><b>Change login credentials</b><small>Use the SSH control center: <code>sudo cortext</code></small></div><span class="status-pill">SSH menu</span></div></div>
           </div>
         </div>
       </section>
     </div>
-    <footer><span>SAHAND-CORTEXT</span><i>·</i> PRIVATE MULTI-PROVIDER AI WORKSPACE <b>v0.6.1</b></footer>
+    <footer><span>SAHAND-CORTEXT</span><i>·</i> PRIVATE MULTI-PROVIDER AI WORKSPACE <b>v0.7.0</b></footer>
   </main>
 </div>
 <div id="toast" class="toast"></div>
