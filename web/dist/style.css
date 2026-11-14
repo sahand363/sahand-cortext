@@ -962,3 +962,115 @@ footer b{margin-left:auto;font-weight:600;letter-spacing:.8px}
 @media(max-width:420px){
   .orch-stats-bar{grid-template-columns:1fr}
 }
+
+/* ============================================================================
+   PLUGGABLE CHATBOTS / PERSONAS REGISTRY & VOICE TRAINER
+   ============================================================================ */
+
+.persona-picker-wrap select {
+  border-color: var(--accent-border);
+  background: var(--accent-soft);
+  color: var(--text-strong);
+  font-weight: 600;
+}
+
+.personas-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(310px, 1fr));
+  gap: 12px;
+}
+
+.persona-card {
+  border: 1px solid var(--line);
+  background: var(--panel2);
+  border-radius: 12px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.persona-card:hover {
+  border-color: var(--accent-border);
+}
+
+.persona-card-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.persona-card-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.persona-card-icon {
+  width: 40px;
+  height: 40px;
+  border-radius: 11px;
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-border);
+  display: grid;
+  place-items: center;
+  font-size: 20px;
+  flex: none;
+}
+
+.persona-card-title b {
+  display: block;
+  font-size: 15px;
+  color: var(--text-strong);
+}
+
+.persona-card-title small {
+  display: block;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+.voice-trainer-box {
+  border: 1px solid var(--accent-border);
+  background: var(--panel2);
+  border-radius: 11px;
+  padding: 14px 16px;
+}
+
+.voice-trainer-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.voice-trainer-head b {
+  display: block;
+  font-size: 14px;
+  color: var(--text-strong);
+}
+
+.voice-trainer-head small {
+  display: block;
+  font-size: 12.5px;
+  color: var(--muted);
+  margin-top: 2px;
+}
+
+@media (max-width: 720px) {
+  .personas-grid {
+    grid-template-columns: 1fr;
+  }
+  .composer-left {
+    display: flex;
+    gap: 6px;
+  }
+  .persona-picker-wrap {
+    max-width: 44%;
+  }
+}
