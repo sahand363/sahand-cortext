@@ -69,6 +69,22 @@ type storedProviderOptions struct {
 	ManualModels           []string `json:"manual_models,omitempty"`
 }
 
+func normalizeAdapterType(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "anthropic", "anthropic_compat":
+		return "anthropic_compat"
+	default:
+		return "openai_compat"
+	}
+}
+
+func instantiateDynamicAdapter(meta ProviderMetadata, client *http.Client) Provider {
+	if meta.AdapterType == "anthropic_compat" {
+		return NewAnthropicCompatAdapter(meta, client)
+	}
+	return NewOpenAICompatAdapter(meta, client)
+}
+
 // LoadIntoRegistry hydrates dynamic providers, built-in overrides, API keys, and manual models from SQLite + env.
 func (s *Store) LoadIntoRegistry(ctx context.Context, reg *Registry, client *http.Client) error {
 	if s != nil && s.db != nil {
@@ -115,7 +131,12 @@ func (s *Store) LoadIntoRegistry(ctx context.Context, reg *Registry, client *htt
 				continue
 			}
 
-			meta, cfg := buildDynamicMetadataAndConfig(normalizeAdapterType(adapterType), id, name, shortName, icon, desc, baseURL, chatPath, modelsPath, authType, authHeader, extraHeaders, opts, enabledInt != 0, sortOrder)
+			normAdapter := normalizeAdapterType(adapterType)
+			meta, cfg := buildDynamicMetadataAndConfig(
+				id, name, shortName, icon, desc, normAdapter,
+				baseURL, chatPath, modelsPath, authType, authHeader,
+				extraHeaders, opts, enabledInt != 0, sortOrder,
+			)
 			adapter := instantiateDynamicAdapter(meta, client)
 			_ = reg.UpsertDynamic(adapter, cfg)
 		}
@@ -139,7 +160,7 @@ func (s *Store) LoadIntoRegistry(ctx context.Context, reg *Registry, client *htt
 	return nil
 }
 
-// SaveDynamicProvider persists a custom OpenAI-compatible provider and registers it in the live Registry.
+// SaveDynamicProvider persists a custom OpenAI-compatible or Anthropic-compatible provider and registers it in the live Registry.
 func (s *Store) SaveDynamicProvider(ctx context.Context, reg *Registry, client *http.Client, input DynamicProviderInput) (RegisteredProvider, error) {
 	id := CanonicalID(input.ID)
 	if err := ValidateProviderID(id); err != nil {
@@ -148,6 +169,9 @@ func (s *Store) SaveDynamicProvider(ctx context.Context, reg *Registry, client *
 	if existing, _, err := reg.Get(id); err == nil && existing.Metadata().BuiltIn {
 		return RegisteredProvider{}, fmt.Errorf("%w: %s", ErrBuiltInProtected, id)
 	}
+
+	adapterType := normalizeAdapterType(input.AdapterType)
+	isAnthropic := adapterType == "anthropic_compat"
 
 	name := strings.TrimSpace(input.Name)
 	if name == "" {
@@ -162,12 +186,15 @@ func (s *Store) SaveDynamicProvider(ctx context.Context, reg *Registry, client *
 	}
 	icon := strings.TrimSpace(input.Icon)
 	if icon == "" {
-		icon = "⚡"
+		if isAnthropic {
+			icon = "✦"
+		} else {
+			icon = "⚡"
+		}
 	}
-	adapterType := normalizeAdapterType(input.AdapterType)
 	chatPath := strings.TrimSpace(input.ChatPath)
 	if chatPath == "" {
-		if adapterType == "anthropic_compat" {
+		if isAnthropic {
 			chatPath = "/messages"
 		} else {
 			chatPath = "/chat/completions"
@@ -182,18 +209,19 @@ func (s *Store) SaveDynamicProvider(ctx context.Context, reg *Registry, client *
 	}
 	authType := strings.ToLower(strings.TrimSpace(input.AuthType))
 	if authType == "" {
-		if adapterType == "anthropic_compat" {
+		if isAnthropic {
 			authType = "header"
 		} else {
 			authType = "bearer"
 		}
 	}
 	authHeader := strings.TrimSpace(input.AuthHeader)
-	if authHeader == "" && authType == "bearer" {
-		authHeader = "Authorization"
-	}
-	if authHeader == "" && authType == "header" && adapterType == "anthropic_compat" {
-		authHeader = "x-api-key"
+	if authHeader == "" {
+		if authType == "header" && isAnthropic {
+			authHeader = "x-api-key"
+		} else if authType == "bearer" {
+			authHeader = "Authorization"
+		}
 	}
 
 	enabled := true
@@ -218,8 +246,7 @@ func (s *Store) SaveDynamicProvider(ctx context.Context, reg *Registry, client *
 	}
 
 	meta, cfg := buildDynamicMetadataAndConfig(
-		adapterType,
-		id, name, shortName, icon, strings.TrimSpace(input.Description),
+		id, name, shortName, icon, strings.TrimSpace(input.Description), adapterType,
 		strings.TrimSpace(input.BaseURL), chatPath, modelsPath,
 		authType, authHeader, input.ExtraHeaders, opts, enabled, sortOrder,
 	)
@@ -409,31 +436,16 @@ type DynamicProviderInput struct {
 	SortOrder         int               `json:"sort_order"`
 }
 
-func normalizeAdapterType(raw string) string {
-	switch strings.ToLower(strings.TrimSpace(raw)) {
-	case "anthropic", "anthropic_compat":
-		return "anthropic_compat"
-	default:
-		return "openai_compat"
-	}
-}
-
-func instantiateDynamicAdapter(meta ProviderMetadata, client *http.Client) Provider {
-	if meta.AdapterType == "anthropic_compat" {
-		return NewAnthropicCompatAdapter(meta, client)
-	}
-	return NewOpenAICompatAdapter(meta, client)
-}
-
 func buildDynamicMetadataAndConfig(
-	adapterType string,
-	id, name, shortName, icon, desc, baseURL, chatPath, modelsPath, authType, authHeader string,
+	id, name, shortName, icon, desc, adapterType, baseURL, chatPath, modelsPath, authType, authHeader string,
 	extraHeaders map[string]string,
 	opts storedProviderOptions,
 	enabled bool,
 	sortOrder int,
 ) (ProviderMetadata, ProviderConfig) {
+	isAnthropic := adapterType == "anthropic_compat"
 	requiresKey := !strings.EqualFold(authType, "none")
+
 	keyLabel := opts.KeyLabel
 	if keyLabel == "" {
 		if requiresKey {
@@ -451,10 +463,10 @@ func buildDynamicMetadataAndConfig(
 		}
 	}
 	if desc == "" {
-		if adapterType == "anthropic_compat" {
-			desc = fmt.Sprintf("Anthropic-compatible provider at %s", baseURL)
+		if isAnthropic {
+			desc = fmt.Sprintf("Anthropic-compatible endpoint at %s", baseURL)
 		} else {
-			desc = fmt.Sprintf("OpenAI-compatible provider at %s", baseURL)
+			desc = fmt.Sprintf("OpenAI-compatible endpoint at %s", baseURL)
 		}
 	}
 	defaultModel := opts.DefaultModel
@@ -481,7 +493,7 @@ func buildDynamicMetadataAndConfig(
 			ModelDiscovery:  strings.TrimSpace(modelsPath) != "",
 			SystemPrompt:    true,
 			ReasoningOutput: true,
-			JSONMode:        true,
+			JSONMode:        !isAnthropic,
 		},
 	}
 
