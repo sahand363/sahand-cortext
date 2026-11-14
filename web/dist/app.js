@@ -11,6 +11,42 @@ let freeOnlyFilter = true;
 let editingCustomProviderId = null;
 let deleteArmed = false;
 
+let orchParticipantsDraft = [
+  { role: "coordinator", name: "Coordinator / Architect", provider: "", model: "" },
+  { role: "worker", name: "Worker / Developer", provider: "", model: "" },
+  { role: "auditor", name: "Quality Assurance / Auditor", provider: "", model: "" }
+];
+let orchJobsCache = [];
+let activeOrchJobId = localStorage.getItem("cortext_active_orch_job") || null;
+let orchPollTimer = null;
+let orchActiveSubView = "events";
+let orchSubmitting = false;
+let selectedDeliverableFileIdx = 0;
+
+const contribPalette = [
+  "#38bdf8",
+  "#facc15",
+  "#4ade80",
+  "#a855f7",
+  "#fb7185",
+  "#fb923c",
+  "#2dd4bf"
+];
+
+const pageNames = {
+  chat: "Chat",
+  models: "Models & providers",
+  orchestration: "AI orchestration",
+  memory: "Topic memory",
+  sessions: "Sessions",
+  usage: "Usage & analytics",
+  settings: "Settings"
+};
+
+/* ============================================================================
+   THEME & MOBILE NAVIGATION
+   ============================================================================ */
+
 function applyTheme(theme, persist = true) {
   const t = theme === "light" ? "light" : "dark";
   document.documentElement.setAttribute("data-theme", t);
@@ -56,568 +92,10 @@ function setMobileSidebarOpen(open) {
 if ($("mobile-menu")) $("mobile-menu").onclick = () => setMobileSidebarOpen(true);
 if ($("mobile-close")) $("mobile-close").onclick = () => setMobileSidebarOpen(false);
 if ($("sidebar-backdrop")) $("sidebar-backdrop").onclick = () => setMobileSidebarOpen(false);
-document.addEventListener("keydown", e => {
-  if (e.key === "Escape") setMobileSidebarOpen(false);
-});
 
-let orchParticipantsDraft = [
-  { role: "coordinator", name: "Coordinator / Architect", provider: "gemini", model: "gemini-2.0-flash" },
-  { role: "worker", name: "Worker / Developer", provider: "gemini", model: "gemini-2.0-flash" },
-  { role: "auditor", name: "Quality Assurance / Auditor", provider: "gemini", model: "gemini-2.0-flash" }
-];
-let orchJobsCache = [];
-let activeOrchJobId = localStorage.getItem("cortext_active_orch_job") || null;
-let orchPollTimer = null;
-let orchActiveSubView = "events"; // Default to Live Progress Timeline
-let orchSubmitting = false;
-let selectedDeliverableFileIdx = 0;
-
-const contribPalette = [
-  "#38bdf8",
-  "#facc15",
-  "#4ade80",
-  "#a855f7",
-  "#fb7185",
-  "#fb923c",
-  "#2dd4bf"
-];
-
-function getProviderMeta(id) {
-  return providerMap[id] || {
-    id: id || "unknown",
-    name: id || "Unknown Provider",
-    short_name: (id || "AI").toUpperCase(),
-    icon: "⚡",
-    description: "",
-    key_label: "API Key",
-    key_placeholder: "Paste API key…",
-    built_in: false,
-    requires_api_key: true,
-    supports_free_badge: false,
-    configured: false,
-    models: []
-  };
-}
-
-function hydrateProvidersFromRegistry(list) {
-  if (!Array.isArray(list)) return;
-  const prevModels = {};
-  Object.keys(providerMap).forEach(k => {
-    prevModels[k] = providerMap[k].models || [];
-  });
-  providersList = list.map(p => ({
-    ...p,
-    models: prevModels[p.id] || []
-  }));
-  providerMap = {};
-  providersList.forEach(p => {
-    providerMap[p.id] = p;
-  });
-
-  if (!selectedProvider || !providerMap[selectedProvider]) {
-    selectedProvider = providersList[0]?.id || "";
-  }
-  renderProviderTabs();
-}
-
-function renderProviderTabs() {
-  const containers = [
-    { el: $("models-provider-tabs"), allowAdd: false },
-    { el: $("settings-provider-tabs"), allowAdd: true }
-  ];
-
-  containers.forEach(({ el, allowAdd }) => {
-    if (!el) return;
-    el.innerHTML = "";
-    providersList.forEach(p => {
-      const btn = document.createElement("button");
-      btn.type = "button";
-      btn.className = "provider-tab" + (!editingCustomProviderId && p.id === selectedProvider ? " active" : "");
-      btn.dataset.provider = p.id;
-
-      const iconSpan = document.createElement("span");
-      iconSpan.textContent = p.icon || "⚡";
-
-      const nameNode = document.createTextNode(" " + p.name + " ");
-
-      const dot = document.createElement("i");
-      dot.className = "p-dot" + (p.configured ? " on" : "");
-
-      btn.append(iconSpan, nameNode, dot);
-      btn.onclick = () => {
-        closeCustomProviderForm();
-        switchProviderTab(p.id);
-      };
-      el.appendChild(btn);
-    });
-
-    if (allowAdd) {
-      const addBtn = document.createElement("button");
-      addBtn.type = "button";
-      addBtn.className = "provider-tab" + (editingCustomProviderId === "__new__" ? " active" : "");
-      addBtn.textContent = "＋ Add OpenAI-Compatible Provider";
-      addBtn.onclick = () => openCustomProviderForm(null);
-      el.appendChild(addBtn);
-    }
-  });
-}
-
-function openCustomProviderForm(existingMeta) {
-  editingCustomProviderId = existingMeta ? existingMeta.id : "__new__";
-  renderProviderTabs();
-  $("existing-provider-config-wrap").classList.add("hidden");
-  $("custom-provider-form").classList.remove("hidden");
-
-  if (existingMeta) {
-    $("custom-provider-form-title").textContent = `Edit Provider · ${existingMeta.name}`;
-    if ($("cp-adapter-type")) {
-      $("cp-adapter-type").value = existingMeta.adapter_type || "openai_compat";
-      $("cp-adapter-type").disabled = true;
-    }
-    $("cp-name").value = existingMeta.name || "";
-    $("cp-id").value = existingMeta.id || "";
-    $("cp-id").disabled = true;
-    $("cp-base-url").value = existingMeta.base_url || "";
-    $("cp-auth-type").value = existingMeta.auth_type || "bearer";
-    $("cp-auth-header").value = existingMeta.auth_header || "";
-    $("cp-api-key").value = "";
-    $("cp-manual-models").value = (existingMeta.manual_models || []).join(", ");
-    $("cp-enable-discovery").checked = existingMeta.models_path !== "";
-  } else {
-    $("custom-provider-form-title").textContent = "Add Custom API Provider";
-    if ($("cp-adapter-type")) {
-      $("cp-adapter-type").value = "openai_compat";
-      $("cp-adapter-type").disabled = false;
-    }
-    syncCustomProviderSpecDefaults();
-    $("cp-name").value = "";
-    $("cp-id").value = "";
-    $("cp-id").disabled = false;
-    $("cp-base-url").value = "";
-    $("cp-auth-type").value = "bearer";
-    $("cp-auth-header").value = "";
-    $("cp-api-key").value = "";
-    $("cp-manual-models").value = "";
-    $("cp-enable-discovery").checked = true;
-  }
-  syncCustomProviderAuthFields();
-}
-
-function closeCustomProviderForm() {
-  editingCustomProviderId = null;
-  if ($("custom-provider-form")) $("custom-provider-form").classList.add("hidden");
-  if ($("existing-provider-config-wrap")) $("existing-provider-config-wrap").classList.remove("hidden");
-  renderProviderTabs();
-}
-
-function syncCustomProviderAuthFields() {
-  const auth = $("cp-auth-type")?.value || "bearer";
-  if ($("cp-auth-header-wrap")) $("cp-auth-header-wrap").classList.toggle("hidden", auth !== "header");
-  if ($("cp-api-key-wrap")) $("cp-api-key-wrap").classList.toggle("hidden", auth === "none");
-}
-
-if ($("cp-auth-type")) {
-  $("cp-auth-type").addEventListener("change", syncCustomProviderAuthFields);
-}
-
-function syncCustomProviderSpecDefaults() {
-  const spec = $("cp-adapter-type")?.value || "openai_compat";
-  const isAnt = spec === "anthropic_compat";
-  if ($("cp-base-url") && !$("cp-base-url").dataset.touched) {
-    $("cp-base-url").placeholder = isAnt
-      ? "https://api.anthropic.com/v1 (or Anthropic-compatible proxy)"
-      : "https://api.openai.com/v1 (or Groq, Ollama, LM Studio…)";
-  }
-  if (editingCustomProviderId === "__new__" && $("cp-auth-type")) {
-    $("cp-auth-type").value = isAnt ? "header" : "bearer";
-    if ($("cp-auth-header") && isAnt && !$("cp-auth-header").value) {
-      $("cp-auth-header").value = "x-api-key";
-    }
-    syncCustomProviderAuthFields();
-  }
-}
-
-if ($("cp-adapter-type")) {
-  $("cp-adapter-type").addEventListener("change", syncCustomProviderSpecDefaults);
-}
-if ($("cp-name")) {
-  $("cp-name").addEventListener("input", () => {
-    if (editingCustomProviderId === "__new__" && !$("cp-id").dataset.touched) {
-      $("cp-id").value = $("cp-name").value.toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 36);
-    }
-  });
-}
-if ($("cp-id")) {
-  $("cp-id").addEventListener("input", () => { $("cp-id").dataset.touched = "1"; });
-}
-if ($("cancel-custom-provider-btn")) {
-  $("cancel-custom-provider-btn").onclick = () => {
-    closeCustomProviderForm();
-    if (selectedProvider) switchProviderTab(selectedProvider);
-  };
-}
-
-if ($("custom-provider-form")) {
-  $("custom-provider-form").addEventListener("submit", async e => {
-    e.preventDefault();
-    const btn = $("save-custom-provider-btn");
-    btn.disabled = true;
-    btn.textContent = "Saving & Discovering Models…";
-
-    const manualModels = ($("cp-manual-models").value || "")
-      .split(",")
-      .map(s => s.trim())
-      .filter(Boolean);
-
-    try {
-      const res = await api("/api/providers", {
-        method: "POST",
-        body: JSON.stringify({
-          adapter_type: $("cp-adapter-type").value,
-          id: $("cp-id").value.trim().toLowerCase(),
-          name: $("cp-name").value.trim(),
-          base_url: $("cp-base-url").value.trim(),
-          auth_type: $("cp-auth-type").value,
-          auth_header: $("cp-auth-header").value.trim(),
-          api_key: $("cp-api-key").value.trim(),
-          disable_discovery: !$("cp-enable-discovery").checked,
-          manual_models: manualModels
-        })
-      });
-
-      hydrateProvidersFromRegistry(res.providers || []);
-      const newId = res.provider.id;
-      if (providerMap[newId]) {
-        providerMap[newId].models = res.models || [];
-      }
-      if (res.active_provider && res.active_model) {
-        setActiveSelectionUI(res.active_provider, res.active_model);
-      }
-      closeCustomProviderForm();
-      switchProviderTab(newId);
-      syncModelDropdown();
-      syncAuditorModelDropdown();
-      ensureDefaultOrchParticipants();
-      renderOrchParticipantsBuilder();
-      $("setup-banner").classList.add("hidden");
-      toast(`✓ Registered ${res.provider.name} (${(res.models || []).length} models)`);
-    } catch (err) {
-      toast("Provider error: " + err.message);
-    } finally {
-      btn.disabled = false;
-      btn.innerHTML = 'Save & Register Provider <span>↗</span>';
-    }
-  });
-}
-
-if ($("edit-custom-provider-btn")) {
-  $("edit-custom-provider-btn").onclick = () => {
-    const meta = getProviderMeta(selectedProvider);
-    if (!meta.built_in) openCustomProviderForm(meta);
-  };
-}
-
-if ($("delete-custom-provider-btn")) {
-  $("delete-custom-provider-btn").onclick = async () => {
-    const meta = getProviderMeta(selectedProvider);
-    if (meta.built_in) return;
-    try {
-      const res = await api(`/api/providers/${encodeURIComponent(meta.id)}`, { method: "DELETE" });
-      hydrateProvidersFromRegistry(res.providers || []);
-      if (res.active_provider && res.active_model) {
-        setActiveSelectionUI(res.active_provider, res.active_model);
-      }
-      if (selectedProvider) switchProviderTab(selectedProvider);
-      syncModelDropdown();
-      syncAuditorModelDropdown();
-      renderOrchParticipantsBuilder();
-      toast(`🗑 Removed ${meta.name}`);
-    } catch (err) {
-      toast("Delete failed: " + err.message);
-    }
-  };
-}
-
-async function checkAuth() {
-  try {
-    const s = await api("/api/status");
-    showApp();
-    applyStatus(s);
-    await loadSessions();
-    await loadAllConfiguredModels();
-    await loadOrchJobsList();
-    if (!s.any_configured) {
-      $("setup-banner").classList.remove("hidden");
-      showSetupNudge();
-    }
-    const savedPage = localStorage.getItem("cortext_active_page");
-    if (savedPage && pageNames[savedPage]) {
-      switchPage(savedPage);
-    }
-  } catch {
-    showLogin();
-  }
-}
-
-function applyStatus(s) {
-  if (Array.isArray(s.providers_list)) {
-    hydrateProvidersFromRegistry(s.providers_list);
-  } else if (s.providers) {
-    Object.keys(s.providers).forEach(pid => {
-      if (providerMap[pid]) providerMap[pid].configured = !!s.providers[pid];
-    });
-  }
-  if (s.active_provider && s.active_model) {
-    setActiveSelectionUI(s.active_provider, s.active_model);
-  }
-  updateProviderBadges();
-  if (s.any_configured) {
-    $("setup-banner").classList.add("hidden");
-  }
-}
-
-function setActiveSelectionUI(provider, modelId) {
-  if (!provider || !modelId) return;
-  activeProvider = provider;
-  activeModel = modelId;
-  const info = getProviderMeta(provider);
-  if ($("active-provider-label")) $("active-provider-label").textContent = info.name;
-  if ($("active-model-label")) $("active-model-label").textContent = modelId;
-  if ($("header-provider-name")) $("header-provider-name").textContent = info.short_name;
-
-  const sel = $("model");
-  const composite = `${provider}::${modelId}`;
-  if (sel) {
-    if (![...sel.options].some(o => o.value === composite)) {
-      const opt = document.createElement("option");
-      opt.value = composite;
-      opt.textContent = `✓ [${info.short_name}] ${modelId}`;
-      sel.prepend(opt);
-    }
-    sel.value = composite;
-  }
-}
-
-function updateProviderBadges() {
-  const anyConn = providersList.some(p => p.configured);
-  $("header-provider-state").textContent = anyConn ? "CONNECTED" : "SETUP";
-  $("header-provider-state").classList.toggle("connected", anyConn);
-  renderProviderTabs();
-
-  const cur = getProviderMeta(selectedProvider);
-  const curConn = !!cur.configured;
-  $("models-provider-status").textContent = curConn ? "CONNECTED" : "NEEDS SETUP";
-  $("models-provider-status").classList.toggle("connected", curConn);
-  $("settings-provider-state").textContent = curConn ? "Connected" : "Not connected";
-  $("settings-provider-state").classList.toggle("connected", curConn);
-}
-
-function switchProviderTab(provider) {
-  if (!provider && providersList.length > 0) provider = providersList[0].id;
-  selectedProvider = provider;
-  const meta = getProviderMeta(provider);
-
-  $("settings-provider-title").textContent = `${meta.name} Connection`;
-  $("settings-provider-desc").textContent = meta.description || `Configure ${meta.name} (${meta.base_url || ""})`;
-
-  const needsKey = meta.requires_api_key !== false && meta.auth_type !== "none";
-  $("api-key-input-section").classList.toggle("hidden", !needsKey);
-  $("api-key-label").textContent = meta.key_label || "API Key";
-  $("api-key").placeholder = meta.key_placeholder || "Paste API key…";
-  $("api-key").value = "";
-  $("save-key-btn").textContent = needsKey ? "Save Key & Load Models ↗" : "Connect & Load Models ↗";
-
-  $("edit-custom-provider-btn")?.classList.toggle("hidden", !!meta.built_in);
-  $("delete-custom-provider-btn")?.classList.toggle("hidden", !!meta.built_in);
-
-  const specBadge = $("settings-provider-spec-badge");
-  if (specBadge) {
-    if (meta.built_in) {
-      specBadge.classList.add("hidden");
-    } else {
-      specBadge.classList.remove("hidden");
-      specBadge.textContent = meta.adapter_type === "anthropic_compat" ? "Anthropic Spec" : "OpenAI Spec";
-    }
-  }
-
-  $("settings-explorer-title").textContent = `Available Models · ${meta.name}`;
-  const hasHelp = Boolean(meta.help_url);
-  $("provider-help-row").classList.toggle("hidden", !hasHelp);
-  if (hasHelp) {
-    $("provider-help-text").textContent = meta.help_text || "Manage API keys:";
-    $("provider-help-link").href = meta.help_url;
-    $("provider-help-link").textContent = meta.help_button || "Open Provider Console ↗";
-  }
-
-  if ($("custom-model-id")) {
-    $("custom-model-id").placeholder = meta.default_model
-      ? `Enter ${meta.name} model ID (e.g. ${meta.default_model})`
-      : `Enter custom ${meta.name} model ID`;
-  }
-
-  $("models-feature-logo").textContent = meta.icon || "⚡";
-  $("models-feature-title").textContent = meta.name;
-  $("models-feature-desc").textContent = meta.description || "";
-
-  const showFreeToggle = !!meta.supports_free_badge;
-  $("settings-free-filter-wrap").classList.toggle("hidden", !showFreeToggle);
-  $("models-free-filter-wrap").classList.toggle("hidden", !showFreeToggle);
-  $("settings-free-only").checked = freeOnlyFilter;
-  $("models-free-only").checked = freeOnlyFilter;
-
-  updateProviderBadges();
-
-  if (meta.configured && (!meta.models || !meta.models.length)) {
-    loadProviderModels(provider, false);
-  } else {
-    renderModelGrids();
-  }
-}
-
-$("settings-free-only").addEventListener("change", e => {
-  freeOnlyFilter = e.target.checked;
-  $("models-free-only").checked = freeOnlyFilter;
-  renderModelGrids();
-});
-
-$("models-free-only").addEventListener("change", e => {
-  freeOnlyFilter = e.target.checked;
-  $("settings-free-only").checked = freeOnlyFilter;
-  renderModelGrids();
-});
-
-async function loadAllConfiguredModels() {
-  for (const p of providersList) {
-    if (p.configured) {
-      await loadProviderModels(p.id, false);
-    }
-  }
-  syncModelDropdown();
-  syncAuditorModelDropdown();
-  renderModelGrids();
-  ensureDefaultOrchParticipants();
-}
-
-async function loadProviderModels(provider, showToastMsg = false) {
-  if (!provider) return;
-  try {
-    const res = await api("/api/models?provider=" + encodeURIComponent(provider));
-    if (providerMap[provider]) {
-      providerMap[provider].configured = !!res.configured;
-      providerMap[provider].models = res.models || [];
-    }
-    if (res.active_provider && res.active_model) {
-      setActiveSelectionUI(res.active_provider, res.active_model);
-    }
-    updateProviderBadges();
-    syncModelDropdown();
-    syncAuditorModelDropdown();
-    renderModelGrids();
-    if (showToastMsg) {
-      toast(`Loaded ${(providerMap[provider]?.models || []).length} models from ${getProviderMeta(provider).name}`);
-    }
-  } catch (err) {
-    if (showToastMsg) toast(`Failed to load ${getProviderMeta(provider).name} models: ` + err.message);
-  }
-}
-
-function buildUnifiedModelOptions(sel) {
-  if (!sel) return;
-  const prevVal = sel.value;
-  sel.innerHTML = "";
-
-  const workingGroup = document.createElement("optgroup");
-  workingGroup.label = "★ Verified & Enabled Working Models";
-  let hasWorking = false;
-
-  providersList.forEach(p => {
-    const short = p.short_name || p.id.toUpperCase();
-    (p.models || []).filter(m => m.status === "working" && m.enabled !== false).forEach(m => {
-      hasWorking = true;
-      const opt = document.createElement("option");
-      opt.value = `${p.id}::${m.id}`;
-      opt.textContent = `✓ [${short}] ${m.display_name} (${m.latency_ms} ms)`;
-      workingGroup.appendChild(opt);
-    });
-  });
-  if (hasWorking) sel.appendChild(workingGroup);
-
-  providersList.forEach(p => {
-    const list = (p.models || []).filter(m => m.enabled !== false);
-    if (!list.length) return;
-    const grp = document.createElement("optgroup");
-    grp.label = p.name;
-    const filtered = p.supports_free_badge ? list.filter((m, idx) => m.status === "working" || m.is_free || idx < 25) : list;
-    filtered.forEach(m => {
-      const opt = document.createElement("option");
-      opt.value = `${p.id}::${m.id}`;
-      const prefix = m.status === "working" ? "✓ " : m.status === "failed" ? "✗ " : "";
-      const freeTag = (p.supports_free_badge && m.is_free) ? " [FREE]" : "";
-      opt.textContent = `${prefix}[${p.short_name}] ${m.display_name}${freeTag} (${m.id})`;
-      grp.appendChild(opt);
-    });
-    sel.appendChild(grp);
-  });
-
-  if (prevVal && [...sel.options].some(o => o.value === prevVal)) {
-    sel.value = prevVal;
-  }
-}
-
-function getDisplayedModels(provider) {
-  const meta = getProviderMeta(provider);
-  const all = meta.models || [];
-  if (meta.supports_free_badge && freeOnlyFilter) {
-    return all.filter(m => m.is_free || m.status === "working");
-  }
-  return all;
-}
-
-function getConfiguredProvidersList() {
-  return providersList.filter(p => p.configured).map(p => p.id);
-}
-
-function getDefaultModelForProvider(p) {
-  const meta = getProviderMeta(p);
-  const models = (meta.models || []).filter(m => m.enabled !== false);
-  const working = models.find(m => m.status === "working");
-  if (working) return working.id;
-  if (meta.default_model) return meta.default_model;
-  if (meta.supports_free_badge) {
-    const free = models.find(m => m.is_free);
-    if (free) return free.id;
-  }
-  if (models.length > 0) return models[0].id;
-  return "";
-}
-
-function ensureDefaultOrchParticipants() {
-  const configured = getConfiguredProvidersList();
-  const fallbackProv = configured[0] || activeProvider || providersList[0]?.id || "";
-  const fallbackMod = getDefaultModelForProvider(fallbackProv) || activeModel || "";
-
-  orchParticipantsDraft.forEach(p => {
-    if ((!p.provider || !providerMap[p.provider]?.configured) && configured.length > 0) {
-      p.provider = fallbackProv;
-      p.model = fallbackMod;
-    } else if (!providerMap[p.provider]) {
-      p.provider = fallbackProv;
-      p.model = fallbackMod;
-    } else if (!p.model) {
-      p.model = getDefaultModelForProvider(p.provider) || fallbackMod;
-    }
-  });
-}
-
-const pageNames = {
-  chat: "Chat",
-  models: "Models & providers",
-  orchestration: "AI orchestration",
-  memory: "Topic memory",
-  sessions: "Sessions",
-  usage: "Usage & analytics",
-  settings: "Settings"
-};
+/* ============================================================================
+   CORE API, CLIPBOARD & UTILITIES
+   ============================================================================ */
 
 async function api(url, opts = {}) {
   const r = await fetch(url, {
@@ -637,6 +115,7 @@ async function api(url, opts = {}) {
 
 function toast(msg) {
   const t = $("toast");
+  if (!t) return;
   t.textContent = msg;
   t.classList.add("show");
   clearTimeout(toastTimer);
@@ -1017,6 +496,263 @@ function downloadProjectZip(files, jobId) {
   toast(`📦 Downloaded ${cleanId}-project.zip (${files.length} files)`);
 }
 
+/* ============================================================================
+   DYNAMIC PROVIDER REGISTRY & CUSTOM SPEC BUILDER
+   ============================================================================ */
+
+function getProviderMeta(id) {
+  return providerMap[id] || {
+    id: id || "unknown",
+    name: id || "Unknown Provider",
+    short_name: (id || "AI").toUpperCase(),
+    icon: "⚡",
+    description: "",
+    key_label: "API Key",
+    key_placeholder: "Paste API key…",
+    built_in: false,
+    adapter_type: "openai_compat",
+    requires_api_key: true,
+    supports_free_badge: false,
+    configured: false,
+    models: []
+  };
+}
+
+function hydrateProvidersFromRegistry(list) {
+  if (!Array.isArray(list)) return;
+  const prevModels = {};
+  Object.keys(providerMap).forEach(k => {
+    prevModels[k] = providerMap[k].models || [];
+  });
+  providersList = list.map(p => ({
+    ...p,
+    models: prevModels[p.id] || []
+  }));
+  providerMap = {};
+  providersList.forEach(p => {
+    providerMap[p.id] = p;
+  });
+
+  if (!selectedProvider || !providerMap[selectedProvider]) {
+    selectedProvider = providersList[0]?.id || "";
+  }
+  renderProviderTabs();
+}
+
+function renderProviderTabs() {
+  const containers = [
+    { el: $("models-provider-tabs"), allowAdd: false },
+    { el: $("settings-provider-tabs"), allowAdd: true }
+  ];
+
+  containers.forEach(({ el, allowAdd }) => {
+    if (!el) return;
+    el.innerHTML = "";
+    providersList.forEach(p => {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "provider-tab" + (!editingCustomProviderId && p.id === selectedProvider ? " active" : "");
+      btn.dataset.provider = p.id;
+
+      const iconSpan = document.createElement("span");
+      iconSpan.textContent = p.icon || "⚡";
+
+      const nameNode = document.createTextNode(" " + p.name + " ");
+
+      const dot = document.createElement("i");
+      dot.className = "p-dot" + (p.configured ? " on" : "");
+
+      btn.append(iconSpan, nameNode, dot);
+      btn.onclick = () => {
+        closeCustomProviderForm();
+        switchProviderTab(p.id);
+      };
+      el.appendChild(btn);
+    });
+
+    if (allowAdd) {
+      const addBtn = document.createElement("button");
+      addBtn.type = "button";
+      addBtn.className = "provider-tab" + (editingCustomProviderId === "__new__" ? " active" : "");
+      addBtn.textContent = "＋ Add Custom Provider";
+      addBtn.onclick = () => openCustomProviderForm(null);
+      el.appendChild(addBtn);
+    }
+  });
+}
+
+function syncCustomProviderAuthFields() {
+  const auth = $("cp-auth-type")?.value || "bearer";
+  if ($("cp-auth-header-wrap")) $("cp-auth-header-wrap").classList.toggle("hidden", auth !== "header");
+  if ($("cp-api-key-wrap")) $("cp-api-key-wrap").classList.toggle("hidden", auth === "none");
+}
+
+function syncCustomProviderSpecDefaults() {
+  const spec = $("cp-adapter-type")?.value || "openai_compat";
+  const isAnt = spec === "anthropic_compat";
+  if ($("cp-base-url") && !$("cp-base-url").dataset.touched) {
+    $("cp-base-url").placeholder = isAnt
+      ? "[https://api.anthropic.com/v1](https://api.anthropic.com/v1) (or Anthropic-compatible proxy)"
+      : "[https://api.openai.com/v1](https://api.openai.com/v1) (or ChatGPT/Groq/Ollama endpoint…)";
+  }
+  if (editingCustomProviderId === "__new__" && $("cp-auth-type")) {
+    $("cp-auth-type").value = isAnt ? "header" : "bearer";
+    if ($("cp-auth-header") && isAnt && !$("cp-auth-header").value) {
+      $("cp-auth-header").value = "x-api-key";
+    }
+    syncCustomProviderAuthFields();
+  }
+}
+
+function openCustomProviderForm(existingMeta) {
+  editingCustomProviderId = existingMeta ? existingMeta.id : "__new__";
+  renderProviderTabs();
+  $("existing-provider-config-wrap")?.classList.add("hidden");
+  $("custom-provider-form")?.classList.remove("hidden");
+
+  if (existingMeta) {
+    $("custom-provider-form-title").textContent = `Edit Provider · ${existingMeta.name}`;
+    $("cp-adapter-type").value = existingMeta.adapter_type || "openai_compat";
+    $("cp-adapter-type").disabled = true;
+    $("cp-name").value = existingMeta.name || "";
+    $("cp-id").value = existingMeta.id || "";
+    $("cp-id").disabled = true;
+    $("cp-base-url").value = existingMeta.base_url || "";
+    $("cp-auth-type").value = existingMeta.auth_type || "bearer";
+    $("cp-auth-header").value = existingMeta.auth_header || "";
+    $("cp-api-key").value = "";
+    $("cp-manual-models").value = (existingMeta.manual_models || []).join(", ");
+    $("cp-enable-discovery").checked = existingMeta.models_path !== "";
+    syncCustomProviderAuthFields();
+  } else {
+    $("custom-provider-form-title").textContent = "Add Custom API Provider";
+    $("cp-adapter-type").value = "openai_compat";
+    $("cp-adapter-type").disabled = false;
+    $("cp-name").value = "";
+    $("cp-id").value = "";
+    $("cp-id").disabled = false;
+    delete $("cp-id").dataset.touched;
+    $("cp-base-url").value = "";
+    delete $("cp-base-url").dataset.touched;
+    $("cp-auth-type").value = "bearer";
+    $("cp-auth-header").value = "";
+    $("cp-api-key").value = "";
+    $("cp-manual-models").value = "";
+    $("cp-enable-discovery").checked = true;
+    syncCustomProviderSpecDefaults();
+  }
+}
+
+function closeCustomProviderForm() {
+  editingCustomProviderId = null;
+  $("custom-provider-form")?.classList.add("hidden");
+  $("existing-provider-config-wrap")?.classList.remove("hidden");
+  renderProviderTabs();
+}
+
+if ($("cp-adapter-type")) $("cp-adapter-type").addEventListener("change", syncCustomProviderSpecDefaults);
+if ($("cp-auth-type")) $("cp-auth-type").addEventListener("change", syncCustomProviderAuthFields);
+if ($("cp-base-url")) $("cp-base-url").addEventListener("input", () => { $("cp-base-url").dataset.touched = "1"; });
+if ($("cp-name")) {
+  $("cp-name").addEventListener("input", () => {
+    if (editingCustomProviderId === "__new__" && !$("cp-id").dataset.touched) {
+      $("cp-id").value = $("cp-name").value.toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 36);
+    }
+  });
+}
+if ($("cp-id")) $("cp-id").addEventListener("input", () => { $("cp-id").dataset.touched = "1"; });
+if ($("cancel-custom-provider-btn")) {
+  $("cancel-custom-provider-btn").onclick = () => {
+    closeCustomProviderForm();
+    if (selectedProvider) switchProviderTab(selectedProvider);
+  };
+}
+
+if ($("custom-provider-form")) {
+  $("custom-provider-form").addEventListener("submit", async e => {
+    e.preventDefault();
+    const btn = $("save-custom-provider-btn");
+    btn.disabled = true;
+    btn.textContent = "Saving & Discovering Models…";
+
+    const manualModels = ($("cp-manual-models").value || "")
+      .split(",")
+      .map(s => s.trim())
+      .filter(Boolean);
+
+    try {
+      const res = await api("/api/providers", {
+        method: "POST",
+        body: JSON.stringify({
+          adapter_type: $("cp-adapter-type").value,
+          id: $("cp-id").value.trim().toLowerCase(),
+          name: $("cp-name").value.trim(),
+          base_url: $("cp-base-url").value.trim(),
+          auth_type: $("cp-auth-type").value,
+          auth_header: $("cp-auth-header").value.trim(),
+          api_key: $("cp-api-key").value.trim(),
+          disable_discovery: !$("cp-enable-discovery").checked,
+          manual_models: manualModels
+        })
+      });
+
+      hydrateProvidersFromRegistry(res.providers || []);
+      const newId = res.provider.id;
+      if (providerMap[newId]) {
+        providerMap[newId].models = res.models || [];
+      }
+      if (res.active_provider && res.active_model) {
+        setActiveSelectionUI(res.active_provider, res.active_model);
+      }
+      closeCustomProviderForm();
+      switchProviderTab(newId);
+      syncModelDropdown();
+      syncAuditorModelDropdown();
+      ensureDefaultOrchParticipants();
+      renderOrchParticipantsBuilder();
+      $("setup-banner")?.classList.add("hidden");
+      toast(`✓ Registered ${res.provider.name} (${(res.models || []).length} models)`);
+    } catch (err) {
+      toast("Provider error: " + err.message);
+    } finally {
+      btn.disabled = false;
+      btn.innerHTML = 'Save & Register Provider <span>↗</span>';
+    }
+  });
+}
+
+if ($("edit-custom-provider-btn")) {
+  $("edit-custom-provider-btn").onclick = () => {
+    const meta = getProviderMeta(selectedProvider);
+    if (!meta.built_in) openCustomProviderForm(meta);
+  };
+}
+
+if ($("delete-custom-provider-btn")) {
+  $("delete-custom-provider-btn").onclick = async () => {
+    const meta = getProviderMeta(selectedProvider);
+    if (meta.built_in) return;
+    try {
+      const res = await api(`/api/providers/${encodeURIComponent(meta.id)}`, { method: "DELETE" });
+      hydrateProvidersFromRegistry(res.providers || []);
+      if (res.active_provider && res.active_model) {
+        setActiveSelectionUI(res.active_provider, res.active_model);
+      }
+      if (selectedProvider) switchProviderTab(selectedProvider);
+      syncModelDropdown();
+      syncAuditorModelDropdown();
+      renderOrchParticipantsBuilder();
+      toast(`🗑 Removed ${meta.name}`);
+    } catch (err) {
+      toast("Delete failed: " + err.message);
+    }
+  };
+}
+
+/* ============================================================================
+   AUTH & STATUS
+   ============================================================================ */
+
 function showLogin() {
   $("login-screen").classList.remove("hidden");
   $("app").classList.add("hidden");
@@ -1027,12 +763,160 @@ function showApp() {
   $("app").classList.remove("hidden");
 }
 
-document.querySelectorAll(".provider-tab").forEach(btn => {
-  btn.addEventListener("click", () => switchProviderTab(btn.dataset.provider));
+async function checkAuth() {
+  try {
+    const s = await api("/api/status");
+    showApp();
+    applyStatus(s);
+    await loadSessions();
+    await loadAllConfiguredModels();
+    await loadOrchJobsList();
+    if (!s.any_configured) {
+      $("setup-banner")?.classList.remove("hidden");
+      showSetupNudge();
+    }
+    const savedPage = localStorage.getItem("cortext_active_page");
+    if (savedPage && pageNames[savedPage]) {
+      switchPage(savedPage);
+    }
+  } catch {
+    showLogin();
+  }
+}
+
+function applyStatus(s) {
+  if (Array.isArray(s.providers_list)) {
+    hydrateProvidersFromRegistry(s.providers_list);
+  } else if (s.providers) {
+    Object.keys(s.providers).forEach(pid => {
+      if (providerMap[pid]) providerMap[pid].configured = !!s.providers[pid];
+    });
+  }
+  if (s.active_provider && s.active_model) {
+    setActiveSelectionUI(s.active_provider, s.active_model);
+  }
+  updateProviderBadges();
+  if (s.any_configured) {
+    $("setup-banner")?.classList.add("hidden");
+  }
+}
+
+function setActiveSelectionUI(provider, modelId) {
+  if (!provider || !modelId) return;
+  activeProvider = provider;
+  activeModel = modelId;
+  const info = getProviderMeta(provider);
+  if ($("header-provider-name")) $("header-provider-name").textContent = info.short_name;
+
+  const sel = $("model");
+  const composite = `${provider}::${modelId}`;
+  if (sel) {
+    if (![...sel.options].some(o => o.value === composite)) {
+      const opt = document.createElement("option");
+      opt.value = composite;
+      opt.textContent = `✓ [${info.short_name}] ${modelId}`;
+      sel.prepend(opt);
+    }
+    sel.value = composite;
+  }
+}
+
+function updateProviderBadges() {
+  const anyConn = providersList.some(p => p.configured);
+  if ($("header-provider-state")) {
+    $("header-provider-state").textContent = anyConn ? "CONNECTED" : "SETUP";
+    $("header-provider-state").classList.toggle("connected", anyConn);
+  }
+  renderProviderTabs();
+
+  const cur = getProviderMeta(selectedProvider);
+  const curConn = !!cur.configured;
+  if ($("models-provider-status")) {
+    $("models-provider-status").textContent = curConn ? "CONNECTED" : "NEEDS SETUP";
+    $("models-provider-status").classList.toggle("connected", curConn);
+  }
+  if ($("settings-provider-state")) {
+    $("settings-provider-state").textContent = curConn ? "Connected" : "Not connected";
+    $("settings-provider-state").classList.toggle("connected", curConn);
+  }
+}
+
+function switchProviderTab(provider) {
+  if (!provider && providersList.length > 0) provider = providersList[0].id;
+  selectedProvider = provider;
+  const meta = getProviderMeta(provider);
+
+  $("settings-provider-title").textContent = `${meta.name} Connection`;
+  $("settings-provider-desc").textContent = meta.description || `Configure ${meta.name} (${meta.base_url || ""})`;
+
+  const specBadge = $("settings-provider-spec-badge");
+  if (specBadge) {
+    if (meta.built_in) {
+      specBadge.classList.add("hidden");
+    } else {
+      specBadge.classList.remove("hidden");
+      specBadge.textContent = meta.adapter_type === "anthropic_compat" ? "Anthropic Spec" : "OpenAI Spec";
+    }
+  }
+
+  const needsKey = meta.requires_api_key !== false && meta.auth_type !== "none";
+  $("api-key-input-section")?.classList.toggle("hidden", !needsKey);
+  $("api-key-label").textContent = meta.key_label || "API Key";
+  $("api-key").placeholder = meta.key_placeholder || "Paste API key…";
+  $("api-key").value = "";
+  $("save-key-btn").textContent = needsKey ? "Save Key & Load Models ↗" : "Connect & Load Models ↗";
+
+  $("edit-custom-provider-btn")?.classList.toggle("hidden", !!meta.built_in);
+  $("delete-custom-provider-btn")?.classList.toggle("hidden", !!meta.built_in);
+
+  $("settings-explorer-title").textContent = `Available Models · ${meta.name}`;
+  const hasHelp = Boolean(meta.help_url);
+  $("provider-help-row")?.classList.toggle("hidden", !hasHelp);
+  if (hasHelp) {
+    $("provider-help-text").textContent = meta.help_text || "Manage API keys:";
+    $("provider-help-link").href = meta.help_url;
+    $("provider-help-link").textContent = meta.help_button || "Open Provider Console ↗";
+  }
+
+  if ($("custom-model-id")) {
+    $("custom-model-id").placeholder = meta.default_model
+      ? `Enter ${meta.name} model ID (e.g. ${meta.default_model})`
+      : `Enter custom ${meta.name} model ID`;
+  }
+
+  $("models-feature-logo").textContent = meta.icon || "⚡";
+  $("models-feature-title").textContent = meta.name;
+  $("models-feature-desc").textContent = meta.description || "";
+
+  const showFreeToggle = !!meta.supports_free_badge;
+  $("settings-free-filter-wrap")?.classList.toggle("hidden", !showFreeToggle);
+  $("models-free-filter-wrap")?.classList.toggle("hidden", !showFreeToggle);
+  if ($("settings-free-only")) $("settings-free-only").checked = freeOnlyFilter;
+  if ($("models-free-only")) $("models-free-only").checked = freeOnlyFilter;
+
+  updateProviderBadges();
+
+  if (meta.configured && (!meta.models || !meta.models.length)) {
+    loadProviderModels(provider, false);
+  } else {
+    renderModelGrids();
+  }
+}
+
+$("settings-free-only")?.addEventListener("change", e => {
+  freeOnlyFilter = e.target.checked;
+  if ($("models-free-only")) $("models-free-only").checked = freeOnlyFilter;
+  renderModelGrids();
+});
+
+$("models-free-only")?.addEventListener("change", e => {
+  freeOnlyFilter = e.target.checked;
+  if ($("settings-free-only")) $("settings-free-only").checked = freeOnlyFilter;
+  renderModelGrids();
 });
 
 function showSetupNudge() {
-  if (!currentSession) $("chat-empty").classList.remove("hidden");
+  if (!currentSession) $("chat-empty")?.classList.remove("hidden");
 }
 
 $("login-form").addEventListener("submit", async e => {
@@ -1053,6 +937,10 @@ $("logout").onclick = async () => {
   stopOrchPolling();
   try { await api("/api/logout", { method: "POST" }); } finally { showLogin(); }
 };
+
+/* ============================================================================
+   SESSIONS & MINIMAL CHAT
+   ============================================================================ */
 
 function updateCurrentSessionHeader() {
   const cur = sessionsCache.find(s => s.id === currentSession);
@@ -1299,16 +1187,22 @@ async function deleteSessionById(id) {
 function addMessage(m) {
   const row = document.createElement("div");
   row.className = "message " + m.role;
-  const av = document.createElement("div");
-  av.className = "message-avatar";
-  av.textContent = m.role === "user" ? "S" : "✳";
   const bubble = document.createElement("div");
   bubble.className = "bubble";
   bubble.setAttribute("dir", "auto");
   bubble.textContent = m.content;
-  row.append(av, bubble);
+  row.append(bubble);
   $("messages").appendChild(row);
 }
+
+function resizeMessageInput() {
+  const el = $("message-input");
+  if (!el) return;
+  el.style.height = "auto";
+  el.style.height = Math.min(el.scrollHeight, 150) + "px";
+}
+
+$("message-input").addEventListener("input", resizeMessageInput);
 
 $("new-chat").onclick = $("hero-start").onclick = $("clear-view").onclick = $("sessions-new").onclick = () => newSession();
 $("refresh-sessions").onclick = () => loadSessions();
@@ -1328,8 +1222,10 @@ $("chat-form").addEventListener("submit", async e => {
   if (!message) return;
   if (!currentSession) await newSession();
   input.value = "";
+  resizeMessageInput();
   addMessage({ role: "user", content: message });
   addMessage({ role: "assistant", content: "Thinking…" });
+  $("messages").scrollTop = $("messages").scrollHeight;
   const send = $("chat-form").querySelector(".send-button");
   send.disabled = true;
   try {
@@ -1345,7 +1241,6 @@ $("chat-form").addEventListener("submit", async e => {
     $("messages").lastElementChild.remove();
     addMessage({ role: "assistant", content: out.reply });
     setActiveSelectionUI(out.provider || provider, out.model || model);
-    toast(`Response received · ${out.latency_ms} ms (${out.model})`);
   } catch (err) {
     $("messages").lastElementChild.remove();
     addMessage({ role: "assistant", content: "Unable to complete request: " + err.message });
@@ -1363,6 +1258,10 @@ $("message-input").addEventListener("keydown", e => {
   }
 });
 
+/* ============================================================================
+   PAGE NAVIGATION & MODELS MANAGEMENT
+   ============================================================================ */
+
 function switchPage(name) {
   localStorage.setItem("cortext_active_page", name);
   document.querySelectorAll(".page").forEach(p => p.classList.add("hidden"));
@@ -1374,7 +1273,7 @@ function switchPage(name) {
   if (name === "sessions") loadSessions();
   if (name === "settings" || name === "models") {
     refreshStatus();
-    switchProviderTab(selectedProvider);
+    if (!editingCustomProviderId) switchProviderTab(selectedProvider);
   }
   if (name === "orchestration") {
     initOrchestrationPage();
@@ -1385,13 +1284,91 @@ function switchPage(name) {
 
 document.querySelectorAll(".nav-link").forEach(b => b.addEventListener("click", () => switchPage(b.dataset.page)));
 document.querySelectorAll("[data-goto]").forEach(b => b.addEventListener("click", () => switchPage(b.dataset.goto)));
-$("setup-open").onclick = () => switchPage("settings");
+if ($("setup-open")) $("setup-open").onclick = () => switchPage("settings");
 
 async function refreshStatus() {
   try {
     const s = await api("/api/status");
     applyStatus(s);
   } catch {}
+}
+
+async function loadAllConfiguredModels() {
+  for (const p of providersList) {
+    if (p.configured) {
+      await loadProviderModels(p.id, false);
+    }
+  }
+  syncModelDropdown();
+  syncAuditorModelDropdown();
+  renderModelGrids();
+  ensureDefaultOrchParticipants();
+}
+
+async function loadProviderModels(provider, showToastMsg = false) {
+  if (!provider) return;
+  try {
+    const res = await api("/api/models?provider=" + encodeURIComponent(provider));
+    if (providerMap[provider]) {
+      providerMap[provider].configured = !!res.configured;
+      providerMap[provider].models = res.models || [];
+    }
+    if (res.active_provider && res.active_model) {
+      setActiveSelectionUI(res.active_provider, res.active_model);
+    }
+    updateProviderBadges();
+    syncModelDropdown();
+    syncAuditorModelDropdown();
+    renderModelGrids();
+    if (showToastMsg) {
+      toast(`Loaded ${(providerMap[provider]?.models || []).length} models from ${getProviderMeta(provider).name}`);
+    }
+  } catch (err) {
+    if (showToastMsg) toast(`Failed to load ${getProviderMeta(provider).name} models: ` + err.message);
+  }
+}
+
+function buildUnifiedModelOptions(sel) {
+  if (!sel) return;
+  const prevVal = sel.value;
+  sel.innerHTML = "";
+
+  const workingGroup = document.createElement("optgroup");
+  workingGroup.label = "★ Verified & Enabled Working Models";
+  let hasWorking = false;
+
+  providersList.forEach(p => {
+    const short = p.short_name || p.id.toUpperCase();
+    (p.models || []).filter(m => m.status === "working" && m.enabled !== false).forEach(m => {
+      hasWorking = true;
+      const opt = document.createElement("option");
+      opt.value = `${p.id}::${m.id}`;
+      opt.textContent = `✓ [${short}] ${m.display_name} (${m.latency_ms} ms)`;
+      workingGroup.appendChild(opt);
+    });
+  });
+  if (hasWorking) sel.appendChild(workingGroup);
+
+  providersList.forEach(p => {
+    const list = (p.models || []).filter(m => m.enabled !== false);
+    if (!list.length) return;
+    const grp = document.createElement("optgroup");
+    grp.label = p.name;
+    const filtered = p.supports_free_badge ? list.filter((m, idx) => m.status === "working" || m.is_free || idx < 25) : list;
+    filtered.forEach(m => {
+      const opt = document.createElement("option");
+      opt.value = `${p.id}::${m.id}`;
+      const prefix = m.status === "working" ? "✓ " : m.status === "failed" ? "✗ " : "";
+      const freeTag = (p.supports_free_badge && m.is_free) ? " [FREE]" : "";
+      opt.textContent = `${prefix}[${p.short_name}] ${m.display_name}${freeTag} (${m.id})`;
+      grp.appendChild(opt);
+    });
+    sel.appendChild(grp);
+  });
+
+  if (prevVal && [...sel.options].some(o => o.value === prevVal)) {
+    sel.value = prevVal;
+  }
 }
 
 function syncModelDropdown() {
@@ -1422,6 +1399,15 @@ function syncAuditorModelDropdown() {
   }
 }
 
+function getDisplayedModels(provider) {
+  const meta = getProviderMeta(provider);
+  const all = meta.models || [];
+  if (meta.supports_free_badge && freeOnlyFilter) {
+    return all.filter(m => m.is_free || m.status === "working");
+  }
+  return all;
+}
+
 async function toggleModelEnabledState(provider, modelId, enabled) {
   const list = providerMap[provider]?.models || [];
   const item = list.find(x => x.id === modelId);
@@ -1447,9 +1433,10 @@ async function toggleModelEnabledState(provider, modelId, enabled) {
 
 async function batchToggleShownModels(enabled) {
   const provider = selectedProvider;
+  const meta = getProviderMeta(provider);
   const shown = getDisplayedModels(provider);
   if (!shown.length) {
-    toast(`No models loaded for ${getProviderMeta(provider).name} yet.`);
+    toast(`No models loaded for ${meta.name} yet.`);
     return;
   }
   const ids = shown.map(m => m.id);
@@ -1461,8 +1448,8 @@ async function batchToggleShownModels(enabled) {
       body: JSON.stringify({ provider, models: ids, enabled })
     });
     toast(enabled
-      ? `✓ Checked all ${ids.length} shown models on ${getProviderMeta(provider).name}`
-      : `☐ Unchecked all ${ids.length} shown models on ${getProviderMeta(provider).name}`);
+      ? `✓ Checked all ${ids.length} shown models on ${meta.name}`
+      : `☐ Unchecked all ${ids.length} shown models on ${meta.name}`);
   } catch (err) {
     toast("Batch toggle failed: " + err.message);
   }
@@ -1475,7 +1462,7 @@ async function batchToggleShownModels(enabled) {
 function renderModelGrids() {
   const provider = selectedProvider;
   const meta = getProviderMeta(provider);
-  const allModels = providerMap[provider]?.models || [];
+  const allModels = meta.models || [];
   const shownModels = getDisplayedModels(provider);
 
   const workingCount = allModels.filter(m => m.status === "working" && m.enabled !== false).length;
@@ -1493,15 +1480,15 @@ function renderModelGrids() {
     grid.innerHTML = "";
     if (!allModels.length) {
       if (summary) {
-        summary.innerHTML = `No models loaded for <b>${meta.name}</b> yet. Paste your ${meta.name} API key in Settings and click <b>Save Key & Load Models</b>.`;
+        summary.textContent = `No models loaded for ${meta.name} yet. Configure your connection in Settings and click Save Key & Load Models.`;
       }
       return;
     }
 
     if (summary) {
-      const freeNote = provider === "openrouter" ? ` · <b>${freeCount}</b> free` : "";
-      const disNote = disabledCount > 0 ? ` · <b>${disabledCount}</b> unchecked/disabled` : "";
-      summary.innerHTML = `<b>${meta.name}</b> returned <b>${allModels.length}</b> models${freeNote} (showing <b>${shownModels.length}</b>) · <span class="text-ok"><b>${workingCount}</b> active working</span> · <span class="text-err"><b>${failedCount}</b> failed</span>${disNote}. <b>Click card to test, or uncheck "Enabled" to bench a model:</b>`;
+      const freeNote = meta.supports_free_badge ? ` · ${freeCount} free` : "";
+      const disNote = disabledCount > 0 ? ` · ${disabledCount} disabled` : "";
+      summary.textContent = `${meta.name} returned ${allModels.length} models${freeNote} (showing ${shownModels.length}) · ${workingCount} working · ${failedCount} failed${disNote}. Click card to test, or uncheck Enabled to bench a model:`;
     }
 
     shownModels.forEach(m => {
@@ -1550,7 +1537,7 @@ function renderModelGrids() {
         act.textContent = "★ ACTIVE";
         badgeWrap.appendChild(act);
       }
-      if (m.is_free && provider === "openrouter") {
+      if (m.is_free && meta.supports_free_badge) {
         const freeBadge = document.createElement("span");
         freeBadge.className = "model-badge free-badge";
         freeBadge.textContent = "FREE";
@@ -1599,6 +1586,7 @@ function renderModelGrids() {
 async function testSingleModel(provider, modelId, setActive = true) {
   const list = providerMap[provider]?.models || [];
   const item = list.find(x => x.id === modelId);
+  const short = getProviderMeta(provider).short_name;
   if (item) {
     item.status = "testing";
     renderModelGrids();
@@ -1617,9 +1605,9 @@ async function testSingleModel(provider, modelId, setActive = true) {
       if (setActive && (!item || item.enabled !== false)) {
         setActiveSelectionUI(provider, modelId);
       }
-      toast(`✓ [${getProviderMeta(provider).short}] ${modelId} works! (${res.latency_ms} ms)`);
+      toast(`✓ [${short}] ${modelId} works! (${res.latency_ms} ms)`);
     } else {
-      toast(`✗ ${modelId} failed on ${getProviderMeta(provider).short}`);
+      toast(`✗ ${modelId} failed on ${short}`);
     }
   } catch (err) {
     if (item) {
@@ -1635,23 +1623,24 @@ async function testSingleModel(provider, modelId, setActive = true) {
 
 async function testShownModels() {
   const provider = selectedProvider;
+  const meta = getProviderMeta(provider);
   const shown = getDisplayedModels(provider).filter(m => m.enabled !== false);
   if (!shown.length) {
-    toast(`No enabled models shown on ${getProviderMeta(provider).name}. Check the models you want to test first.`);
+    toast(`No enabled models shown on ${meta.name}. Check the models you want to test first.`);
     return;
   }
-  toast(`Testing ${shown.length} enabled models on ${getProviderMeta(provider).name}…`);
+  toast(`Testing ${shown.length} enabled models on ${meta.name}…`);
   let foundWorking = false;
   for (const m of shown) {
     const activate = !foundWorking;
     await testSingleModel(provider, m.id, activate);
-    const updated = (providerMap[provider].models || []).find(x => x.id === m.id);
+    const updated = (providerMap[provider]?.models || []).find(x => x.id === m.id);
     if (updated && updated.status === "working" && !foundWorking) {
       foundWorking = true;
     }
   }
-  const workingCount = (providerMap[provider].models || []).filter(m => m.status === "working" && m.enabled !== false).length;
-  toast(`Done! ${workingCount} enabled working models found on ${getProviderMeta(provider).name}.`);
+  const workingCount = (providerMap[provider]?.models || []).filter(m => m.status === "working" && m.enabled !== false).length;
+  toast(`Done! ${workingCount} enabled working models found on ${meta.name}.`);
 }
 
 $("api-key-form").addEventListener("submit", async e => {
@@ -1664,7 +1653,7 @@ $("api-key-form").addEventListener("submit", async e => {
   btn.disabled = true;
   btn.textContent = `Connecting to ${meta.name}…`;
   fb.className = "key-feedback";
-  fb.textContent = `Sending request to ${meta.name} to verify key and retrieve available models…`;
+  fb.textContent = `Sending request to ${meta.name} to verify connection and retrieve available models…`;
 
   try {
     const res = await api("/api/setup/provider", {
@@ -1672,8 +1661,13 @@ $("api-key-form").addEventListener("submit", async e => {
       body: JSON.stringify({ provider, api_key: key })
     });
     $("api-key").value = "";
-    providerMap[provider].configured = true;
-    providerMap[provider].models = res.models || [];
+    if (Array.isArray(res.providers)) {
+      hydrateProvidersFromRegistry(res.providers);
+    }
+    if (providerMap[provider]) {
+      providerMap[provider].configured = true;
+      providerMap[provider].models = res.models || [];
+    }
     if (res.active_provider && res.active_model) {
       setActiveSelectionUI(res.active_provider, res.active_model);
     }
@@ -1682,20 +1676,19 @@ $("api-key-form").addEventListener("submit", async e => {
     syncAuditorModelDropdown();
     renderModelGrids();
     ensureDefaultOrchParticipants();
-    $("setup-banner").classList.add("hidden");
+    $("setup-banner")?.classList.add("hidden");
 
+    const loadedCount = (providerMap[provider]?.models || []).length;
     fb.className = "key-feedback ok";
-    fb.innerHTML = `✓ <b>${meta.name} API key saved (${res.latency_ms} ms)!</b> Loaded <b>${providerMap[provider].models.length}</b> models below.`;
-    toast(`${meta.name} connected! (${providerMap[provider].models.length} models)`);
+    fb.textContent = `✓ ${meta.name} connected (${res.latency_ms} ms)! Loaded ${loadedCount} models below.`;
+    toast(`${meta.name} connected! (${loadedCount} models)`);
   } catch (err) {
     fb.className = "key-feedback err";
-    fb.textContent = "";
-    const errBold = document.createElement("b");
-    errBold.textContent = `✗ ${meta.name} error:`;
-    fb.append(errBold, document.createTextNode(" " + err.message));
+    fb.textContent = `✗ ${meta.name} error: ${err.message}`;
   } finally {
     btn.disabled = false;
-    btn.innerHTML = 'Save Key & Load Models <span>↗</span>';
+    const needsKey = meta.requires_api_key !== false && meta.auth_type !== "none";
+    btn.textContent = needsKey ? "Save Key & Load Models ↗" : "Connect & Load Models ↗";
   }
 });
 
@@ -1703,6 +1696,7 @@ if ($("custom-model-form")) {
   $("custom-model-form").addEventListener("submit", async e => {
     e.preventDefault();
     const provider = selectedProvider;
+    const meta = getProviderMeta(provider);
     const input = $("custom-model-id");
     const model = input.value.trim();
     if (!model) return;
@@ -1715,10 +1709,12 @@ if ($("custom-model-form")) {
         body: JSON.stringify({ provider, model })
       });
       input.value = "";
-      providerMap[provider].models = res.models || [];
+      if (providerMap[provider]) {
+        providerMap[provider].models = res.models || [];
+      }
       if (res.ok && res.active_provider && res.active_model) {
         setActiveSelectionUI(res.active_provider, res.active_model);
-        toast(`✓ [${getProviderMeta(provider).short}] ${model} verified working (${res.latency_ms} ms)!`);
+        toast(`✓ [${meta.short_name}] ${model} verified working (${res.latency_ms} ms)!`);
       } else {
         toast(`Added ${model}, test returned: ${res.error || "failed"}`);
       }
@@ -1757,8 +1753,44 @@ document.querySelectorAll(".settings-tab").forEach(b => b.onclick = () => {
 });
 
 /* ============================================================================
-   PHASE 3.3 — AI ORCHESTRATION FRONTEND INTEGRATION
+   AI ORCHESTRATION FRONTEND INTEGRATION
    ============================================================================ */
+
+function getConfiguredProvidersList() {
+  return providersList.filter(p => p.configured).map(p => p.id);
+}
+
+function getDefaultModelForProvider(p) {
+  const meta = getProviderMeta(p);
+  const models = (meta.models || []).filter(m => m.enabled !== false);
+  const working = models.find(m => m.status === "working");
+  if (working) return working.id;
+  if (meta.default_model) return meta.default_model;
+  if (meta.supports_free_badge) {
+    const free = models.find(m => m.is_free);
+    if (free) return free.id;
+  }
+  if (models.length > 0) return models[0].id;
+  return "";
+}
+
+function ensureDefaultOrchParticipants() {
+  const configured = getConfiguredProvidersList();
+  const fallbackProv = configured[0] || activeProvider || providersList[0]?.id || "";
+  const fallbackMod = getDefaultModelForProvider(fallbackProv) || activeModel || "";
+
+  orchParticipantsDraft.forEach(p => {
+    if ((!p.provider || !providerMap[p.provider]?.configured) && configured.length > 0) {
+      p.provider = fallbackProv;
+      p.model = fallbackMod;
+    } else if (!providerMap[p.provider]) {
+      p.provider = fallbackProv;
+      p.model = fallbackMod;
+    } else if (!p.model) {
+      p.model = getDefaultModelForProvider(p.provider) || fallbackMod;
+    }
+  });
+}
 
 async function initOrchestrationPage() {
   ensureDefaultOrchParticipants();
@@ -1877,7 +1909,10 @@ function renderOrchParticipantsBuilder() {
     gridRow.className = "orch-part-grid";
 
     const provWrap = document.createElement("label");
-    provWrap.innerHTML = `<span>Provider</span>`;
+    const provSpan = document.createElement("span");
+    provSpan.textContent = "Provider";
+    provWrap.appendChild(provSpan);
+
     const provSelect = document.createElement("select");
     providersList.forEach(provObj => {
       const opt = document.createElement("option");
@@ -1888,13 +1923,17 @@ function renderOrchParticipantsBuilder() {
     });
 
     const modWrap = document.createElement("label");
-    modWrap.innerHTML = `<span>Model</span>`;
+    const modSpan = document.createElement("span");
+    modSpan.textContent = "Model";
+    modWrap.appendChild(modSpan);
+
     const modSelect = document.createElement("select");
 
     function populateModelsForPart() {
       modSelect.innerHTML = "";
       const p = part.provider;
-      const list = (providerMap[p]?.models || []).filter(m => m.enabled !== false);
+      const meta = getProviderMeta(p);
+      const list = (meta.models || []).filter(m => m.enabled !== false);
       if (!list.length) {
         const fallbackOpt = document.createElement("option");
         fallbackOpt.value = part.model || "";
@@ -1904,7 +1943,7 @@ function renderOrchParticipantsBuilder() {
       }
 
       const working = list.filter(m => m.status === "working");
-      const others = p === "openrouter"
+      const others = meta.supports_free_badge
         ? list.filter((m, i) => m.status !== "working" && (m.is_free || i < 40))
         : list.filter(m => m.status !== "working");
 
@@ -1926,7 +1965,7 @@ function renderOrchParticipantsBuilder() {
         others.forEach(m => {
           const o = document.createElement("option");
           o.value = m.id;
-          const freeTag = (p === "openrouter" && m.is_free) ? " [FREE]" : "";
+          const freeTag = (meta.supports_free_badge && m.is_free) ? " [FREE]" : "";
           o.textContent = `${m.display_name}${freeTag} (${m.id})`;
           grpO.appendChild(o);
         });
@@ -1962,8 +2001,8 @@ function renderOrchParticipantsBuilder() {
 
 $("orch-add-participant").onclick = () => {
   const configured = getConfiguredProvidersList();
-  const defProv = configured[0] || activeProvider || "gemini";
-  const defMod = getDefaultModelForProvider(defProv) || activeModel || "gemini-2.0-flash";
+  const defProv = configured[0] || activeProvider || providersList[0]?.id || "";
+  const defMod = getDefaultModelForProvider(defProv) || activeModel || "";
   orchParticipantsDraft.push({
     role: "worker",
     name: "Worker / Developer",
@@ -2021,8 +2060,9 @@ $("orch-create-form").addEventListener("submit", async e => {
 
   for (let i = 0; i < orchParticipantsDraft.length; i++) {
     const p = orchParticipantsDraft[i];
-    if (!providerMap[p.provider]?.configured) {
-      errBanner.textContent = `Participant #${i + 1} uses ${getProviderMeta(p.provider).name || p.provider}, which does not have a saved API key yet. Configure it in Settings first.`;
+    const meta = getProviderMeta(p.provider);
+    if (!meta.configured) {
+      errBanner.textContent = `Participant #${i + 1} uses ${meta.name}, which is not configured yet. Configure it in Settings first.`;
       errBanner.classList.remove("hidden");
       return;
     }
@@ -2296,9 +2336,18 @@ function renderAIContributionBar(participants, messages, events) {
     dot.style.background = e.chars > 0 ? e.color : "#ef4444";
 
     const roleShort = e.role === "coordinator" ? "Coord" : e.role === "auditor" ? "Auditor" : "Worker";
-    const provShort = getProviderMeta(e.provider).short_name || e.provider;
+    const provShort = getProviderMeta(e.provider).short_name;
+
     const label = document.createElement("span");
-    label.innerHTML = `<b>${e.model}</b> <small style="color:#94a3b8">(${provShort} · ${roleShort})</small> <span style="color:#cbd5e1;font-weight:700">${pctStr}</span>`;
+    const boldModel = document.createElement("b");
+    boldModel.textContent = e.model;
+    const metaSmall = document.createElement("small");
+    metaSmall.style.color = "var(--muted)";
+    metaSmall.textContent = ` (${provShort} · ${roleShort}) `;
+    const pctSpan = document.createElement("span");
+    pctSpan.style.fontWeight = "700";
+    pctSpan.textContent = pctStr;
+    label.append(boldModel, metaSmall, pctSpan);
 
     item.append(dot, label);
 
@@ -2331,7 +2380,7 @@ async function swapParticipantModelMidJob(jobId, participants, slotIdx, newCompo
       method: "POST",
       body: JSON.stringify({ participants: updated })
     });
-    toast(`✓ Updated Participant #${slotIdx + 1} to ${getProviderMeta(newProv).short_name || newProv} · ${newMod}`);
+    toast(`✓ Updated Participant #${slotIdx + 1} to ${getProviderMeta(newProv).short_name} · ${newMod}`);
     await fetchAndRenderOrchJob(jobId);
   } catch (err) {
     toast("Could not swap participant model: " + err.message);
@@ -2351,7 +2400,7 @@ function renderOrchJobDetails(d) {
   $("orch-detail-stage").textContent = `STAGE: ${stage.toUpperCase()}`;
   $("orch-detail-rounds").textContent = `Round ${d.current_round || 0} / ${d.max_rounds || 5}`;
   $("orch-detail-calls").textContent = `Messages ${messages.length} / ${d.max_calls || 15}`;
-  $("orch-detail-task").textContent = d.task || "";
+
   const taskEl = $("orch-detail-task");
   const taskToggleBtn = $("orch-task-toggle-btn");
   const taskText = d.task || "";
@@ -2431,7 +2480,7 @@ function renderOrchJobDetails(d) {
 
   if (isActive || isPaused) {
     activeBanner.classList.remove("hidden");
-    const activeProvName = invokeMeta.provider ? (getProviderMeta(invokeMeta.provider).name || invokeMeta.provider) : "";
+    const activeProvName = invokeMeta.provider ? getProviderMeta(invokeMeta.provider).name : "";
     const activeModelLabel = invokeMeta.model ? `${activeProvName} · ${invokeMeta.model}` : "";
 
     if (isPausing) {
@@ -2447,16 +2496,16 @@ function renderOrchJobDetails(d) {
       $("orch-active-headline").textContent = "Waiting to retry after temporary provider error…";
       $("orch-active-subline").textContent = d.error_message || "Scheduled for automatic retry.";
     } else if (stage === "planning") {
-      $("orch-active-headline").textContent = `Coordinator (${activeModelLabel || (coordPart ? `${getProviderMeta(coordPart.provider).name || coordPart.provider} · ${coordPart.model}` : "Architect")}) is creating the implementation plan…`;
+      $("orch-active-headline").textContent = `Coordinator (${activeModelLabel || (coordPart ? `${getProviderMeta(coordPart.provider).name} · ${coordPart.model}` : "Architect")}) is creating the implementation plan…`;
       $("orch-active-subline").textContent = "Analyzing task and preparing instructions for Worker.";
     } else if (stage === "working") {
-      $("orch-active-headline").textContent = `Worker (${activeModelLabel || (scheduledWorker ? `${getProviderMeta(scheduledWorker.provider).name || scheduledWorker.provider} · ${scheduledWorker.model}` : "Developer")}) is executing round ${curRound}…`;
+      $("orch-active-headline").textContent = `Worker (${activeModelLabel || (scheduledWorker ? `${getProviderMeta(scheduledWorker.provider).name} · ${scheduledWorker.model}` : "Developer")}) is executing round ${curRound}…`;
       $("orch-active-subline").textContent = "Producing deliverable based on Coordinator, QA Auditor, and User instructions.";
     } else if (stage === "auditing") {
-      $("orch-active-headline").textContent = `QA Auditor (${activeModelLabel || (auditorPart ? `${getProviderMeta(auditorPart.provider).name || auditorPart.provider} · ${auditorPart.model}` : "Auditor")}) is inspecting round ${curRound}…`;
+      $("orch-active-headline").textContent = `QA Auditor (${activeModelLabel || (auditorPart ? `${getProviderMeta(auditorPart.provider).name} · ${auditorPart.model}` : "Auditor")}) is inspecting round ${curRound}…`;
       $("orch-active-subline").textContent = "Testing Worker deliverable for runtime bugs, missing files, and edge cases before Coordinator review.";
     } else if (stage === "reviewing") {
-      $("orch-active-headline").textContent = `Coordinator (${activeModelLabel || (coordPart ? `${getProviderMeta(coordPart.provider).name || coordPart.provider} · ${coordPart.model}` : "Architect")}) is reviewing round ${curRound}…`;
+      $("orch-active-headline").textContent = `Coordinator (${activeModelLabel || (coordPart ? `${getProviderMeta(coordPart.provider).name} · ${coordPart.model}` : "Architect")}) is reviewing round ${curRound}…`;
       $("orch-active-subline").textContent = "Evaluating Worker deliverable and QA Auditor report for final approval.";
     } else {
       $("orch-active-headline").textContent = "Collaboration in progress…";
@@ -2483,7 +2532,6 @@ function renderOrchJobDetails(d) {
     }
   });
 
-  // Identify the participant that answered the very last AI turn (locked from swapping)
   const lastAIMsg = [...messages].reverse().find(m => m.sender_role !== "user");
 
   const rosterEl = $("orch-detail-roster");
@@ -2518,26 +2566,34 @@ function renderOrchJobDetails(d) {
     let roleLabel = "Worker / Developer";
     if (p.role === "coordinator") roleLabel = "Coordinator / Architect";
     if (p.role === "auditor") roleLabel = "Quality Assurance / Auditor";
-    const provName = getProviderMeta(p.provider).name || p.provider;
+    const provName = getProviderMeta(p.provider).name;
     const modelMsgs = messages.filter(m => m.provider === p.provider && m.model === p.model && m.sender_role === p.role).length;
     const failCount = slotFailures[`slot_${i}`] || slotFailures[`${p.provider}::${p.model}`] || 0;
-
-    const stateTag = isWorkingNow
-      ? ` · <span style="color:#4ade80;font-weight:700">⚡ WORKING NOW</span>`
-      : failCount > 0
-        ? ` · <span style="color:#f87171;font-weight:700">✗ ${failCount} fail</span>`
-        : "";
 
     const headerDiv = document.createElement("div");
     const roleSpan = document.createElement("span");
     roleSpan.className = "roster-role";
-    roleSpan.innerHTML = `#${i + 1} ${roleLabel} · ${modelMsgs} msg${modelMsgs === 1 ? "" : "s"}${stateTag}`;
-    const provBold = document.createElement("b");
-    provBold.textContent = `${provName} · ${p.model}`;
-    headerDiv.append(roleSpan, provBold);
+    roleSpan.textContent = `#${i + 1} ${roleLabel} · ${modelMsgs} msg${modelMsgs === 1 ? "" : "s"}`;
+
+    if (isWorkingNow) {
+      const stateSpan = document.createElement("span");
+      stateSpan.style.color = "var(--accent)";
+      stateSpan.style.fontWeight = "700";
+      stateSpan.textContent = " · ⚡ WORKING NOW";
+      roleSpan.appendChild(stateSpan);
+    } else if (failCount > 0) {
+      const failSpan = document.createElement("span");
+      failSpan.style.color = "var(--err)";
+      failSpan.style.fontWeight = "700";
+      failSpan.textContent = ` · ✗ ${failCount} fail`;
+      roleSpan.appendChild(failSpan);
+    }
+
+    const modelBold = document.createElement("b");
+    modelBold.textContent = `${provName} · ${p.model}`;
+    headerDiv.append(roleSpan, modelBold);
     pill.appendChild(headerDiv);
 
-    // Mid-Job Model Switcher (locks the model that answered the last turn)
     if (answeredLastTurn) {
       const lockNote = document.createElement("span");
       lockNote.className = "roster-lock-note";
@@ -2568,7 +2624,6 @@ function renderOrchJobDetails(d) {
 
   renderAIContributionBar(participants, messages, events);
 
-  // Final Result Card
   const finalCard = $("orch-final-card");
   if (status === "completed" && d.execution_result) {
     finalCard.classList.remove("hidden");
@@ -2600,7 +2655,7 @@ function renderOrchJobDetails(d) {
         verdictBadge.className = `orch-status-badge ${isApproved ? "status-completed" : "status-waiting"}`;
         verdictBadge.textContent = isApproved ? "✓ APPROVED BY AUDITOR" : "⚠ ISSUES FOUND & FIXED";
 
-        const provShort = getProviderMeta(latestAuditMsg.provider).name || latestAuditMsg.provider;
+        const provShort = getProviderMeta(latestAuditMsg.provider).name;
         $("orch-audit-model-title").textContent = `${provShort} · ${latestAuditMsg.model} (${latestAuditMsg.latency_ms || 0} ms)`;
         $("orch-audit-summary").textContent = latestAuditMsg.completion_summary || "See full auditor report below.";
         $("orch-audit-body").textContent = latestAuditMsg.content || "";
@@ -2641,11 +2696,13 @@ function renderOrchJobDetails(d) {
         selectBtn.type = "button";
         selectBtn.className = "orch-file-select";
         const sizeKb = Math.max(0.1, (new Blob([f.content]).size / 1024)).toFixed(1);
-        const fileBold = document.createElement("b");
-        fileBold.textContent = `📄 ${f.filename}`;
+
+        const fnameBold = document.createElement("b");
+        fnameBold.textContent = `📄 ${f.filename}`;
         const sizeSmall = document.createElement("small");
         sizeSmall.textContent = `${sizeKb} KB`;
-        selectBtn.append(fileBold, document.createTextNode(" "), sizeSmall);
+        selectBtn.append(fnameBold, sizeSmall);
+
         selectBtn.onclick = () => {
           selectedDeliverableFileIdx = idx;
           renderOrchJobDetails(d);
@@ -2672,10 +2729,12 @@ function renderOrchJobDetails(d) {
     if (sumNote) {
       if (parsedPkg.summary) {
         sumNote.classList.remove("hidden");
-        sumNote.innerHTML = `<b>Coordinator Summary:</b> `;
+        sumNote.innerHTML = "";
+        const labelBold = document.createElement("b");
+        labelBold.textContent = "Coordinator Summary: ";
         const s = document.createElement("span");
         s.textContent = parsedPkg.summary;
-        sumNote.appendChild(s);
+        sumNote.append(labelBold, s);
       } else {
         sumNote.classList.add("hidden");
       }
@@ -2736,9 +2795,11 @@ function renderOrchJobDetails(d) {
     revCard.classList.toggle("hidden", isActive);
   }
 
-  // Render Collapsible Collaboration Transcript (Collapsed by Default)
   $("orch-msg-count").textContent = String(messages.length);
   const msgContainer = $("orch-messages-view");
+  const openTurnIndices = new Set(
+    [...msgContainer.querySelectorAll("details[open]")].map(el => el.dataset.turnIdx)
+  );
   msgContainer.innerHTML = "";
 
   if (!messages.length) {
@@ -2752,7 +2813,10 @@ function renderOrchJobDetails(d) {
     messages.forEach((m, idx) => {
       const detailsEl = document.createElement("details");
       detailsEl.className = `orch-msg-collapsible role-${m.sender_role}`;
-      // Collapsed by default so large code turns don't clutter the screen
+      detailsEl.dataset.turnIdx = String(idx);
+      if (openTurnIndices.has(String(idx))) {
+        detailsEl.open = true;
+      }
 
       const summaryEl = document.createElement("summary");
 
@@ -2765,9 +2829,15 @@ function renderOrchJobDetails(d) {
 
       const provShort = m.sender_role === "user"
         ? "HUMAN FEEDBACK"
-        : (getProviderMeta(m.provider).short_name || (m.provider || "").toUpperCase());
+        : getProviderMeta(m.provider).short_name;
       const modelLabel = m.sender_role === "user" ? "Interactive Revision" : `${provShort} · ${m.model}`;
-      left.innerHTML = `<span class="orch-role-tag ${m.sender_role}">#${idx + 1} · ${roleTitle}</span> <b>${modelLabel}</b>`;
+
+      const roleBadge = document.createElement("span");
+      roleBadge.className = `orch-role-tag ${m.sender_role}`;
+      roleBadge.textContent = `#${idx + 1} · ${roleTitle}`;
+      const modelBold = document.createElement("b");
+      modelBold.textContent = modelLabel;
+      left.append(roleBadge, modelBold);
 
       const displayContent = m.sender_role === "user" ? stripRevOptsTag(m.content) : m.content;
       const previewSnippet = (m.completion_summary || displayContent || "").replace(/\s+/g, " ").trim().slice(0, 95);
@@ -2778,7 +2848,17 @@ function renderOrchJobDetails(d) {
 
       const right = document.createElement("div");
       right.className = "orch-msg-meta";
-      right.innerHTML = `<span>Round ${m.round}</span> · <span class="action-tag action-${m.action}">${(m.action || "continue").toUpperCase()}</span>${m.latency_ms ? ` · <span>${(m.latency_ms / 1000).toFixed(1)}s</span>` : ""}`;
+      const roundSpan = document.createElement("span");
+      roundSpan.textContent = `Round ${m.round}`;
+      const actSpan = document.createElement("span");
+      actSpan.className = `action-tag action-${m.action}`;
+      actSpan.textContent = (m.action || "continue").toUpperCase();
+      right.append(roundSpan, document.createTextNode(" · "), actSpan);
+      if (m.latency_ms) {
+        const latSpan = document.createElement("span");
+        latSpan.textContent = `${(m.latency_ms / 1000).toFixed(1)}s`;
+        right.append(document.createTextNode(" · "), latSpan);
+      }
 
       summaryEl.append(left, previewSpan, right);
 
@@ -2825,10 +2905,11 @@ function renderOrchJobDetails(d) {
         const sum = document.createElement("div");
         sum.className = "orch-msg-summary";
         sum.setAttribute("dir", "auto");
-        sum.innerHTML = `<b>Summary:</b> `;
+        const sumBold = document.createElement("b");
+        sumBold.textContent = "Summary: ";
         const span = document.createElement("span");
         span.textContent = m.completion_summary;
-        sum.appendChild(span);
+        sum.append(sumBold, span);
         innerCard.appendChild(sum);
       }
 
@@ -2837,7 +2918,6 @@ function renderOrchJobDetails(d) {
     });
   }
 
-  // Render Line-by-Line Plain-English Live Progress Timeline
   $("orch-evt-count").textContent = String(events.length);
   const evtContainer = $("orch-events-view");
   evtContainer.innerHTML = "";
@@ -2868,9 +2948,9 @@ function renderOrchJobDetails(d) {
 
 function buildDetailedTimelineNarrative(ev) {
   const p = parseEventJSON(ev);
-  const provName = p.provider ? (getProviderMeta(p.provider).name || p.provider) : "";
-  const fromProv = p.from_provider ? (getProviderMeta(p.from_provider).name || p.from_provider) : "";
-  const toProv = p.to_provider ? (getProviderMeta(p.to_provider).name || p.to_provider) : "";
+  const provName = p.provider ? getProviderMeta(p.provider).name : "";
+  const fromProv = p.from_provider ? getProviderMeta(p.from_provider).name : "";
+  const toProv = p.to_provider ? getProviderMeta(p.to_provider).name : "";
   const roundPrefix = p.round ? `[Round ${p.round}] ` : "";
 
   switch (ev.event_type) {
@@ -3093,9 +3173,6 @@ function formatShortTimestamp(ts) {
   }
 }
 
-$("mobile-menu").onclick = () => $("sidebar").classList.add("open");
-$("mobile-close").onclick = () => $("sidebar").classList.remove("open");
-
 document.addEventListener("keydown", e => {
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
     e.preventDefault();
@@ -3103,11 +3180,10 @@ document.addEventListener("keydown", e => {
     newSession();
   }
   if (e.key === "Escape") {
-    $("sidebar").classList.remove("open");
+    setMobileSidebarOpen(false);
     closeRenameBar();
     resetDeleteButton();
   }
 });
 
-switchProviderTab("gemini");
 checkAuth();
