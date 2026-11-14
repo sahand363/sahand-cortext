@@ -260,9 +260,9 @@ func (s *Storage) SaveCollaborationMessage(ctx context.Context, msg Collaboratio
 	defer tx.Rollback()
 
 var currentStatus string
-	if err := tx.QueryRowContext(ctx, `SELECT status FROM orchestration_jobs WHERE id = ?`, msg.JobID).Scan(¤tStatus); err != nil {
-		return nil, err
-	}
+if err := tx.QueryRowContext(ctx, `SELECT status FROM orchestration_jobs WHERE id = ?`, msg.JobID).Scan(&currentStatus); err != nil {
+    return nil, err
+}
 	if currentStatus == string(StatusCancelled) {
 		return nil, ErrJobCancelled
 	}
