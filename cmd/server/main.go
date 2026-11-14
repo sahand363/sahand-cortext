@@ -27,7 +27,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const AppVersion = "0.6.0"
+const AppVersion = "0.6.1"
 
 type App struct {
 	db          *sql.DB
@@ -73,6 +73,11 @@ type ModelTestRecord struct {
 	LatencyMs int64  `json:"latency_ms"`
 	LastError string `json:"last_error"`
 	Disabled  bool   `json:"disabled,omitempty"`
+}
+
+type ChatModelScope struct {
+	Mode          string   `json:"mode"`           // "all" | "selected"
+	AllowedModels []string `json:"allowed_models"` // ["provider::model", ...]
 }
 
 func env(key, fallback string) string {
@@ -298,6 +303,103 @@ func (a *App) setActiveSelection(p, model string) {
 	_ = a.setSetting(norm+"_active_model", cleanModel)
 }
 
+func (a *App) loadChatModelScope() ChatModelScope {
+	mode := strings.ToLower(strings.TrimSpace(a.setting("chat_model_scope_mode")))
+	if mode != "selected" {
+		mode = "all"
+	}
+	var rawList []string
+	if raw := a.setting("chat_allowed_models"); raw != "" {
+		_ = json.Unmarshal([]byte(raw), &rawList)
+	}
+	seen := map[string]bool{}
+	allowed := make([]string, 0, len(rawList))
+	for _, entry := range rawList {
+		parts := strings.SplitN(strings.TrimSpace(entry), "::", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		p := provider.CanonicalID(parts[0])
+		m := a.router.Registry().NormalizeModelID(p, parts[1])
+		if p == "" || m == "" {
+			continue
+		}
+		key := p + "::" + m
+		if !seen[key] {
+			seen[key] = true
+			allowed = append(allowed, key)
+		}
+	}
+	return ChatModelScope{
+		Mode:          mode,
+		AllowedModels: allowed,
+	}
+}
+
+func (a *App) saveChatModelScope(scope ChatModelScope) error {
+	mode := strings.ToLower(strings.TrimSpace(scope.Mode))
+	if mode != "selected" {
+		mode = "all"
+	}
+	seen := map[string]bool{}
+	cleaned := make([]string, 0, len(scope.AllowedModels))
+	for _, entry := range scope.AllowedModels {
+		parts := strings.SplitN(strings.TrimSpace(entry), "::", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		p := provider.CanonicalID(parts[0])
+		m := a.router.Registry().NormalizeModelID(p, parts[1])
+		if p == "" || m == "" {
+			continue
+		}
+		key := p + "::" + m
+		if !seen[key] {
+			seen[key] = true
+			cleaned = append(cleaned, key)
+		}
+	}
+	if err := a.setSetting("chat_model_scope_mode", mode); err != nil {
+		return err
+	}
+	data, _ := json.Marshal(cleaned)
+	return a.setSetting("chat_allowed_models", string(data))
+}
+
+func (a *App) isModelAllowedForChat(providerID, modelID string) bool {
+	scope := a.loadChatModelScope()
+	if scope.Mode != "selected" {
+		return true
+	}
+	target := provider.CanonicalID(providerID) + "::" + a.router.Registry().NormalizeModelID(providerID, modelID)
+	for _, item := range scope.AllowedModels {
+		if item == target {
+			return true
+		}
+	}
+	return false
+}
+
+func (a *App) handleChatModelScope(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		jsonOut(w, 200, a.loadChatModelScope())
+	case http.MethodPost, http.MethodPut:
+		var body ChatModelScope
+		if json.NewDecoder(http.MaxBytesReader(w, r.Body, 128*1024)).Decode(&body) != nil {
+			jsonOut(w, 400, map[string]string{"error": "Invalid chat model scope payload"})
+			return
+		}
+		if err := a.saveChatModelScope(body); err != nil {
+			jsonOut(w, 500, map[string]string{"error": "Failed saving chat model scope"})
+			return
+		}
+		jsonOut(w, 200, a.loadChatModelScope())
+	default:
+		http.Error(w, "method not allowed", 405)
+	}
+}
+
 func (a *App) authenticated(r *http.Request) bool {
 	c, err := r.Cookie("sahand_session")
 	if err != nil || c.Value == "" {
@@ -411,6 +513,7 @@ func (a *App) status(w http.ResponseWriter, r *http.Request) {
 		"any_configured":        anyConfigured,
 		"active_provider":       a.activeProvider(),
 		"active_model":          a.activeModel(),
+		"chat_model_scope":      a.loadChatModelScope(),
 		"providers":             provMap,
 		"providers_list":        registered,
 	})
@@ -989,7 +1092,7 @@ func (a *App) sendMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var currentTitle string
-	if a.db.QueryRow(`SELECT title FROM sessions WHERE id=?`, body.SessionID).Scan(&currentTitle) != nil {
+	if a.db.QueryRow(`SELECT title FROM sessions WHERE id=?`, body.SessionID).Scan(¤tTitle) != nil {
 		jsonOut(w, 404, map[string]string{"error": "session not found"})
 		return
 	}
@@ -1015,6 +1118,32 @@ func (a *App) sendMessage(w http.ResponseWriter, r *http.Request) {
 		chosenModel = a.activeModel()
 	}
 	chosenModel = p.NormalizeModelID(chosenModel)
+
+	if !a.isModelAllowedForChat(normProvider, chosenModel) {
+		if strings.TrimSpace(body.Model) == "" {
+			scope := a.loadChatModelScope()
+			switched := false
+			for _, entry := range scope.AllowedModels {
+				parts := strings.SplitN(entry, "::", 2)
+				if len(parts) == 2 && a.isProviderConfigured(parts[0]) {
+					if candProv, _, err := a.router.Registry().Get(parts[0]); err == nil {
+						normProvider = parts[0]
+						chosenModel = parts[1]
+						p = candProv
+						switched = true
+						break
+					}
+				}
+			}
+			if !switched {
+				jsonOut(w, 403, map[string]string{"error": "No allowed Main Chat model is currently configured. Update Main Chat model permissions in Settings."})
+				return
+			}
+		} else {
+			jsonOut(w, 403, map[string]string{"error": "This model is not enabled for Main Chat. Update Main Chat model permissions in Settings."})
+			return
+		}
+	}
 
 	if !a.isProviderConfigured(normProvider) {
 		jsonOut(w, 503, map[string]string{"error": "Please configure " + p.Metadata().Name + " in Settings first."})
@@ -1192,7 +1321,33 @@ func (a *App) orchListJobs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) orchGetJob(w http.ResponseWriter, r *http.Request) {
-	jobID := strings.TrimPrefix(r.URL.Path, "/api/orchestration/jobs/")
+	rawPath := strings.TrimPrefix(r.URL.Path, "/api/orchestration/jobs/")
+	if idx := strings.Index(rawPath, "/messages/"); idx != -1 {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", 405)
+			return
+		}
+		jID := rawPath[:idx]
+		msgIDStr := rawPath[idx+len("/messages/"):]
+		msgID, err := strconv.ParseInt(msgIDStr, 10, 64)
+		if jID == "" || err != nil || msgID <= 0 {
+			jsonOut(w, 400, map[string]string{"error": "Valid job ID and message ID are required"})
+			return
+		}
+		msg, err := a.orchStorage.GetCollaborationMessageByID(r.Context(), jID, msgID)
+		if err != nil {
+			if errors.Is(err, orchestration.ErrMessageNotFound) {
+				jsonOut(w, 404, map[string]string{"error": "Collaboration message not found"})
+				return
+			}
+			jsonOut(w, 500, map[string]string{"error": "Failed loading collaboration message: " + err.Error()})
+			return
+		}
+		jsonOut(w, 200, msg)
+		return
+	}
+
+	jobID := rawPath
 	jobID = strings.TrimSuffix(jobID, "/events")
 	jobID = strings.TrimSuffix(jobID, "/messages")
 	jobID = strings.TrimSuffix(jobID, "/participants")
@@ -1528,6 +1683,7 @@ func main() {
 	mux.HandleFunc("/api/models/test", app.auth(app.handleTestModel))
 	mux.HandleFunc("/api/models/toggle", app.auth(app.handleToggleModel))
 	mux.HandleFunc("/api/models/custom", app.auth(app.handleAddCustomModel))
+	mux.HandleFunc("/api/chat/model-scope", app.auth(app.handleChatModelScope))
 
 	mux.HandleFunc("/api/sessions", app.auth(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
