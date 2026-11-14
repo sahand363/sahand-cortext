@@ -135,6 +135,9 @@ type CollaborationMessage struct {
 	Model             string              `json:"model"`
 	Action            CollaborationAction `json:"action"`
 	Content           string              `json:"content"`
+	Preview           string              `json:"preview,omitempty"`
+	ContentLength     int                 `json:"content_length,omitempty"`
+	HasFullContent    bool                `json:"has_full_content"`
 	CompletionSummary string              `json:"completion_summary,omitempty"`
 	RawResponse       string              `json:"raw_response,omitempty"`
 	LatencyMs         int64               `json:"latency_ms"`
