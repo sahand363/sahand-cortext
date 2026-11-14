@@ -13,8 +13,9 @@ import (
 )
 
 var (
-	ErrJobNotFound  = errors.New("orchestration job not found")
-	ErrJobCancelled = errors.New("orchestration job has been cancelled")
+	ErrJobNotFound     = errors.New("orchestration job not found")
+	ErrJobCancelled    = errors.New("orchestration job has been cancelled")
+	ErrMessageNotFound = errors.New("collaboration message not found")
 )
 
 type Storage struct {
@@ -259,7 +260,7 @@ func (s *Storage) SaveCollaborationMessage(ctx context.Context, msg Collaboratio
 	defer tx.Rollback()
 
 	var currentStatus string
-	if err := tx.QueryRowContext(ctx, `SELECT status FROM orchestration_jobs WHERE id = ?`, msg.JobID).Scan(&currentStatus); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT status FROM orchestration_jobs WHERE id = ?`, msg.JobID).Scan(¤tStatus); err != nil {
 		return nil, err
 	}
 	if currentStatus == string(StatusCancelled) {
@@ -284,6 +285,9 @@ func (s *Storage) SaveCollaborationMessage(ctx context.Context, msg Collaboratio
 	id, _ := res.LastInsertId()
 	msg.ID = id
 	msg.CreatedAt = now
+	msg.ContentLength = len(msg.Content)
+	msg.Preview = buildMessagePreview(msg.SenderRole, msg.Content, msg.CompletionSummary, 50)
+	msg.HasFullContent = true
 
 	_, err = tx.ExecContext(ctx, `
 		UPDATE orchestration_jobs
@@ -320,10 +324,104 @@ func (s *Storage) GetCollaborationMessages(ctx context.Context, jobID string) ([
 		if err := rows.Scan(&m.ID, &m.JobID, &m.Round, &m.TurnIndex, &m.SenderRole, &m.SenderName,
 			&m.Provider, &m.Model, &act, &m.Content, &m.CompletionSummary, &m.RawResponse, &m.LatencyMs, &m.CreatedAt); err == nil {
 			m.Action = CollaborationAction(act)
+			m.ContentLength = len(m.Content)
+			m.Preview = buildMessagePreview(m.SenderRole, m.Content, m.CompletionSummary, 50)
+			m.HasFullContent = true
 			msgs = append(msgs, m)
 		}
 	}
 	return msgs, nil
+}
+
+func buildMessagePreview(senderRole, content, completionSummary string, maxRunes int) string {
+	if maxRunes <= 0 {
+		maxRunes = 50
+	}
+	src := strings.TrimSpace(content)
+	if senderRole == RoleUser && strings.HasPrefix(src, "[REV_OPTS:") {
+		if endIdx := strings.Index(src, "]"); endIdx != -1 {
+			src = strings.TrimSpace(src[endIdx+1:])
+		}
+	}
+	if len(src) >= 8 && strings.EqualFold(src[:8], "SUMMARY:") {
+		rest := strings.TrimSpace(src[8:])
+		if nl := strings.Index(rest, "\n"); nl != -1 {
+			firstLine := strings.TrimSpace(rest[:nl])
+			if firstLine != "" {
+				src = firstLine
+			} else {
+				src = strings.TrimSpace(rest[nl+1:])
+			}
+		} else if rest != "" {
+			src = rest
+		}
+	}
+	if strings.HasPrefix(src, "===") && strings.TrimSpace(completionSummary) != "" {
+		src = strings.TrimSpace(completionSummary)
+	}
+	if src == "" {
+		src = strings.TrimSpace(completionSummary)
+	}
+	clean := strings.Join(strings.Fields(src), " ")
+	runes := []rune(clean)
+	if len(runes) <= maxRunes {
+		return clean
+	}
+	return string(runes[:maxRunes])
+}
+
+// GetCollaborationMessagePreviews retrieves lightweight 50-character previews for transcript rendering
+// without transferring full multi-file code payloads on every polling cycle.
+func (s *Storage) GetCollaborationMessagePreviews(ctx context.Context, jobID string) ([]CollaborationMessage, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, job_id, round, turn_index, sender_role, sender_name, provider, model,
+		       action, content, completion_summary, latency_ms, created_at
+		FROM orchestration_messages
+		WHERE job_id = ?
+		ORDER BY id ASC`, jobID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var msgs []CollaborationMessage
+	for rows.Next() {
+		var m CollaborationMessage
+		var act, fullContent string
+		if err := rows.Scan(&m.ID, &m.JobID, &m.Round, &m.TurnIndex, &m.SenderRole, &m.SenderName,
+			&m.Provider, &m.Model, &act, &fullContent, &m.CompletionSummary, &m.LatencyMs, &m.CreatedAt); err == nil {
+			m.Action = CollaborationAction(act)
+			m.ContentLength = len(fullContent)
+			m.Preview = buildMessagePreview(m.SenderRole, fullContent, m.CompletionSummary, 50)
+			m.HasFullContent = false
+			msgs = append(msgs, m)
+		}
+	}
+	return msgs, nil
+}
+
+// GetCollaborationMessageByID retrieves a single full collaboration message on demand.
+func (s *Storage) GetCollaborationMessageByID(ctx context.Context, jobID string, messageID int64) (*CollaborationMessage, error) {
+	var m CollaborationMessage
+	var act string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id, job_id, round, turn_index, sender_role, sender_name, provider, model,
+		       action, content, completion_summary, latency_ms, created_at
+		FROM orchestration_messages
+		WHERE job_id = ? AND id = ?`, jobID, messageID).Scan(
+		&m.ID, &m.JobID, &m.Round, &m.TurnIndex, &m.SenderRole, &m.SenderName,
+		&m.Provider, &m.Model, &act, &m.Content, &m.CompletionSummary, &m.LatencyMs, &m.CreatedAt)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrMessageNotFound
+		}
+		return nil, err
+	}
+	m.Action = CollaborationAction(act)
+	m.ContentLength = len(m.Content)
+	m.Preview = buildMessagePreview(m.SenderRole, m.Content, m.CompletionSummary, 50)
+	m.HasFullContent = true
+	return &m, nil
 }
 
 // UpdateJobProgress updates current_round and total_calls on an active job
@@ -924,7 +1022,7 @@ func (s *Storage) GetJob(ctx context.Context, jobID string) (*Job, error) {
 	return &j, nil
 }
 
-// GetJobDetails returns the job alongside its participants, collaboration messages, and audit events
+// GetJobDetails returns the job alongside its participants, lightweight message previews, and audit events
 func (s *Storage) GetJobDetails(ctx context.Context, jobID string) (*JobDetails, error) {
 	job, err := s.GetJob(ctx, jobID)
 	if err != nil {
@@ -934,7 +1032,7 @@ func (s *Storage) GetJobDetails(ctx context.Context, jobID string) (*JobDetails,
 	if err != nil {
 		return nil, err
 	}
-	msgs, err := s.GetCollaborationMessages(ctx, jobID)
+	msgs, err := s.GetCollaborationMessagePreviews(ctx, jobID)
 	if err != nil {
 		return nil, err
 	}
