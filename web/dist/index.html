@@ -436,7 +436,6 @@
             <div id="provider-settings" class="settings-panel">
               <div class="provider-switcher" id="settings-provider-tabs"></div>
 
-              <!-- Dynamic Custom Provider Builder / Editor (OpenAI/ChatGPT Spec or Anthropic Spec) -->
               <form id="custom-provider-form" class="api-key-box hidden" style="margin-bottom:20px;padding-bottom:20px;border-bottom:1px solid var(--line)">
                 <div class="settings-section-head" style="padding-bottom:14px;margin-bottom:14px">
                   <div>
@@ -585,6 +584,30 @@
                   <option value="light">GitHub Light</option>
                 </select>
               </div>
+              <div class="setting-row" style="align-items:flex-start;flex-direction:column;gap:12px">
+                <div style="display:flex;justify-content:space-between;align-items:center;width:100%;gap:12px;flex-wrap:wrap">
+                  <div>
+                    <b>Main Chat allowed models</b>
+                    <small>Choose whether Main Chat can pick from all globally enabled models or only a curated subset.</small>
+                  </div>
+                  <select id="chat-scope-mode" class="form-control" style="width:auto;min-width:210px">
+                    <option value="all">All enabled models (default)</option>
+                    <option value="selected">Selected models only</option>
+                  </select>
+                </div>
+
+                <div id="chat-scope-picker-wrap" class="chat-scope-box hidden">
+                  <div class="chat-scope-toolbar">
+                    <span id="chat-scope-summary" class="muted-note">Select which globally enabled models appear in Main Chat:</span>
+                    <div class="heading-actions">
+                      <button type="button" class="btn btn-quiet btn-small" id="chat-scope-select-all">✓ Select All</button>
+                      <button type="button" class="btn btn-quiet btn-small" id="chat-scope-clear-all">☐ Clear</button>
+                      <button type="button" class="btn btn-primary btn-small" id="save-chat-scope-btn">Save Chat Models</button>
+                    </div>
+                  </div>
+                  <div id="chat-scope-models-list" class="chat-scope-list"></div>
+                </div>
+              </div>
               <div class="setting-row"><div><b>Persian & BiDi typography</b><small>Vazirmatn font + automatic RTL/LTR mixed sentence alignment.</small></div><span class="status-pill connected">Enabled</span></div>
               <div class="setting-row"><div><b>Pluggable provider registry</b><small>Gemini, OpenRouter, AIPrime, CodeCraft, plus dynamic OpenAI & Anthropic spec APIs.</small></div><span class="status-pill connected">Active</span></div>
             </div>
@@ -594,7 +617,7 @@
         </div>
       </section>
     </div>
-    <footer><span>SAHAND-CORTEXT</span><i>·</i> PRIVATE MULTI-PROVIDER AI WORKSPACE <b>v0.6.0</b></footer>
+    <footer><span>SAHAND-CORTEXT</span><i>·</i> PRIVATE MULTI-PROVIDER AI WORKSPACE <b>v0.6.1</b></footer>
   </main>
 </div>
 <div id="toast" class="toast"></div>
