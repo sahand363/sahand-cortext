@@ -37,7 +37,7 @@ type chatTurn struct {
 
 var (
 	// Matches WhatsApp exports like: "12/31/2025, 9:41 PM - Sahand: message" or "[14:22, 05/03/2026] Sahand: message"
-	whatsappLineRe = regexp.MustCompile(`^(?:\[?\d{1,4}[./-]\d{1,2}[./-]\d{2,4},?\s+\d{1,2}:\d{2}(?::\d{2})?(?:\s*[APap][Mm])?\]?\s*[-–]\s*|\[\d{1,2}:\d{2}(?::\d{2})?,\s*\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\]\s*)([^:]{1,60}):\s*(.+)$`)
+	whatsappLineRe = regexp.MustCompile(`^(?:\[?\d{1,4}[./-]\d{1,2}[./-]\d{2,4},?\s+\d{1,2}:\d{2}(?::\d{2})?(?:\s*[APap][Mm])?\]?\s*[-\x{2013}]\s*|\[\d{1,2}:\d{2}(?::\d{2})?,\s*\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\]\s*)([^:]{1,60}):\s*(.+)$`)
 	// Matches plain dialogue lines like: "Sahand: message" or "[Sahand] message"
 	plainLineRe = regexp.MustCompile(`^(?:\[([^\]]{1,50})\]|([^:\[\]]{1,50}):)\s*(.+)$`)
 )
