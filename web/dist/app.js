@@ -1583,22 +1583,41 @@ function updateCurrentSessionHeader() {
 async function loadSessions() {
   const sessions = await api("/api/sessions");
   sessionsCache = sessions || [];
-  $("session-list").innerHTML = "";
-  $("chat-count").textContent = String(sessionsCache.length).padStart(2, "0");
+  if ($("chat-count")) {
+    $("chat-count").textContent = String(sessionsCache.length).padStart(2, "0");
+  }
 
-  sessionsCache.forEach(s => {
-    const row = document.createElement("div");
-    row.className = "session-row" + (s.id === currentSession && chatViewMode === "active" ? " active" : "");
+  const sideList = $("session-list");
+  if (sideList) {
+    sideList.innerHTML = "";
+    sessionsCache.forEach(s => {
+      const row = document.createElement("div");
+      row.className = "session-row" + (s.id === currentSession && chatViewMode === "active" ? " active" : "");
 
-    const openBtn = document.createElement("button");
-    openBtn.type = "button";
-    openBtn.className = "session-item";
-    openBtn.setAttribute("dir", "auto");
-    openBtn.textContent = (s.pinned ? "📌 " : "") + s.title;
-    openBtn.onclick = () => {
-      switchPage("chat", false);
-      openSession(s.id);
-    };
+      const openBtn = document.createElement("button");
+      openBtn.type = "button";
+      openBtn.className = "session-item";
+      openBtn.setAttribute("dir", "auto");
+      openBtn.textContent = (s.pinned ? "📌 " : "") + s.title;
+      openBtn.onclick = () => {
+        switchPage("chat", false);
+        openSession(s.id);
+      };
+      row.appendChild(openBtn);
+      sideList.appendChild(row);
+    });
+  }
+
+  if (currentSession && !sessionsCache.some(s => s.id === currentSession)) {
+    currentSession = null;
+    try { localStorage.removeItem(DEVICE_STATE_KEYS.session); } catch {}
+  }
+
+  renderCompactChatList();
+  if (chatViewMode === "active" && currentSession) {
+    updateCurrentSessionHeader();
+  }
+}
 
     const actions = document.createElement("div");
     actions.className = "session-row-actions";
@@ -1888,7 +1907,7 @@ $("new-chat").onclick = $("hero-start").onclick = $("clear-view").onclick = () =
   switchPage("chat", false);
   newSession();
 };
-$("refresh-sessions").onclick = () => loadSessions();
+if ($("refresh-sessions")) $("refresh-sessions").onclick = () => loadSessions();
 
 $("model").addEventListener("change", () => {
   const val = $("model").value;
