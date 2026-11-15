@@ -148,6 +148,7 @@ EnvironmentFile=$ENV
 ExecStart=$BIN
 Restart=on-failure
 RestartSec=4
+WatchdogSec=30
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
@@ -164,8 +165,11 @@ systemctl enable "$APP" >/dev/null 2>&1 || true
 systemctl restart "$APP"
 
 sleep 5
-if ! systemctl is-active --quiet "$APP"; then
-  echo -e "${R}Service failed to start after install/update.${N}"
+# A process can be "active" while hung, so verify the panel itself answers,
+# not just that systemd thinks the service is running.
+addr=$(grep '^HUB_ADDR=' "$ENV" 2>/dev/null | cut -d= -f2); port="${addr##*:}"; port="${port:-8787}"
+if ! systemctl is-active --quiet "$APP" || ! curl -fsS -o /dev/null --max-time 5 "http://127.0.0.1:${port}/"; then
+  echo -e "${R}Service failed to start or is not answering after install/update.${N}"
   systemctl status "$APP" --no-pager | head -n 20 || true
   journalctl -u "$APP" -n 20 --no-pager || true
   exit 1

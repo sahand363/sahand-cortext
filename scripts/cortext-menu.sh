@@ -104,9 +104,25 @@ update_app(){
   fi
   echo -e "${C}[3/3] Restarting service...${N}"
   install -m 755 "$DIR/scripts/cortext-menu.sh" /usr/local/bin/cortext
+  # Ensure the watchdog is enabled so a hung (not just crashed) service is
+  # restarted by systemd. Idempotent; only adds the line if it is missing.
+  if ! grep -q '^WatchdogSec=' "$SERVICE" 2>/dev/null; then
+    sed -i '/^RestartSec=/a WatchdogSec=30' "$SERVICE"
+  fi
   systemctl daemon-reload
   systemctl restart "$APP"
-  echo -e "\n${G}✓ Sahand-CorText updated and restarted! Panel: $(panel_url)${N}"
+  # Verify the service actually came back up and answers HTTP. A process can
+  # be "active" while hung, so check the panel itself, not just systemd.
+  sleep 5
+  addr=$(getv HUB_ADDR); port="${addr##*:}"; port="${port:-8787}"
+  if ! systemctl is-active --quiet "$APP" || ! curl -fsS -o /dev/null --max-time 5 "http://127.0.0.1:${port}/"; then
+    echo -e "${R}Service did not come back up after the update.${N}"
+    systemctl status "$APP" --no-pager | head -n 20 || true
+    journalctl -u "$APP" -n 30 --no-pager || true
+    echo -e "${Y}The update itself finished; only the restart failed. Try: sudo systemctl restart $APP${N}"
+  else
+    echo -e "\n${G}✓ Sahand-CorText updated and restarted! Panel: $(panel_url)${N}"
+  fi
 }
 
 change_login(){
