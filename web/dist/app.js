@@ -1768,6 +1768,19 @@ function escapeHtml(s) {
   return String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
+let cachedSkillPersonas = null;
+
+async function getSkillPersonas() {
+  if (cachedSkillPersonas) return cachedSkillPersonas;
+  try {
+    const d = await api("/api/personas");
+    cachedSkillPersonas = d.personas || [];
+  } catch {
+    cachedSkillPersonas = [];
+  }
+  return cachedSkillPersonas;
+}
+
 async function loadSkills() {
   const listEl = $("skills-list");
   if (!listEl) return;
@@ -1775,24 +1788,43 @@ async function loadSkills() {
   try {
     const data = await api("/api/skills");
     const skills = data.skills || [];
+    const personas = await getSkillPersonas();
     if (!skills.length) {
       listEl.innerHTML = "<p class=\"muted-note\">No skills saved yet. Teach the bot with /learn &lt;url&gt; in chat or Telegram — or /learn-deep &lt;url&gt; to learn a whole page and its same-site links.</p>";
       return;
     }
-    listEl.innerHTML = skills.map(s => `
+    const ownerName = (pid) => {
+      if (!pid) return "Main chat + all bots";
+      const p = personas.find(x => x.id === pid);
+      return p ? p.name : pid;
+    };
+    listEl.innerHTML = skills.map(s => {
+      const opts = [`<option value="" ${!s.persona_id ? "selected" : ""}>Main chat + all bots</option>`]
+        .concat(personas.map(p => `<option value="${escapeHtml(p.id)}" ${s.persona_id === p.id ? "selected" : ""}>${escapeHtml(p.name)}</option>`)).join("");
+      return `
       <div class="session-card">
         <div><b>${escapeHtml(s.name)}</b><span>${escapeHtml(s.description || "")}</span></div>
-        <span>${escapeHtml(s.source_url || "")} · ${escapeHtml(s.storage_mode || "")} · ${s.enabled ? "ENABLED" : "DISABLED"}</span>
+        <span>${escapeHtml(s.source_url || "")} · ${escapeHtml(s.storage_mode || "")} · ${s.enabled ? "ENABLED" : "DISABLED"} · Belongs to: ${escapeHtml(ownerName(s.persona_id))}</span>
+        <div class="session-card-tools">
+          <label class="muted-note">Belongs to:</label>
+          <select style="background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:4px 6px" onchange="changeSkillPersona('${escapeHtml(s.id)}', this.value)">${opts}</select>
+        </div>
         <div class="session-card-tools">
           <button class="btn btn-quiet btn-small" onclick="toggleSkill('${escapeHtml(s.id)}', ${!s.enabled})">${s.enabled ? "Disable" : "Enable"}</button>
           <button class="btn btn-quiet btn-small" onclick="viewSkill('${escapeHtml(s.id)}')">View</button>
           <button class="btn btn-quiet btn-small" onclick="deleteSkill('${escapeHtml(s.id)}')">Delete</button>
         </div>
         <pre id="skill-content-${escapeHtml(s.id)}" class="hidden" style="white-space:pre-wrap;word-break:break-word;font-size:12px;color:var(--muted);max-height:300px;overflow:auto;margin:0">${escapeHtml(s.content || "")}</pre>
-      </div>`).join("");
+      </div>`;
+    }).join("");
   } catch (e) {
     listEl.innerHTML = "<p class=\"muted-note\">Could not load skills.</p>";
   }
+}
+
+async function changeSkillPersona(id, personaId) {
+  await api("/api/skills/" + encodeURIComponent(id), { method: "PUT", body: JSON.stringify({ persona_id: personaId }) });
+  loadSkills();
 }
 
 async function toggleSkill(id, enabled) {

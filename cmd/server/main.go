@@ -579,10 +579,11 @@ func (a *App) handleSkillByID(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.Method == http.MethodPut {
 		var body struct {
-			Enabled *bool `json:"enabled"`
+			Enabled   *bool   `json:"enabled"`
+			PersonaID *string `json:"persona_id"`
 		}
-		if json.NewDecoder(http.MaxBytesReader(w, r.Body, 64*1024)).Decode(&body) != nil || body.Enabled == nil {
-			jsonOut(w, 400, map[string]string{"error": "enabled is required"})
+		if json.NewDecoder(http.MaxBytesReader(w, r.Body, 64*1024)).Decode(&body) != nil || (body.Enabled == nil && body.PersonaID == nil) {
+			jsonOut(w, 400, map[string]string{"error": "enabled or persona_id is required"})
 			return
 		}
 		existing, err := a.skillStore.Get(r.Context(), id)
@@ -594,7 +595,12 @@ func (a *App) handleSkillByID(w http.ResponseWriter, r *http.Request) {
 			jsonOut(w, status, map[string]string{"error": err.Error()})
 			return
 		}
-		existing.Enabled = *body.Enabled
+		if body.Enabled != nil {
+			existing.Enabled = *body.Enabled
+		}
+		if body.PersonaID != nil {
+			existing.PersonaID = strings.TrimSpace(*body.PersonaID)
+		}
 		if _, err := a.skillStore.Save(r.Context(), *existing); err != nil {
 			jsonOut(w, 500, map[string]string{"error": err.Error()})
 			return
