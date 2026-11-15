@@ -17,8 +17,8 @@ import (
 	"github.com/sahand363/sahand-cortext/internal/chat"
 	"github.com/sahand363/sahand-cortext/internal/persona"
 	"github.com/sahand363/sahand-cortext/internal/provider"
-	"	"github.com/sahand363/sahand-cortext/internal/memory"
-	"github.com/sahand363/sahand-cortext/internal/skill""
+	"github.com/sahand363/sahand-cortext/internal/memory"
+	"github.com/sahand363/sahand-cortext/internal/skill"
 )
 
 type BridgeManager struct {
