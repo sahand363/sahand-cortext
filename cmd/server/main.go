@@ -44,6 +44,11 @@ type App struct {
 	skillStore     *skill.Store
 	memoryStore    *memory.Store
 	memoryExtractMu sync.Mutex // serialises background memory extraction runs
+	// Mobile (hub-owned): in-memory connection status, fed by /api/mobile/status.
+	mobileMu            sync.Mutex
+	mobileLastAppSeen   time.Time
+	mobileLastRelaySeen time.Time
+	mobileRelayID       string
 	orchStorage    *orchestration.Storage
 	orchEngine     *orchestration.CollaborationEngine
 	orchPool       *orchestration.WorkerPool
@@ -2516,6 +2521,17 @@ func main() {
 	mux.HandleFunc("/api/models/toggle", app.auth(app.handleToggleModel))
 	mux.HandleFunc("/api/models/custom", app.auth(app.handleAddCustomModel))
 	mux.HandleFunc("/api/chat/model-scope", app.auth(app.handleChatModelScope))
+
+	// Mobile (hub-owned): the Android app talks to CorText directly or
+	// through a dumb relay. The encrypted endpoints verify the mobile token
+	// by decrypting the body; the status/settings endpoints use the web login.
+	mux.HandleFunc("/api/mobile/health", app.mobileHealth)
+	mux.HandleFunc("/api/mobile/sessions", app.mobileSessions)
+	mux.HandleFunc("/api/mobile/chat", app.mobileChat)
+	mux.HandleFunc("/api/mobile/history", app.mobileHistory)
+	mux.HandleFunc("/api/mobile/status", app.auth(app.mobileStatus))
+	mux.HandleFunc("/api/mobile/settings", app.auth(app.mobileSettings))
+	mux.HandleFunc("/api/mobile/relay.py", app.mobileRelayPy)
 
 	mux.HandleFunc("/api/sessions", app.auth(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {

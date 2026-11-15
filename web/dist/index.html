@@ -44,6 +44,7 @@
       <button class="nav-link" data-page="orchestration"><span class="nav-icon">⌘</span>AI orchestration <span class="nav-count" id="orch-count">00</span></button>
       <button class="nav-link" data-page="skills"><span class="nav-icon">✦</span>Skills</button>
       <button class="nav-link" data-page="memory"><span class="nav-icon">🧠</span>Memories</button>
+      <button class="nav-link" data-page="mobile"><span class="nav-icon">📱</span>Mobile App</button>
     </nav>
    
     <div class="sidebar-bottom">
@@ -462,6 +463,95 @@
           <button class="btn btn-small" id="add-memory-btn">Add</button>
         </div>
         <div id="memories-list" class="sessions-grid"></div>
+      </section>
+
+      <section id="page-mobile" class="page module-page hidden">
+        <div class="page-heading">
+          <div>
+            <div class="eyebrow">ANDROID APP</div>
+            <h1>Mobile App</h1>
+            <p>Connect the CorText Android app to this hub. The app talks to the hub, and the hub talks to the AIs — the models never see the app or its IP.</p>
+          </div>
+          <span class="status-pill" id="mobile-enabled-pill">NOT ACTIVATED</span>
+        </div>
+
+        <div class="settings-panel" style="margin-bottom:12px">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
+            <div>
+              <b>Activate mobile app</b>
+              <div class="muted-note">Turn on the mobile API so the Android app can connect to this hub.</div>
+            </div>
+            <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+              <input type="checkbox" id="mobile-enabled-toggle">
+              <span id="mobile-enabled-label">Off</span>
+            </label>
+          </div>
+        </div>
+
+        <div class="settings-panel" style="margin-bottom:12px">
+          <b>Direct mode — connect the app straight to this hub</b>
+          <div class="muted-note" style="margin:6px 0 12px">In the app, choose Direct mode and enter this address. The token below is the only credential the app needs — copy it into the app's token field.</div>
+          <label class="muted-note">Hub address</label>
+          <div style="display:flex;gap:8px;margin:4px 0 12px">
+            <input id="mobile-hub-address" class="form-control" readonly style="flex:1">
+            <button class="btn btn-quiet btn-small" id="mobile-copy-hub-btn">Copy</button>
+          </div>
+          <label class="muted-note">Token</label>
+          <div style="display:flex;gap:8px;margin:4px 0 12px">
+            <input id="mobile-token" class="form-control" readonly style="flex:1;font-family:monospace">
+            <button class="btn btn-quiet btn-small" id="mobile-copy-token-btn">Copy</button>
+            <button class="btn btn-quiet btn-small" id="mobile-regen-token-btn">Regenerate</button>
+          </div>
+          <div class="muted-note">Regenerating invalidates the old token at once — update the app (and the relay) with the new one.</div>
+        </div>
+
+        <div class="settings-panel" style="margin-bottom:12px">
+          <b>Middle server — connect through a second server</b>
+          <div class="muted-note" style="margin:6px 0 12px">Activate the middle server, type its IP and choose a port. The hub builds a one-liner installer from these — paste it into the middle server's SSH and it connects back to this hub.</div>
+          <div style="margin-bottom:12px">
+            <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+              <input type="checkbox" id="mobile-relay-enabled">
+              <span>Activate middle server</span>
+            </label>
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <div style="flex:2;min-width:180px">
+              <label class="muted-note">Middle server IP</label>
+              <input id="mobile-relay-ip" class="form-control" placeholder="e.g. 203.0.113.45" style="width:100%;margin-top:4px">
+            </div>
+            <div style="flex:1;min-width:100px">
+              <label class="muted-note">Port</label>
+              <input id="mobile-relay-port" class="form-control" type="number" min="1" max="65535" value="8080" style="width:100%;margin-top:4px">
+            </div>
+          </div>
+          <div style="margin-top:12px">
+            <button class="btn btn-primary btn-small" id="mobile-save-btn">Save settings</button>
+          </div>
+          <div style="margin-top:16px">
+            <label class="muted-note">One-liner installer — paste into the middle server's SSH</label>
+            <div style="display:flex;gap:8px;margin-top:4px">
+              <input id="mobile-installer" class="form-control" readonly style="flex:1;font-family:monospace;font-size:12px">
+              <button class="btn btn-quiet btn-small" id="mobile-copy-installer-btn">Copy</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="settings-panel">
+          <b>Connection status</b>
+          <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:12px">
+            <div class="session-card" style="flex:1;min-width:220px">
+              <b>Middle server</b>
+              <span id="mobile-relay-status">Not connected</span>
+            </div>
+            <div class="session-card" style="flex:1;min-width:220px">
+              <b>App</b>
+              <span id="mobile-app-status">Never connected</span>
+            </div>
+          </div>
+          <div style="margin-top:12px">
+            <button class="btn btn-quiet btn-small" id="mobile-refresh-btn">↻ Refresh status</button>
+          </div>
+        </div>
       </section>
 
       <section id="page-sessions" class="page module-page hidden">

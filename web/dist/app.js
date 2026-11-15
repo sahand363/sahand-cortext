@@ -65,6 +65,7 @@ const pageNames = {
   orchestration: "AI orchestration",
   skills: "Skills",
   memory: "Memories",
+  mobile: "Mobile App",
   usage: "Usage & analytics",
   settings: "Settings"
 };
@@ -1958,6 +1959,108 @@ $("new-memory-text")?.addEventListener("keydown", (e) => {
   if (e.key === "Enter") addMemory();
 });
 
+/* ============================================================================
+   MOBILE APP PAGE (hub-owned)
+   ============================================================================ */
+
+let mobileStatusCache = null;
+
+function buildMobileInstaller() {
+  const port = ($("mobile-relay-port")?.value || "8080").trim() || "8080";
+  const host = window.location.host; // hostname:port of this hub page
+  return `curl -fsSL http://${host}/api/mobile/relay.py -o /tmp/cortext-relay.py && nohup python3 /tmp/cortext-relay.py --hub http://${host} --port ${port} > /tmp/cortext-relay.log 2>&1 &`;
+}
+
+function timeAgoText(iso) {
+  if (!iso) return null;
+  const t = new Date(iso).getTime();
+  if (isNaN(t)) return null;
+  const s = Math.max(0, Math.floor((Date.now() - t) / 1000));
+  if (s < 5) return "just now";
+  if (s < 60) return s + "s ago";
+  const m = Math.floor(s / 60);
+  if (m < 60) return m + "m ago";
+  const h = Math.floor(m / 60);
+  if (h < 24) return h + "h ago";
+  return Math.floor(h / 24) + "d ago";
+}
+
+async function loadMobile() {
+  try {
+    const s = await api("/api/mobile/status");
+    mobileStatusCache = s;
+    const enabled = !!s.enabled;
+    const toggle = $("mobile-enabled-toggle");
+    if (toggle) toggle.checked = enabled;
+    if ($("mobile-enabled-label")) $("mobile-enabled-label").textContent = enabled ? "On" : "Off";
+    const pill = $("mobile-enabled-pill");
+    if (pill) {
+      pill.textContent = enabled ? "ACTIVATED" : "NOT ACTIVATED";
+      pill.classList.toggle("connected", enabled);
+    }
+    const hubAddr = window.location.hostname + ":" + (s.hub_port || 8787);
+    if ($("mobile-hub-address")) $("mobile-hub-address").value = hubAddr;
+    if ($("mobile-token")) $("mobile-token").value = s.token || "";
+    const relayOn = !!(s.relay_ip && s.relay_ip.trim());
+    if ($("mobile-relay-enabled")) $("mobile-relay-enabled").checked = relayOn;
+    if ($("mobile-relay-ip")) $("mobile-relay-ip").value = s.relay_ip || "";
+    if ($("mobile-relay-port")) $("mobile-relay-port").value = s.relay_port || 8080;
+    if ($("mobile-installer")) $("mobile-installer").value = buildMobileInstaller();
+    const relaySeen = s.relay_last_seen;
+    const relayOk = relaySeen && (Date.now() - new Date(relaySeen).getTime() < 60000);
+    if ($("mobile-relay-status")) {
+      $("mobile-relay-status").textContent = relayOk
+        ? "Connected" + (s.relay_id ? " · " + s.relay_id : "") + " · last seen " + (timeAgoText(relaySeen) || "just now")
+        : (relaySeen ? "Not connected · last seen " + (timeAgoText(relaySeen) || "") : "Not connected");
+    }
+    if ($("mobile-app-status")) {
+      $("mobile-app-status").textContent = s.app_last_seen
+        ? "Active · last seen " + (timeAgoText(s.app_last_seen) || "just now")
+        : "Never connected";
+    }
+  } catch (e) {
+    toast("Could not load Mobile settings: " + (e.message || e));
+  }
+}
+
+async function saveMobileSettings(regenerate = false) {
+  const enabled = $("mobile-enabled-toggle")?.checked || false;
+  const relayOn = $("mobile-relay-enabled")?.checked || false;
+  const relayIp = relayOn ? ($("mobile-relay-ip")?.value || "").trim() : "";
+  const relayPort = parseInt(($("mobile-relay-port")?.value || "8080").trim(), 10) || 8080;
+  const s = await api("/api/mobile/settings", {
+    method: "POST",
+    body: JSON.stringify({ enabled, relay_ip: relayIp, relay_port: relayPort, regenerate_token: regenerate })
+  });
+  mobileStatusCache = s;
+  toast(regenerate ? "New token generated — update the app with it" : "Mobile settings saved");
+  loadMobile();
+}
+
+async function regenerateMobileToken() {
+  if (!confirm("Regenerate the token? The old token stops working at once — you must update the app (and the relay) with the new one.")) return;
+  await saveMobileSettings(true);
+}
+
+async function copyMobileField(id, label) {
+  const el = $(id);
+  if (!el || !el.value) return;
+  const ok = await copyTextToClipboard(el.value);
+  toast(ok ? label + " copied" : "Copy failed — select and copy manually");
+}
+
+$("mobile-enabled-toggle")?.addEventListener("change", () => { saveMobileSettings(false); });
+$("mobile-relay-port")?.addEventListener("input", () => {
+  const el = $("mobile-installer");
+  if (el) el.value = buildMobileInstaller();
+});
+$("mobile-save-btn")?.addEventListener("click", () => { saveMobileSettings(false); });
+$("mobile-copy-hub-btn")?.addEventListener("click", () => { copyMobileField("mobile-hub-address", "Hub address"); });
+$("mobile-copy-token-btn")?.addEventListener("click", () => { copyMobileField("mobile-token", "Token"); });
+$("mobile-regen-token-btn")?.addEventListener("click", () => { regenerateMobileToken(); });
+$("mobile-copy-installer-btn")?.addEventListener("click", () => { copyMobileField("mobile-installer", "Installer command"); });
+$("mobile-refresh-btn")?.addEventListener("click", () => { loadMobile(); toast("Status refreshed"); });
+
 $("refresh-skills-btn")?.addEventListener("click", () => {
   loadSkills();
   toast("Skills refreshed");
@@ -2153,6 +2256,7 @@ function switchPage(name, autoRestoreChat = true) {
   if (name === "sessions") loadBotSessions();
   if (name === "skills") loadSkills();
   if (name === "memory") loadMemories();
+  if (name === "mobile") loadMobile();
   if (name === "settings" || name === "models") {
     refreshStatus();
     if (name === "settings") {
