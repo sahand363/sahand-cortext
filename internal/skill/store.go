@@ -236,7 +236,7 @@ func hasKeywordOverlap(queryLower, meta string) bool {
 }
 
 var (
-	scriptStyleRe = regexp.MustCompile(`(?is)<(script|style|noscript|svg|nav|footer|header)[^>]*>.*?</\1>`)
+	scriptStyleRe = regexp.MustCompile(`(?is)<(script|style|noscript|svg|nav|footer|header)[^>]*>.*?</(script|style|noscript|svg|nav|footer|header)>`)
 	tagRe         = regexp.MustCompile(`(?s)<[^>]+>`)
 	multiSpaceRe  = regexp.MustCompile(`[ \t]{2,}`)
 	multiLineRe   = regexp.MustCompile(`\n{3,}`)
