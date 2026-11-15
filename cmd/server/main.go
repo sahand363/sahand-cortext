@@ -150,12 +150,23 @@ func (a *App) initDB() error {
 	if err := a.personaStore.InitSchema(); err != nil {
 		return err
 	}
+
+	if err := a.personaStore.InitSchema(); err != nil {
+		return err
+	}
+	if a.skillStore == nil {
+		a.skillStore = skill.NewStore(a.db)
+	}
+	if a.webStagedSkill == nil {
+		a.webStagedSkill = map[string]*skill.StagedDraft{}
+	}
 	if err := a.skillStore.InitSchema(); err != nil {
 		return err
 	}
 	if err := a.orchStorage.InitSchema(); err != nil {
 		return err
 	}
+
 	return a.router.AttachDB(context.Background(), a.db)
 }
 
