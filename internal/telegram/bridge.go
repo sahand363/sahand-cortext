@@ -17,14 +17,17 @@ import (
 	"github.com/sahand363/sahand-cortext/internal/chat"
 	"github.com/sahand363/sahand-cortext/internal/persona"
 	"github.com/sahand363/sahand-cortext/internal/provider"
+	"github.com/sahand363/sahand-cortext/internal/skill"
 )
 
 type BridgeManager struct {
 	dbConn        interface{}
 	personaStore  *persona.Store
+	skillStore    *skill.Store
 	router        *provider.Router
 	keyLookup     func(string) string
 	activePollers map[string]*botPoller
+	stagedSkills  map[int64]*skill.StagedDraft // keyed by Telegram chatID
 	mu            sync.Mutex
 }
 
@@ -34,13 +37,15 @@ type botPoller struct {
 	cancel    context.CancelFunc
 }
 
-func NewBridgeManager(db interface{}, personaStore *persona.Store, router *provider.Router, keyLookup func(string) string) *BridgeManager {
+func NewBridgeManager(db interface{}, personaStore *persona.Store, skillStore *skill.Store, router *provider.Router, keyLookup func(string) string) *BridgeManager {
 	return &BridgeManager{
 		dbConn:        db,
 		personaStore:  personaStore,
+		skillStore:    skillStore,
 		router:        router,
 		keyLookup:     keyLookup,
 		activePollers: make(map[string]*botPoller),
+		stagedSkills:  make(map[int64]*skill.StagedDraft),
 	}
 }
 
@@ -193,85 +198,13 @@ func pollTelegramBot(ctx context.Context, mgr *BridgeManager, personaID, token s
 func sendTelegramMessage(client *http.Client, apiBase string, chatID int64, text string) {
 	url := apiBase + "/sendMessage"
 	payload, _ := json.Marshal(map[string]any{
-		"chat_id":    chatID,
-		"text":       text,
-		"parse_mode": "Markdown",
+		"chat_id": chatID,
+		"text":    text,
 	})
 	_, _ = client.Post(url, "application/json", bytes.NewReader(payload))
 }
 
-func (b *BridgeManager) handleIncomingMessage(
-	ctx context.Context,
-	client *http.Client,
-	apiBase string,
-	p *persona.Persona,
-	chatID int64,
-	userID int64,
-	text string,
-) {
-	db, ok := b.dbConn.(*sql.DB)
-	if !ok {
-		return
-	}
-
-	trimmedText := strings.TrimSpace(text)
-
-	if strings.HasPrefix(trimmedText, "/") {
-		parts := strings.Fields(trimmedText)
-		cmd := strings.ToLower(parts[0])
-		if idx := strings.Index(cmd, "@"); idx != -1 {
-			cmd = cmd[:idx]
-		}
-
-		switch cmd {
-		case "/start", "/help":
-			msg := fmt.Sprintf("🤖 *%s* %s\n\nCommands:\n/new - Start a fresh conversation\n/model - View current model\n/status - Check bot status", p.Icon, p.Name)
-			sendTelegramMessage(client, apiBase, chatID, msg)
-			return
-		case "/new":
-			sessID := fmt.Sprintf("tg-%d-%d", chatID, time.Now().Unix())
-			_, _ = db.Exec(`INSERT INTO sessions(id, title, persona_id, pinned) VALUES(?, ?, ?, 0)`, sessID, fmt.Sprintf("%s Telegram Chat", p.Icon), p.ID)
-			sendTelegramMessage(client, apiBase, chatID, "✨ Started a fresh conversation!")
-			return
-		case "/status":
-			mod := p.DefaultModel
-			if mod == "" {
-				mod = "Default Workspace Model"
-			}
-			sendTelegramMessage(client, apiBase, chatID, fmt.Sprintf("🟢 *%s* is online\nModel: `%s`", p.Name, mod))
-			return
-		}
-	}
-
-	sessID := fmt.Sprintf("tg-%d", chatID)
-	var existingPersona string
-	err := db.QueryRow(`SELECT coalesce(persona_id,'') FROM sessions WHERE id = ?`, sessID).Scan(&existingPersona)
-	if err != nil {
-		_, _ = db.Exec(`INSERT INTO sessions(id, title, persona_id, pinned) VALUES(?, ?, ?, 0)`,
-			sessID, fmt.Sprintf("%s %s", p.Icon, p.Name), p.ID)
-	}
-
-	_, _ = db.Exec(`INSERT INTO messages(session_id, role, content) VALUES(?, 'user', ?)`, sessID, trimmedText)
-
-	rows, err := db.Query(`SELECT role, content FROM messages WHERE session_id = ? ORDER BY id ASC`, sessID)
-	if err != nil {
-		sendTelegramMessage(client, apiBase, chatID, "⚠️ Database error loading history.")
-		return
-	}
-	defer rows.Close()
-
-	var history []provider.Message
-	if sysPrompt := p.BuildCombinedSystemPrompt(); sysPrompt != "" {
-		history = append(history, provider.Message{Role: "system", Content: sysPrompt})
-	}
-	for rows.Next() {
-		var role, content string
-		if rows.Scan(&role, &content) == nil {
-			history = append(history, provider.Message{Role: role, Content: content})
-		}
-	}
-	promptMessages := chat.TruncateHistory(history, chat.DefaultConfig())
-
+func (b *BridgeManager) resolveProviderAndModel(p *persona.Persona) (string, string, error) {
 	prov := p.DefaultProvider
 	if prov == "" {
 		if v := b.setting("active_provider"); v != "" {
@@ -284,8 +217,7 @@ func (b *BridgeManager) handleIncomingMessage(
 
 	regProv, _, err := b.router.Registry().Get(prov)
 	if err != nil {
-		sendTelegramMessage(client, apiBase, chatID, "⚠️ Invalid provider configuration.")
-		return
+		return "", "", err
 	}
 
 	mod := p.DefaultModel
@@ -306,6 +238,187 @@ func (b *BridgeManager) handleIncomingMessage(
 				mod = parts[1]
 			}
 		}
+	}
+	return prov, mod, nil
+}
+
+func (b *BridgeManager) handleIncomingMessage(
+	ctx context.Context,
+	client *http.Client,
+	apiBase string,
+	p *persona.Persona,
+	chatID int64,
+	userID int64,
+	text string,
+) {
+	db, ok := b.dbConn.(*sql.DB)
+	if !ok {
+		return
+	}
+
+	trimmedText := strings.TrimSpace(text)
+
+	// 1. Check if there is a pending /learn skill waiting for "full" or "compressed" confirmation
+	b.mu.Lock()
+	staged, hasStaged := b.stagedSkills[chatID]
+	b.mu.Unlock()
+
+	if hasStaged && !strings.HasPrefix(trimmedText, "/") {
+		lower := strings.ToLower(trimmedText)
+		isFull := lower == "full" || strings.Contains(lower, "full") || lower == "کامل"
+		isCompressed := lower == "compressed" || strings.Contains(lower, "compress") || lower == "فشرده" || lower == "خلاصه"
+		isCancel := lower == "cancel" || lower == "لغو"
+
+		if isCancel {
+			b.mu.Lock()
+			delete(b.stagedSkills, chatID)
+			b.mu.Unlock()
+			sendTelegramMessage(client, apiBase, chatID, "✖ Cancelled saving skill.")
+			return
+		}
+
+		if isFull || isCompressed {
+			mode := "compressed"
+			chosenContent := staged.CompressedContent
+			if isFull {
+				mode = "full"
+				chosenContent = staged.FullContent
+			}
+
+			saved, err := b.skillStore.Save(ctx, skill.Skill{
+				Name:        staged.Name,
+				Description: staged.Description,
+				SourceURL:   staged.SourceURL,
+				StorageMode: mode,
+				Content:     chosenContent,
+				PersonaID:   staged.PersonaID,
+				Enabled:     true,
+			})
+			b.mu.Lock()
+			delete(b.stagedSkills, chatID)
+			b.mu.Unlock()
+
+			if err != nil {
+				sendTelegramMessage(client, apiBase, chatID, "⚠️ Failed to save skill: "+err.Error())
+				return
+			}
+			sendTelegramMessage(client, apiBase, chatID, fmt.Sprintf("✅ Saved skill \"%s\" (%s mode, %d chars) to database!\n\nIt is now active in my knowledge base—continue chatting whenever you're ready.", saved.Name, saved.StorageMode, len([]rune(saved.Content))))
+			return
+		}
+	}
+
+	// 2. Handle Slash Commands
+	if strings.HasPrefix(trimmedText, "/") {
+		parts := strings.Fields(trimmedText)
+		cmd := strings.ToLower(parts[0])
+		if idx := strings.Index(cmd, "@"); idx != -1 {
+			cmd = cmd[:idx]
+		}
+
+		switch cmd {
+		case "/start", "/help":
+			msg := fmt.Sprintf("🤖 %s %s\n\nCommands:\n/learn <url> - Visit a link, extract a skill, and save it to DB\n/skills - List active skills in my knowledge base\n/new - Start a fresh conversation\n/status - Check bot status", p.Icon, p.Name)
+			sendTelegramMessage(client, apiBase, chatID, msg)
+			return
+
+		case "/learn":
+			if len(parts) < 2 {
+				sendTelegramMessage(client, apiBase, chatID, "Usage: /learn https://example.com/guide")
+				return
+			}
+			targetURL := strings.TrimSpace(parts[1])
+			prov, mod, err := b.resolveProviderAndModel(p)
+			if err != nil {
+				sendTelegramMessage(client, apiBase, chatID, "⚠️ Invalid provider configuration.")
+				return
+			}
+			sendTelegramMessage(client, apiBase, chatID, fmt.Sprintf("🌐 Visiting %s and extracting skill with %s…", targetURL, mod))
+
+			draft, err := skill.ExtractSkillFromURL(ctx, b.router, prov, b.keyLookup(prov), mod, targetURL, p.ID)
+			if err != nil {
+				sendTelegramMessage(client, apiBase, chatID, "⚠️ "+err.Error())
+				return
+			}
+
+			b.mu.Lock()
+			b.stagedSkills[chatID] = draft
+			b.mu.Unlock()
+
+			fullChars := len([]rune(draft.FullContent))
+			compChars := len([]rune(draft.CompressedContent))
+			promptMsg := fmt.Sprintf(
+				"📚 Learned Skill: %s\n%s\n\nDo you want me to save the FULL version (~%d chars) or the COMPRESSED version (~%d chars, redundant info removed) to the database?\n\nReply with: Full or Compressed (or Cancel)",
+				draft.Name, draft.Description, fullChars, compChars,
+			)
+			sendTelegramMessage(client, apiBase, chatID, promptMsg)
+			return
+
+		case "/skills":
+			skills, err := b.skillStore.List(ctx, p.ID, true)
+			if err != nil || len(skills) == 0 {
+				sendTelegramMessage(client, apiBase, chatID, "📭 No skills saved yet. Use /learn <url> to teach me from any link!")
+				return
+			}
+			var sb strings.Builder
+			sb.WriteString("🧠 Active Skills in Knowledge Base:\n\n")
+			for i, sk := range skills {
+				fmt.Fprintf(&sb, "%d. %s [%s]\n   %s\n", i+1, sk.Name, sk.StorageMode, sk.Description)
+			}
+			sendTelegramMessage(client, apiBase, chatID, sb.String())
+			return
+
+		case "/new":
+			sessID := fmt.Sprintf("tg-%d-%d", chatID, time.Now().Unix())
+			_, _ = db.Exec(`INSERT INTO sessions(id, title, persona_id, pinned) VALUES(?, ?, ?, 0)`, sessID, fmt.Sprintf("%s Telegram Chat", p.Icon), p.ID)
+			sendTelegramMessage(client, apiBase, chatID, "✨ Started a fresh conversation!")
+			return
+
+		case "/status":
+			_, mod, _ := b.resolveProviderAndModel(p)
+			sendTelegramMessage(client, apiBase, chatID, fmt.Sprintf("🟢 %s is online\nModel: %s", p.Name, mod))
+			return
+		}
+	}
+
+	// 3. Normal Chat Flow with Active Skills Injected
+	sessID := fmt.Sprintf("tg-%d", chatID)
+	var existingPersona string
+	err := db.QueryRow(`SELECT coalesce(persona_id,'') FROM sessions WHERE id = ?`, sessID).Scan(&existingPersona)
+	if err != nil {
+		_, _ = db.Exec(`INSERT INTO sessions(id, title, persona_id, pinned) VALUES(?, ?, ?, 0)`,
+			sessID, fmt.Sprintf("%s %s", p.Icon, p.Name), p.ID)
+	}
+
+	_, _ = db.Exec(`INSERT INTO messages(session_id, role, content) VALUES(?, 'user', ?)`, sessID, trimmedText)
+
+	rows, err := db.Query(`SELECT role, content FROM messages WHERE session_id = ? ORDER BY id ASC`, sessID)
+	if err != nil {
+		sendTelegramMessage(client, apiBase, chatID, "⚠️ Database error loading history.")
+		return
+	}
+	defer rows.Close()
+
+	var history []provider.Message
+	sysPrompt := p.BuildCombinedSystemPrompt()
+	if b.skillStore != nil {
+		sysPrompt += b.skillStore.BuildSkillPromptBlock(ctx, p.ID, trimmedText)
+	}
+	if strings.TrimSpace(sysPrompt) != "" {
+		history = append(history, provider.Message{Role: "system", Content: sysPrompt})
+	}
+
+	for rows.Next() {
+		var role, content string
+		if rows.Scan(&role, &content) == nil {
+			history = append(history, provider.Message{Role: role, Content: content})
+		}
+	}
+	promptMessages := chat.TruncateHistory(history, chat.DefaultConfig())
+
+	prov, mod, err := b.resolveProviderAndModel(p)
+	if err != nil {
+		sendTelegramMessage(client, apiBase, chatID, "⚠️ Invalid provider configuration.")
+		return
 	}
 
 	apiKey := b.keyLookup(prov)
