@@ -36,15 +36,15 @@
   <aside class="sidebar" id="sidebar">
     <div class="brand-row"><div class="wordmark"><span class="logo-symbol">c.</span><span class="wordmark-name"><b>Sahand</b><i>—</i><b>CorText</b></span></div><button class="icon-btn mobile-close" id="mobile-close" aria-label="Close menu">×</button></div>
     <button class="new-chat" id="new-chat"><span class="plus">＋</span><span>New conversation</span><kbd>⌘ K</kbd></button>
-    <div class="nav-caption">WORKSPACE</div>
+    <div class="nav-caption">NAVIGATION</div>
     <nav class="main-nav">
-      <button class="nav-link active" data-page="chat"><span class="nav-icon">▤</span>Chat <span class="nav-count" id="chat-count">01</span></button>
+      <button class="nav-link active" data-page="chat"><span class="nav-icon">▤</span>Chat <span class="nav-count" id="chat-count">00</span></button>
+      <button class="nav-link" data-page="sessions"><span class="nav-icon">◷</span>Sessions <span class="nav-count" id="bot-sessions-count">00</span></button>
       <button class="nav-link" data-page="models"><span class="nav-icon">✳</span>Models & providers</button>
       <button class="nav-link" data-page="orchestration"><span class="nav-icon">⌘</span>AI orchestration <span class="nav-count" id="orch-count">00</span></button>
       <button class="nav-link" data-page="memory"><span class="nav-icon">◉</span>Topic memory <span class="soon">SOON</span></button>
-      <button class="nav-link" data-page="sessions"><span class="nav-icon">◷</span>Sessions</button>
     </nav>
-    <div class="nav-caption recent-caption">CONVERSATIONS <button id="refresh-sessions" class="tiny-icon" title="Refresh">↻</button></div>
+    <div class="nav-caption recent-caption">PINNED & RECENT <button id="refresh-sessions" class="tiny-icon" title="Refresh">↻</button></div>
     <div class="session-list" id="session-list"></div>
     <div class="sidebar-bottom">
       <nav class="main-nav bottom-nav">
@@ -62,11 +62,17 @@
 
   <main class="main">
     <header class="topbar">
-      <div class="top-left"><button id="mobile-menu" class="icon-btn mobile-menu" aria-label="Open menu">☰</button><div class="breadcrumb"><span>Workspace</span><i>/</i><b id="breadcrumb-page">Chat</b></div></div>
+      <div class="top-left">
+        <button id="mobile-menu" class="icon-btn mobile-menu" aria-label="Open menu">☰</button>
+        <button type="button" id="topbar-chat-btn" class="icon-btn topbar-chat-btn" title="Go to Chat" aria-label="Go to Chat">▤</button>
+        <div class="breadcrumb"><b id="breadcrumb-page">Chat</b></div>
+      </div>
       <div class="top-right">
         <button type="button" id="topbar-theme-btn" class="icon-btn mobile-theme-btn" title="Switch theme" aria-label="Toggle theme">☀</button>
-        <div class="server-state"><span class="live-dot" title="System operational"></span></div>
-        <div class="provider-chip"><span id="header-provider-name">AI HUB</span> <span class="chip-state" id="header-provider-state">SETUP</span></div>
+        <div class="provider-chip">
+          <span class="conn-dot" id="header-conn-dot" title="Needs API setup"></span>
+          <span id="header-provider-name">AI HUB</span>
+        </div>
       </div>
     </header>
 
@@ -77,6 +83,18 @@
           <div class="setup-copy"><b>Connect your AI providers</b><span>Add your Gemini, OpenRouter, AIPrime, CodeCraft, or custom OpenAI/Anthropic API keys to get started.</span></div>
           <button class="btn btn-primary btn-small" id="setup-open">Configure Providers <span>↗</span></button>
         </div>
+
+        <div id="chat-list-view" class="chat-list-view hidden">
+          <div class="chat-list-header">
+            <div>
+              <div class="eyebrow">WEB CONVERSATIONS</div>
+              <h2>Your Chats</h2>
+            </div>
+            <button type="button" class="btn btn-primary btn-small" id="chat-list-new-btn">＋ New Chat</button>
+          </div>
+          <div id="chat-list-container" class="compact-chat-list"></div>
+        </div>
+
         <div id="chat-empty" class="chat-empty">
           <div class="hero-mark"><span>c.</span><i></i></div>
           <div class="eyebrow">THINK WITHOUT LIMITS</div>
@@ -85,10 +103,12 @@
           <div class="hero-actions"><button class="btn btn-primary" id="hero-start">Start a conversation <span>↗</span></button><button class="btn btn-quiet" data-goto="orchestration">Launch AI Orchestration <span>→</span></button></div>
           <div class="capability-row"><span><i>✳</i> Google Gemini</span><span><i>⇄</i> OpenRouter</span><span><i>🤖</i> Pluggable Chatbots</span><span><i>⌘</i> Multi-Model Orchestration</span></div>
         </div>
+
         <div id="chat-active" class="chat-active hidden">
           <div class="conversation-head">
             <div class="conversation-title-area">
               <div class="title-display-row" id="title-display-row">
+                <button type="button" class="tool-btn back-chat-btn" id="back-to-chat-list-btn" title="Back to chat list">← Back</button>
                 <span id="pinned-indicator" class="pinned-badge hidden" title="Pinned conversation">📌</span>
                 <h2 id="conversation-title" dir="auto">New conversation</h2>
               </div>
@@ -426,7 +446,17 @@
 
       <section id="page-memory" class="page module-page hidden"><div class="page-heading"><div><div class="eyebrow">CONTEXT THAT COMPOUNDS</div><h1>Topic memory</h1><p>Keep useful context across conversations without carrying everything.</p></div><span class="status-pill planned">IN DEVELOPMENT</span></div><div class="memory-layout"><div class="memory-card"><div class="memory-card-top"><span>◉</span><span class="soon-pill">PREVIEW</span></div><h3>Relevant by design.</h3><p>Topic summaries, important facts and project context can be retrieved when a new conversation needs them.</p><div class="memory-switch-row"><div><b>Topic memory</b><small>Enable cross-session retrieval</small></div><span class="switch disabled"><i></i></span></div></div><div class="memory-card"><div class="memory-card-top"><span>⌁</span></div><h3>Context selection</h3><p>Only information relevant to the current topic should be added to the model context.</p><div class="memory-tags"><span>Topic summaries</span><span>Key facts</span><span>Project context</span></div></div></div></section>
 
-      <section id="page-sessions" class="page module-page hidden"><div class="page-heading"><div><div class="eyebrow">YOUR WORK, ORGANIZED</div><h1>Sessions</h1><p>Pin important chats, rename conversations, or clean up old threads.</p></div><button class="btn btn-primary btn-small" id="sessions-new">＋ New session</button></div><div id="sessions-grid" class="sessions-grid"></div></section>
+      <section id="page-sessions" class="page module-page hidden">
+        <div class="page-heading">
+          <div>
+            <div class="eyebrow">EXTERNAL CHATBOT & TELEGRAM LOGS</div>
+            <h1>Bot Sessions</h1>
+            <p>Conversations happening through your Telegram bots and external chatbot plugins.</p>
+          </div>
+          <button class="btn btn-quiet btn-small" id="refresh-bot-sessions-btn">↻ Refresh</button>
+        </div>
+        <div id="sessions-grid" class="sessions-grid"></div>
+      </section>
 
       <section id="page-usage" class="page module-page hidden"><div class="page-heading"><div><div class="eyebrow">OBSERVABILITY</div><h1>Usage & analytics</h1><p>Understand model activity, response times and token usage.</p></div><span class="status-pill planned">IN DEVELOPMENT</span></div><div class="metric-grid"><div class="metric-card"><span>Tokens used</span><b>—</b><small>Waiting for telemetry module</small></div><div class="metric-card"><span>Requests</span><b>—</b><small>Waiting for telemetry module</small></div><div class="metric-card"><span>Average latency</span><b>—</b><small>Response timing will appear here</small></div></div><div class="chart-placeholder"><div class="chart-bars"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div><span>ACTIVITY VISUALIZATION · COMING SOON</span></div></section>
 
@@ -624,7 +654,6 @@
                   </label>
                 </div>
 
-                <!-- Voice & Style Trainer Box -->
                 <div class="voice-trainer-box" style="margin-bottom:14px">
                   <div class="voice-trainer-head">
                     <div>
@@ -683,7 +712,6 @@ Sahand: آره ردیفه الان دارم تستش میکنم 🚀"></textarea
                   </label>
                 </div>
 
-                <!-- Per-Bot Model Allowlist -->
                 <div class="chat-scope-box" style="margin-bottom:14px">
                   <div class="orch-part-grid">
                     <label>
@@ -710,7 +738,6 @@ Sahand: آره ردیفه الان دارم تستش میکنم 🚀"></textarea
                   </div>
                 </div>
 
-                <!-- Telegram Bot Binding (Prepared for Phase 3 Bridge) -->
                 <div class="chat-scope-box" style="margin-bottom:14px">
                   <label class="orch-check-row">
                     <input type="checkbox" id="per-tg-enabled">
@@ -779,7 +806,7 @@ Sahand: آره ردیفه الان دارم تستش میکنم 🚀"></textarea
         </div>
       </section>
     </div>
-    <footer><span>SAHAND-CORTEXT</span><i>·</i> PRIVATE MULTI-PROVIDER AI WORKSPACE <b>v0.7.0</b></footer>
+    <footer><span>SAHAND-CORTEXT</span><i>·</i> PRIVATE MULTI-PROVIDER AI WORKSPACE <b>v0.8.0</b></footer>
   </main>
 </div>
 <div id="toast" class="toast"></div>
