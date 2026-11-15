@@ -20,16 +20,17 @@ import (
 var ErrSkillNotFound = errors.New("skill not found")
 
 type Skill struct {
-	ID          string `json:"id"`
-	Name        string `json:"name"`
-	Description string `json:"description"`
-	SourceURL   string `json:"source_url"`
-	StorageMode string `json:"storage_mode"` // "full" | "compressed"
-	Content     string `json:"content"`
-	PersonaID   string `json:"persona_id"` // "" = global (all bots & main chat), or specific persona ID
-	Enabled     bool   `json:"enabled"`
-	CreatedAt   string `json:"created_at"`
-	UpdatedAt   string `json:"updated_at"`
+	ID          string   `json:"id"`
+	Name        string   `json:"name"`
+	Description string   `json:"description"`
+	SourceURL   string   `json:"source_url"`
+	StorageMode string   `json:"storage_mode"` // "full" | "compressed"
+	Content     string   `json:"content"`
+	PersonaID   string   `json:"persona_id"` // "" = global (all bots & main chat), or specific persona ID
+	Enabled     bool     `json:"enabled"`
+	CreatedAt   string   `json:"created_at"`
+	UpdatedAt   string   `json:"updated_at"`
+	Scopes      []string `json:"scopes,omitempty"` // assignment scopes: "all", "main", or persona ids
 }
 
 type StagedDraft struct {
@@ -51,7 +52,7 @@ func NewStore(db *sql.DB) *Store {
 }
 
 func (s *Store) InitSchema() error {
-	_, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS skills (
+	if _, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS skills (
 		id TEXT PRIMARY KEY,
 		name TEXT NOT NULL,
 		description TEXT NOT NULL DEFAULT '',
@@ -62,8 +63,104 @@ func (s *Store) InitSchema() error {
 		enabled INTEGER NOT NULL DEFAULT 1,
 		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 		updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-	);`)
-	return err
+	);`); err != nil {
+		return err
+	}
+	// One skill can belong to many places: the main chat ("main"), any bot
+	// (its persona id), or everyone ("all"). The assignments table is the
+	// source of truth for visibility; persona_id stays as the "learned by" label.
+	if _, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS skill_assignments (
+		skill_id TEXT NOT NULL,
+		scope_id TEXT NOT NULL,
+		PRIMARY KEY(skill_id, scope_id)
+	);`); err != nil {
+		return err
+	}
+	// Backfill: a skill learned by a bot belongs to that bot; a global skill
+	// (persona_id = '') belongs to everyone.
+	if _, err := s.db.Exec(`INSERT OR IGNORE INTO skill_assignments (skill_id, scope_id)
+		SELECT id, CASE WHEN persona_id = '' THEN 'all' ELSE persona_id END FROM skills`); err != nil {
+		return err
+	}
+	return nil
+}
+
+// ScopeAll is the assignment scope meaning "visible to everyone" (main chat + all bots).
+const ScopeAll = "all"
+
+// ScopeMain is the assignment scope for the main (web panel) chat.
+const ScopeMain = "main"
+
+// SetScopes replaces the assignment scopes of a skill (deduped, trimmed).
+// Pass ScopeAll ("all") to make the skill visible to everyone.
+func (s *Store) SetScopes(ctx context.Context, skillID string, scopes []string) error {
+	id := CanonicalID(skillID)
+	if id == "" {
+		return errors.New("skill id is required")
+	}
+	seen := map[string]bool{}
+	var clean []string
+	for _, sc := range scopes {
+		sc = strings.TrimSpace(sc)
+		if sc == "" || seen[sc] {
+			continue
+		}
+		seen[sc] = true
+		clean = append(clean, sc)
+	}
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM skill_assignments WHERE skill_id = ?`, id); err != nil {
+		return err
+	}
+	for _, sc := range clean {
+		if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO skill_assignments (skill_id, scope_id) VALUES (?, ?)`, id, sc); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ListVisible returns the enabled skills visible to a caller that holds the
+// given scopes (e.g. ["main"] for the main chat, or a bot's persona id).
+// A skill assigned to ScopeAll ("all") is visible to every caller, and a
+// legacy skill with persona_id = '' (global) is visible too, so skills saved
+// before assignments existed keep working. The rows are fully read and closed
+// before returning, so the caller may safely run the long AI call afterwards
+// on the single-connection SQLite.
+func (s *Store) ListVisible(ctx context.Context, scopes []string) ([]Skill, error) {
+	seen := map[string]bool{ScopeAll: true}
+	var args []any
+	args = append(args, ScopeAll)
+	for _, sc := range scopes {
+		sc = strings.TrimSpace(sc)
+		if sc == "" || seen[sc] {
+			continue
+		}
+		seen[sc] = true
+		args = append(args, sc)
+	}
+	placeholders := strings.Repeat("?,", len(args))
+	placeholders = strings.TrimSuffix(placeholders, ",")
+	q := `SELECT s.id, s.name, s.description, s.source_url, s.storage_mode, s.content, s.persona_id, s.enabled, s.created_at, s.updated_at
+		FROM skills s
+		WHERE s.enabled = 1 AND (s.persona_id = '' OR EXISTS (
+			SELECT 1 FROM skill_assignments a WHERE a.skill_id = s.id AND a.scope_id IN (` + placeholders + `)
+		))
+		ORDER BY s.updated_at DESC`
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Skill
+	for rows.Next() {
+		var sk Skill
+		var en int
+		if rows.Scan(&sk.ID, &sk.Name, &sk.Description, &sk.SourceURL, &sk.StorageMode, &sk.Content, &sk.PersonaID, &en, &sk.CreatedAt, &sk.UpdatedAt) == nil {
+			sk.Enabled = en != 0
+			out = append(out, sk)
+		}
+	}
+	return out, nil
 }
 
 func CanonicalID(raw string) string {
@@ -165,7 +262,6 @@ func (s *Store) List(ctx context.Context, personaID string, onlyEnabled bool) ([
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 
 	var out []Skill
 	for rows.Next() {
@@ -174,6 +270,31 @@ func (s *Store) List(ctx context.Context, personaID string, onlyEnabled bool) ([
 		if rows.Scan(&sk.ID, &sk.Name, &sk.Description, &sk.SourceURL, &sk.StorageMode, &sk.Content, &sk.PersonaID, &en, &sk.CreatedAt, &sk.UpdatedAt) == nil {
 			sk.Enabled = en != 0
 			out = append(out, sk)
+		}
+	}
+	rows.Close() // release the single SQLite connection BEFORE the scopes query below
+
+	// Attach assignment scopes (one extra query). Skills without assignment
+	// rows fall back to their stored persona (or "all" when global).
+	if len(out) > 0 {
+		if arows, aerr := s.db.QueryContext(ctx, `SELECT skill_id, scope_id FROM skill_assignments`); aerr == nil {
+			byID := map[string][]string{}
+			for arows.Next() {
+				var sid, sc string
+				if arows.Scan(&sid, &sc) == nil {
+					byID[sid] = append(byID[sid], sc)
+				}
+			}
+			arows.Close()
+			for i := range out {
+				if scs, ok := byID[out[i].ID]; ok {
+					out[i].Scopes = scs
+				} else if out[i].PersonaID == "" {
+					out[i].Scopes = []string{ScopeAll}
+				} else {
+					out[i].Scopes = []string{out[i].PersonaID}
+				}
+			}
 		}
 	}
 	return out, nil
@@ -192,8 +313,10 @@ func (s *Store) Delete(ctx context.Context, id string) error {
 
 // BuildSkillPromptBlock formats active skills for injection into the LLM system prompt.
 // Relevant or small skill sets are injected in full/compressed form; larger catalogs include an index + matched bodies.
-func (s *Store) BuildSkillPromptBlock(ctx context.Context, personaID, userMessage string) string {
-	skills, err := s.List(ctx, personaID, true)
+// scopes are the caller's assignment scopes (e.g. ["main"] for the main chat,
+// or a bot's persona id); only skills visible to those scopes are injected.
+func (s *Store) BuildSkillPromptBlock(ctx context.Context, scopes []string, userMessage string) string {
+	skills, err := s.ListVisible(ctx, scopes)
 	if err != nil || len(skills) == 0 {
 		return ""
 	}
@@ -472,6 +595,12 @@ func (s *Store) LearnDeep(ctx context.Context, router *provider.Router, provID, 
 	if maxPages > 10 {
 		maxPages = 10
 	}
+	// A page learned in the main chat (no persona) belongs to the main chat,
+	// not to everyone; a page learned by a bot belongs to that bot.
+	ownerID := personaID
+	if ownerID == "" {
+		ownerID = ScopeMain
+	}
 	var res LearnDeepResult
 
 	learnOne := func(pageURL string) {
@@ -493,12 +622,13 @@ func (s *Store) LearnDeep(ctx context.Context, router *provider.Router, provID, 
 			SourceURL:   draft.SourceURL,
 			StorageMode: "compressed",
 			Content:     content,
-			PersonaID:   draft.PersonaID,
+			PersonaID:   ownerID,
 			Enabled:     true,
 		})
 		if err != nil {
 			res.Failed = append(res.Failed, pageURL)
 		} else {
+			_ = s.SetScopes(ctx, saved.ID, []string{ownerID})
 			res.Learned = append(res.Learned, saved.Name)
 		}
 		if onProgress != nil {

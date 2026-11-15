@@ -1797,21 +1797,28 @@ async function loadSkills() {
       listEl.innerHTML = "<p class=\"muted-note\">No skills saved yet. Teach the bot with /learn &lt;url&gt; in chat or Telegram — or /learn-deep &lt;url&gt; to learn a whole page and its same-site links.</p>";
       return;
     }
-    const ownerName = (pid) => {
-      if (!pid) return "Main chat + all bots";
-      const p = personas.find(x => x.id === pid);
-      return p ? p.name : pid;
+    const scopeNames = (scopes) => {
+      const list = (scopes || []).map(sc => {
+        if (sc === "all") return "Everyone";
+        if (sc === "main") return "Main chat";
+        const p = personas.find(x => x.id === sc);
+        return p ? p.name : sc;
+      });
+      return list.length ? list.join(", ") : "Nobody";
     };
     listEl.innerHTML = skills.map(s => {
-      const opts = [`<option value="" ${!s.persona_id ? "selected" : ""}>Main chat + all bots</option>`]
-        .concat(personas.map(p => `<option value="${escapeHtml(p.id)}" ${s.persona_id === p.id ? "selected" : ""}>${escapeHtml(p.name)}</option>`)).join("");
+      const scs = s.scopes || [];
+      const isGlobal = scs.includes("all");
+      const box = (val, label) => `<label style="display:inline-flex;align-items:center;gap:4px;font-size:12.5px;color:var(--muted)"><input type="checkbox" data-scope="${escapeHtml(val)}" ${scs.includes(val) ? "checked" : ""} ${isGlobal && val !== "all" ? "disabled" : ""} onchange="changeSkillScopes('${escapeHtml(s.id)}')"> ${escapeHtml(label)}</label>`;
+      const boxes = [box("all", "Everyone"), box("main", "Main chat")]
+        .concat(personas.map(p => box(p.id, p.name))).join(" ");
       return `
       <div class="session-card">
         <div><b>${escapeHtml(s.name)}</b><span>${escapeHtml(s.description || "")}</span></div>
-        <span>${escapeHtml(s.source_url || "")} · ${escapeHtml(s.storage_mode || "")} · ${s.enabled ? "ENABLED" : "DISABLED"} · Belongs to: ${escapeHtml(ownerName(s.persona_id))}</span>
-        <div class="session-card-tools">
-          <label class="muted-note">Belongs to:</label>
-          <select style="background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:4px 6px" onchange="changeSkillPersona('${escapeHtml(s.id)}', this.value)">${opts}</select>
+        <span>${escapeHtml(s.source_url || "")} · ${escapeHtml(s.storage_mode || "")} · ${s.enabled ? "ENABLED" : "DISABLED"} · Visible to: ${escapeHtml(scopeNames(scs))}</span>
+        <div class="session-card-tools" id="skill-scopes-${escapeHtml(s.id)}">
+          <span class="muted-note">Visible to:</span>
+          ${boxes}
         </div>
         <div class="session-card-tools">
           <button class="btn btn-quiet btn-small" onclick="toggleSkill('${escapeHtml(s.id)}', ${!s.enabled})">${s.enabled ? "Disable" : "Enable"}</button>
@@ -1826,8 +1833,21 @@ async function loadSkills() {
   }
 }
 
-async function changeSkillPersona(id, personaId) {
-  await api("/api/skills/" + encodeURIComponent(id), { method: "PUT", body: JSON.stringify({ persona_id: personaId }) });
+function skillScopesState(id) {
+  const boxEl = $("skill-scopes-" + id);
+  if (!boxEl) return { global: false, scopes: [] };
+  const everyone = boxEl.querySelector('[data-scope="all"]');
+  const global = everyone ? everyone.checked : false;
+  const scopes = [];
+  boxEl.querySelectorAll('[data-scope]').forEach(cb => {
+    if (cb.dataset.scope !== "all" && cb.checked) scopes.push(cb.dataset.scope);
+  });
+  return { global, scopes };
+}
+
+async function changeSkillScopes(id) {
+  const st = skillScopesState(id);
+  await api("/api/skills/" + encodeURIComponent(id), { method: "PUT", body: JSON.stringify({ global: st.global, scopes: st.scopes }) });
   loadSkills();
 }
 

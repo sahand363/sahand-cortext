@@ -564,6 +564,11 @@ func (a *App) handleSkills(w http.ResponseWriter, r *http.Request) {
 			jsonOut(w, 400, map[string]string{"error": err.Error()})
 			return
 		}
+		if strings.TrimSpace(saved.PersonaID) != "" {
+			_ = a.skillStore.SetScopes(r.Context(), saved.ID, []string{strings.TrimSpace(saved.PersonaID)})
+		} else {
+			_ = a.skillStore.SetScopes(r.Context(), saved.ID, []string{skill.ScopeAll})
+		}
 		list, _ := a.skillStore.List(r.Context(), "", false)
 		jsonOut(w, 201, map[string]any{"ok": true, "skill": saved, "skills": list})
 	default:
@@ -579,11 +584,13 @@ func (a *App) handleSkillByID(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.Method == http.MethodPut {
 		var body struct {
-			Enabled   *bool   `json:"enabled"`
-			PersonaID *string `json:"persona_id"`
+			Enabled   *bool    `json:"enabled"`
+			PersonaID *string  `json:"persona_id"`
+			Global    *bool    `json:"global"`
+			Scopes    []string `json:"scopes"`
 		}
-		if json.NewDecoder(http.MaxBytesReader(w, r.Body, 64*1024)).Decode(&body) != nil || (body.Enabled == nil && body.PersonaID == nil) {
-			jsonOut(w, 400, map[string]string{"error": "enabled or persona_id is required"})
+		if json.NewDecoder(http.MaxBytesReader(w, r.Body, 64*1024)).Decode(&body) != nil || (body.Enabled == nil && body.PersonaID == nil && body.Global == nil && body.Scopes == nil) {
+			jsonOut(w, 400, map[string]string{"error": "enabled, persona_id, global or scopes is required"})
 			return
 		}
 		existing, err := a.skillStore.Get(r.Context(), id)
@@ -601,9 +608,30 @@ func (a *App) handleSkillByID(w http.ResponseWriter, r *http.Request) {
 		if body.PersonaID != nil {
 			existing.PersonaID = strings.TrimSpace(*body.PersonaID)
 		}
+		// Scope changes: global ("all") or an explicit scope list (main chat,
+		// bot persona ids). persona_id is kept as the primary scope so the
+		// legacy global check (persona_id = '') stays consistent.
+		var newScopes []string
+		scopeChanged := false
+		if body.Global != nil && *body.Global {
+			existing.PersonaID = ""
+			newScopes = []string{skill.ScopeAll}
+			scopeChanged = true
+		} else if body.Scopes != nil {
+			newScopes = body.Scopes
+			scopeChanged = true
+			if len(newScopes) > 0 {
+				existing.PersonaID = strings.TrimSpace(newScopes[0])
+			} else if existing.PersonaID == "" {
+				existing.PersonaID = skill.ScopeMain
+			}
+		}
 		if _, err := a.skillStore.Save(r.Context(), *existing); err != nil {
 			jsonOut(w, 500, map[string]string{"error": err.Error()})
 			return
+		}
+		if scopeChanged {
+			_ = a.skillStore.SetScopes(r.Context(), id, newScopes)
 		}
 		list, _ := a.skillStore.List(r.Context(), "", false)
 		jsonOut(w, 200, map[string]any{"ok": true, "skill": existing, "skills": list})
@@ -1446,18 +1474,25 @@ func (a *App) sendMessage(w http.ResponseWriter, r *http.Request) {
 					mode = "full"
 					chosenContent = staged.FullContent
 				}
+				// A skill learned in the main chat (no persona) belongs to the
+				// main chat, not to everyone; one learned as a bot belongs to that bot.
+				ownerID := activePersonaID
+				if ownerID == "" {
+					ownerID = skill.ScopeMain
+				}
 				saved, saveErr := a.skillStore.Save(r.Context(), skill.Skill{
 					Name:        staged.Name,
 					Description: staged.Description,
 					SourceURL:   staged.SourceURL,
 					StorageMode: mode,
 					Content:     chosenContent,
-					PersonaID:   staged.PersonaID,
+					PersonaID:   ownerID,
 					Enabled:     true,
 				})
 				if saveErr != nil {
 					replyText = "⚠️ Failed to save skill: " + saveErr.Error()
 				} else {
+					_ = a.skillStore.SetScopes(r.Context(), saved.ID, []string{ownerID})
 					replyText = fmt.Sprintf("✅ Saved skill \"%s\" (%s mode, %d chars) to database! It is now active across your workspace.", saved.Name, saved.StorageMode, len([]rune(saved.Content)))
 				}
 			}
@@ -1539,7 +1574,12 @@ func (a *App) sendMessage(w http.ResponseWriter, r *http.Request) {
 		sysBuilder.WriteString(activeBot.BuildCombinedSystemPrompt())
 	}
 	if a.skillStore != nil {
-		sysBuilder.WriteString(a.skillStore.BuildSkillPromptBlock(r.Context(), activePersonaID, body.Message))
+		// The main chat sees skills assigned to "main" plus the active bot's skills.
+		skillScopes := []string{skill.ScopeMain}
+		if activePersonaID != "" {
+			skillScopes = append(skillScopes, activePersonaID)
+		}
+		sysBuilder.WriteString(a.skillStore.BuildSkillPromptBlock(r.Context(), skillScopes, body.Message))
 	}
 	if combinedSys := strings.TrimSpace(sysBuilder.String()); combinedSys != "" {
 		history = append(history, provider.Message{Role: "system", Content: combinedSys})

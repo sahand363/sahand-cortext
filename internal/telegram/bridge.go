@@ -356,6 +356,9 @@ func (b *BridgeManager) handleIncomingMessage(
 				sendTelegramMessage(client, apiBase, chatID, "⚠️ Failed to save skill: "+err.Error())
 				return
 			}
+			// A skill learned by this bot belongs to this bot (only it, until
+			// the owner ticks more places in the Skills page).
+			_ = b.skillStore.SetScopes(ctx, saved.ID, []string{p.ID})
 			sendTelegramMessage(client, apiBase, chatID, fmt.Sprintf("✅ Saved skill \"%s\" (%s mode, %d chars) to database!\n\nIt is now active in my knowledge base—continue chatting whenever you're ready.", saved.Name, saved.StorageMode, len([]rune(saved.Content))))
 			return
 		}
@@ -477,7 +480,7 @@ func (b *BridgeManager) handleIncomingMessage(
 
 	sysPrompt := p.BuildCombinedSystemPrompt()
 	if b.skillStore != nil {
-		sysPrompt += b.skillStore.BuildSkillPromptBlock(ctx, p.ID, trimmedText)
+		sysPrompt += b.skillStore.BuildSkillPromptBlock(ctx, []string{p.ID}, trimmedText)
 	}
 	if strings.TrimSpace(sysPrompt) != "" {
 		history = append([]provider.Message{{Role: "system", Content: sysPrompt}}, history...)
