@@ -77,9 +77,11 @@ update_app(){
     cd "$DIR"
     /usr/local/go/bin/go mod tidy
     CGO_ENABLED=0 /usr/local/go/bin/go build -trimpath -ldflags="-s -w" -o "${BIN}.tmp" ./cmd/server
+    chmod +x "${BIN}.tmp"
     mv -f "${BIN}.tmp" "$BIN"
   fi
 
+  chmod +x "$BIN"
   echo -e "${C}[3/3] Restarting service...${N}"
   install -m 755 "$DIR/scripts/cortext-menu.sh" /usr/local/bin/cortext
   systemctl daemon-reload
@@ -97,12 +99,22 @@ change_login(){
   read -rsp "Confirm password: " p2 </dev/tty
   echo
   [[ "$p1" == "$p2" ]] || { echo -e "${R}Passwords do not match.${N}"; pause; return; }
+
   hash=$("$BIN" hash-password "$p1")
-  sed -i "s/^HUB_USERNAME=.*/HUB_USERNAME=$username/;s|^HUB_PASSWORD_HASH=.*|HUB_PASSWORD_HASH=$hash|" "$ENV_FILE"
+  cookie_secure=$(getv HUB_COOKIE_SECURE)
+  [[ -z "$cookie_secure" ]] && cookie_secure="false"
+  addr=$(getv HUB_ADDR)
+  [[ -z "$addr" ]] && addr="0.0.0.0:8787"
+
+  # Write directly via printf (never sed) so '&' and '$' characters in bcrypt hashes are never corrupted
+  umask 077
+  printf 'HUB_ADDR=%s\nHUB_DATA_DIR=%s\nHUB_WEB_DIR=%s/web/dist\nHUB_USERNAME=%s\nHUB_PASSWORD_HASH=%s\nHUB_COOKIE_SECURE=%s\n' \
+    "$addr" "$DATA" "$DIR" "$username" "$hash" "$cookie_secure" > "$ENV_FILE"
   chmod 600 "$ENV_FILE"
+
   systemctl restart "$APP"
   unset p1 p2 hash
-  echo -e "${G}Login credentials updated.${N}"
+  echo -e "${G}✓ Login credentials updated cleanly for user '$username'.${N}"
   pause
 }
 
