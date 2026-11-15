@@ -2528,6 +2528,7 @@ func main() {
 	mux.HandleFunc("/api/mobile/health", app.mobileHealth)
 	mux.HandleFunc("/api/mobile/sessions", app.mobileSessions)
 	mux.HandleFunc("/api/mobile/chat", app.mobileChat)
+	mux.HandleFunc("/api/mobile/models", app.mobileModels)
 	mux.HandleFunc("/api/mobile/history", app.mobileHistory)
 	mux.HandleFunc("/api/mobile/status", app.auth(app.mobileStatus))
 	mux.HandleFunc("/api/mobile/settings", app.auth(app.mobileSettings))
@@ -2569,7 +2570,15 @@ func main() {
 	mux.HandleFunc("/api/orchestration/jobs/", app.auth(app.orchGetJob))
 
 	webDir := env("HUB_WEB_DIR", "./web/dist")
-	mux.Handle("/", http.FileServer(http.Dir(webDir)))
+	// Serve the panel with Cache-Control: no-cache, so a browser never
+	// shows a stale panel after an update (the files change on every
+	// release, and a normal refresh must always fetch the current
+	// index.html/app.js — no hard refresh needed).
+	webFiles := http.FileServer(http.Dir(webDir))
+	mux.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-cache")
+		webFiles.ServeHTTP(w, r)
+	}))
 
 	server := &http.Server{
 		Addr:              env("HUB_ADDR", "0.0.0.0:8787"),

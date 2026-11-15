@@ -192,8 +192,18 @@ func writeMobilePlainError(w http.ResponseWriter, status int, body []byte) {
 
 // dispatchChat runs the web UI's sendMessage handler internally (the exact
 // same function, same behaviour) and returns its HTTP status + JSON body.
-func (a *App) dispatchChat(r *http.Request, sessionID, message string) (int, []byte) {
-	body, _ := json.Marshal(map[string]string{"session_id": sessionID, "message": message})
+// provider/model are passed through when non-empty; when both are empty the
+// handler falls back to the active provider/model, exactly as the web chat
+// does when they are not given.
+func (a *App) dispatchChat(r *http.Request, sessionID, message, provider, model string) (int, []byte) {
+	payload := map[string]string{"session_id": sessionID, "message": message}
+	if strings.TrimSpace(provider) != "" {
+		payload["provider"] = strings.TrimSpace(provider)
+	}
+	if strings.TrimSpace(model) != "" {
+		payload["model"] = strings.TrimSpace(model)
+	}
+	body, _ := json.Marshal(payload)
 	req := httptest.NewRequest(http.MethodPost, "/api/messages", strings.NewReader(string(body)))
 	req = req.WithContext(r.Context())
 	rec := httptest.NewRecorder()
@@ -217,6 +227,16 @@ func (a *App) dispatchCreateSession(r *http.Request) (int, []byte) {
 	req = req.WithContext(r.Context())
 	rec := httptest.NewRecorder()
 	a.createSession(rec, req)
+	return rec.Code, rec.Body.Bytes()
+}
+
+// dispatchModels runs the web UI's handleModels handler internally (all
+// providers) and returns its HTTP status + JSON body.
+func (a *App) dispatchModels(r *http.Request) (int, []byte) {
+	req := httptest.NewRequest(http.MethodGet, "/api/models?provider=all", nil)
+	req = req.WithContext(r.Context())
+	rec := httptest.NewRecorder()
+	a.handleModels(rec, req)
 	return rec.Code, rec.Body.Bytes()
 }
 
@@ -253,8 +273,11 @@ func (a *App) mobileSessions(w http.ResponseWriter, r *http.Request) {
 }
 
 // POST /api/mobile/chat — encrypted body {"session_id","message"}.
-// Replies (encrypted) {"reply": "..."}. On a CorText error it returns a
-// non-200 PLAIN JSON {"error": "..."} so the app can show the error text.
+// Optional "provider" and "model" choose the model for this chat (the
+// app's model picker); when omitted the hub uses the active provider/model,
+// exactly as the web chat does. Replies (encrypted) {"reply": "..."}.
+// On a CorText error it returns a non-200 PLAIN JSON {"error": "..."} so
+// the app can show the error text.
 func (a *App) mobileChat(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", 405)
@@ -267,12 +290,14 @@ func (a *App) mobileChat(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		SessionID string `json:"session_id"`
 		Message   string `json:"message"`
+		Provider  string `json:"provider"`
+		Model     string `json:"model"`
 	}
 	if json.Unmarshal(pt, &body) != nil || strings.TrimSpace(body.Message) == "" || len(body.Message) > 30000 {
 		jsonOut(w, 400, map[string]string{"error": "Invalid message text"})
 		return
 	}
-	status, respBody := a.dispatchChat(r, body.SessionID, body.Message)
+	status, respBody := a.dispatchChat(r, body.SessionID, body.Message, body.Provider, body.Model)
 	if status != http.StatusOK {
 		writeMobilePlainError(w, status, respBody)
 		return
@@ -285,6 +310,43 @@ func (a *App) mobileChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.writeMobileEncrypted(w, map[string]string{"reply": resp.Reply})
+}
+
+// POST /api/mobile/models — encrypted body {}. Returns the available
+// models (encrypted) {"models": [...], "active_provider": "...",
+// "active_model": "..."} — the same list the web UI's Models page shows.
+// For the app's model picker. Only models with enabled=true are listed
+// by the app; the hub returns the full list here.
+func (a *App) mobileModels(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", 405)
+		return
+	}
+	if a.readMobileBody(w, r) == nil {
+		return
+	}
+	status, respBody := a.dispatchModels(r)
+	if status != http.StatusOK {
+		writeMobilePlainError(w, status, respBody)
+		return
+	}
+	var resp struct {
+		Models         []ModelInfo `json:"models"`
+		ActiveProvider string      `json:"active_provider"`
+		ActiveModel    string      `json:"active_model"`
+	}
+	if json.Unmarshal(respBody, &resp) != nil {
+		jsonOut(w, 502, map[string]string{"error": "unexpected models response"})
+		return
+	}
+	if resp.Models == nil {
+		resp.Models = []ModelInfo{}
+	}
+	a.writeMobileEncrypted(w, map[string]any{
+		"models":          resp.Models,
+		"active_provider": resp.ActiveProvider,
+		"active_model":    resp.ActiveModel,
+	})
 }
 
 // POST /api/mobile/history — encrypted body {"session_id"}.

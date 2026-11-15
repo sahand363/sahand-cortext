@@ -2028,10 +2028,20 @@ async function saveMobileSettings(regenerate = false) {
   const relayOn = $("mobile-relay-enabled")?.checked || false;
   const relayIp = relayOn ? ($("mobile-relay-ip")?.value || "").trim() : "";
   const relayPort = parseInt(($("mobile-relay-port")?.value || "8080").trim(), 10) || 8080;
-  const s = await api("/api/mobile/settings", {
-    method: "POST",
-    body: JSON.stringify({ enabled, relay_ip: relayIp, relay_port: relayPort, regenerate_token: regenerate })
-  });
+  let s;
+  try {
+    s = await api("/api/mobile/settings", {
+      method: "POST",
+      body: JSON.stringify({ enabled, relay_ip: relayIp, relay_port: relayPort, regenerate_token: regenerate })
+    });
+  } catch (e) {
+    // A failed save used to fail silently (no toast, no error) — the
+    // toggle/fields looked changed but nothing was stored. Show the
+    // error and reload the stored values so the page shows the truth.
+    toast("Could not save Mobile settings: " + (e.message || e));
+    loadMobile();
+    return;
+  }
   mobileStatusCache = s;
   toast(regenerate ? "New token generated — update the app with it" : "Mobile settings saved");
   loadMobile();
