@@ -2,7 +2,18 @@
 set -Eeuo pipefail
 APP=sahand-cortext
 REPO=https://github.com/sahand363/sahand-cortext.git
-RELEASE_URL=https://github.com/sahand363/sahand-cortext/releases/latest/download/sahand-cortext
+# Pick the pre-built binary for this CPU. The release publishes both
+# sahand-cortext (amd64) and sahand-cortext-arm64; downloading the wrong
+# one would install a binary that cannot run on this machine. If the
+# matching asset is missing, the download fails and the installer falls
+# back to building locally from source.
+ARCH="$(dpkg --print-architecture 2>/dev/null || uname -m)"
+case "$ARCH" in
+  amd64|x86_64) BIN_ASSET="sahand-cortext" ;;
+  arm64|aarch64) BIN_ASSET="sahand-cortext-arm64" ;;
+  *) echo "Unsupported CPU architecture: $ARCH" >&2; exit 1 ;;
+esac
+RELEASE_URL="https://github.com/sahand363/sahand-cortext/releases/latest/download/${BIN_ASSET}"
 DIR=/opt/sahand-cortext
 DATA=/var/lib/sahand-cortext
 ENV=/etc/sahand-cortext.env
@@ -110,6 +121,16 @@ else
     "$DATA" "$DIR" "$username" "$hash" > "$ENV"
   chmod 600 "$ENV"
   unset p1 p2 hash
+fi
+
+# Ensure the API-key encryption key exists (kept in the env file, outside the
+# database, so a leaked database alone does not expose the API keys).
+if ! grep -q '^HUB_KEY_ENCRYPTION_KEY=' "$ENV" 2>/dev/null; then
+  enc_key=$(openssl rand -base64 32)
+  printf 'HUB_KEY_ENCRYPTION_KEY=%s\n' "$enc_key" >> "$ENV"
+  chmod 600 "$ENV"
+  unset enc_key
+  echo -e "${G}✓ API-key encryption key generated.${N}"
 fi
 
 step 95 "Updating system service and SSH menu"

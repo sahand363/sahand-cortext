@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"database/sql"
 	"fmt"
+	"log"
 	"math"
 	"net"
 	"net/http"
@@ -59,7 +60,15 @@ func (r *Router) AttachDB(ctx context.Context, db *sql.DB) error {
 	if err := r.store.InitSchema(); err != nil {
 		return err
 	}
-	return r.store.LoadIntoRegistry(ctx, r.registry, r.Client)
+	if err := r.store.LoadIntoRegistry(ctx, r.registry, r.Client); err != nil {
+		return err
+	}
+	// Re-encrypt any plaintext API keys now that the encryption key (if set)
+	// is available. Idempotent; safe to run on every startup.
+	if n, err := r.store.MigrateAPIKeys(ctx); err == nil && n > 0 {
+		log.Printf("[Provider] Encrypted %d stored API key(s).", n)
+	}
+	return nil
 }
 
 func (r *Router) Registry() *Registry { return r.registry }

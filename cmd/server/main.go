@@ -260,7 +260,7 @@ func (a *App) providerKey(p string) string {
 	}
 	norm := provider.CanonicalID(p)
 	if v := a.setting(norm + "_api_key"); v != "" {
-		return v
+		return provider.DecryptAPIKey(v)
 	}
 	envName := strings.ToUpper(strings.ReplaceAll(norm, "-", "_")) + "_API_KEY"
 	return os.Getenv(envName)
@@ -2284,6 +2284,9 @@ func main() {
 		_ = server.Shutdown(shutdownCtx)
 	}()
 
+	if !provider.APIKeyEncryptionReady() {
+		log.Printf("[Provider] WARNING: HUB_KEY_ENCRYPTION_KEY is not set; provider API keys are stored unencrypted. Run the installer or 'sudo cortext update' to generate one.")
+	}
 	log.Printf("Sahand-CorText v%s listening on %s", AppVersion, server.Addr)
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)

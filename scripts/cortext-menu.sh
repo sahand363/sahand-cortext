@@ -7,7 +7,18 @@ BIN=/usr/local/bin/sahand-cortext
 DIR=/opt/sahand-cortext
 DATA=/var/lib/sahand-cortext
 CADDY=/etc/caddy/Caddyfile
-RELEASE_URL=https://github.com/sahand363/sahand-cortext/releases/latest/download/sahand-cortext
+# Pick the pre-built binary for this CPU. The release publishes both
+# sahand-cortext (amd64) and sahand-cortext-arm64; downloading the wrong
+# one would install a binary that cannot run on this machine. If the
+# matching asset is missing, the download fails and the updater falls
+# back to building locally from source.
+ARCH="$(dpkg --print-architecture 2>/dev/null || uname -m)"
+case "$ARCH" in
+  amd64|x86_64) BIN_ASSET="sahand-cortext" ;;
+  arm64|aarch64) BIN_ASSET="sahand-cortext-arm64" ;;
+  *) echo "Unsupported CPU architecture: $ARCH" >&2; exit 1 ;;
+esac
+RELEASE_URL="https://github.com/sahand363/sahand-cortext/releases/latest/download/${BIN_ASSET}"
 
 G='\033[0;32m'; C='\033[0;36m'; Y='\033[1;33m'; R='\033[0;31m'; N='\033[0m'
 [[ $EUID -eq 0 ]] || { echo "Run: sudo cortext"; exit 1; }
@@ -82,6 +93,15 @@ update_app(){
   fi
 
   chmod +x "$BIN"
+  # Ensure the API-key encryption key exists (kept in the env file, outside the
+  # database, so a leaked database alone does not expose the API keys).
+  if ! grep -q '^HUB_KEY_ENCRYPTION_KEY=' "$ENV_FILE" 2>/dev/null; then
+    enc_key=$(openssl rand -base64 32)
+    printf 'HUB_KEY_ENCRYPTION_KEY=%s\n' "$enc_key" >> "$ENV_FILE"
+    chmod 600 "$ENV_FILE"
+    unset enc_key
+    echo -e "${G}✓ API-key encryption key generated.${N}"
+  fi
   echo -e "${C}[3/3] Restarting service...${N}"
   install -m 755 "$DIR/scripts/cortext-menu.sh" /usr/local/bin/cortext
   systemctl daemon-reload

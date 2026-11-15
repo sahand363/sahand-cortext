@@ -31,13 +31,14 @@ jobs:
         run: |
           go test -v ./...
 
-      - name: Build server binary
+      - name: Build server binaries
         run: |
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o dist/sahand-cortext ./cmd/server
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o dist/sahand-cortext-arm64 ./cmd/server
 
       - name: Publish pre-built release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release delete latest --yes --cleanup-tag 2>/dev/null || true
-          gh release create latest dist/sahand-cortext --title "Sahand-CorText (Latest)" --notes "Automated build from commit $GITHUB_SHA"
+          gh release create latest dist/sahand-cortext dist/sahand-cortext-arm64 --title "Sahand-CorText (Latest)" --notes "Automated build from commit $GITHUB_SHA"

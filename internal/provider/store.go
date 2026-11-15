@@ -296,8 +296,12 @@ func (s *Store) SaveDynamicProvider(ctx context.Context, reg *Registry, client *
 			cfg.BaseURL, cfg.ChatPath, cfg.ModelsPath, cfg.AuthType, cfg.AuthHeader,
 			string(headersBytes), string(optsBytes), enabledInt, cfg.SortOrder, now, now)
 		if err == nil && strings.TrimSpace(input.APIKey) != "" {
+			stored := strings.TrimSpace(input.APIKey)
+			if enc, ok := EncryptAPIKey(stored); ok {
+				stored = enc
+			}
 			_, _ = s.db.ExecContext(ctx, `INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
-				id+"_api_key", strings.TrimSpace(input.APIKey))
+				id+"_api_key", stored)
 		}
 		if err == nil && len(opts.ManualModels) > 0 {
 			if rawManual, mErr := json.Marshal(opts.ManualModels); mErr == nil {
@@ -351,11 +355,48 @@ func (s *Store) SaveAPIKey(ctx context.Context, reg *Registry, id, apiKey string
 	if s != nil && s.db != nil {
 		s.mu.Lock()
 		defer s.mu.Unlock()
+		stored := trimmed
+		if enc, ok := EncryptAPIKey(trimmed); ok {
+			stored = enc
+		}
 		_, err := s.db.ExecContext(ctx, `INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
-			norm+"_api_key", trimmed)
+			norm+"_api_key", stored)
 		return err
 	}
 	return nil
+}
+
+// MigrateAPIKeys re-encrypts any plaintext API keys in the settings table.
+// It is idempotent and safe to run on every startup. Returns how many keys
+// were migrated. When no encryption key is configured it does nothing.
+func (s *Store) MigrateAPIKeys(ctx context.Context) (int, error) {
+	if s == nil || s.db == nil || !APIKeyEncryptionReady() {
+		return 0, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rows, err := s.db.QueryContext(ctx, `SELECT key, value FROM settings WHERE key GLOB '*_api_key'`)
+	if err != nil {
+		return 0, err
+	}
+	type kv struct{ k, v string }
+	var plain []kv
+	for rows.Next() {
+		var k, v string
+		if rows.Scan(&k, &v) == nil && strings.TrimSpace(v) != "" && !isEncryptedAPIKeyValue(strings.TrimSpace(v)) {
+			plain = append(plain, kv{k, strings.TrimSpace(v)})
+		}
+	}
+	rows.Close() // release the single SQLite connection BEFORE the updates below
+	migrated := 0
+	for _, p := range plain {
+		if enc, ok := EncryptAPIKey(p.v); ok {
+			if _, err := s.db.ExecContext(ctx, `INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, p.k, enc); err == nil {
+				migrated++
+			}
+		}
+	}
+	return migrated, nil
 }
 
 func (s *Store) SaveManualModel(ctx context.Context, reg *Registry, id, modelID string) error {
@@ -388,7 +429,7 @@ func (s *Store) resolveAPIKey(id string) string {
 	if s != nil && s.db != nil {
 		var v string
 		if s.db.QueryRow(`SELECT value FROM settings WHERE key=?`, norm+"_api_key").Scan(&v) == nil && strings.TrimSpace(v) != "" {
-			return strings.TrimSpace(v)
+			return DecryptAPIKey(strings.TrimSpace(v))
 		}
 	}
 	envName := strings.ToUpper(strings.ReplaceAll(norm, "-", "_")) + "_API_KEY"
