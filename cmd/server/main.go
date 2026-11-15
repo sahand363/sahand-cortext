@@ -1,4 +1,4 @@
-package main 
+package main
 
 import (
 	"context"
@@ -150,10 +150,6 @@ func (a *App) initDB() error {
 	if err := a.personaStore.InitSchema(); err != nil {
 		return err
 	}
-
-	if err := a.personaStore.InitSchema(); err != nil {
-		return err
-	}
 	if a.skillStore == nil {
 		a.skillStore = skill.NewStore(a.db)
 	}
@@ -166,7 +162,6 @@ func (a *App) initDB() error {
 	if err := a.orchStorage.InitSchema(); err != nil {
 		return err
 	}
-
 	return a.router.AttachDB(context.Background(), a.db)
 }
 
@@ -1472,13 +1467,7 @@ func (a *App) sendMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rows, err := a.db.Query(`SELECT role, content FROM messages WHERE session_id=? ORDER BY id ASC`, body.SessionID)
-	if err != nil {
-		jsonOut(w, 500, map[string]string{"error": "database error"})
-		return
-	}
-	defer rows.Close()
-
+	// Build system prompt & inject active skills BEFORE opening db.Query on single-connection SQLite
 	var history []provider.Message
 	var sysBuilder strings.Builder
 	if activeBot != nil {
@@ -1491,12 +1480,19 @@ func (a *App) sendMessage(w http.ResponseWriter, r *http.Request) {
 		history = append(history, provider.Message{Role: "system", Content: combinedSys})
 	}
 
+	rows, err := a.db.Query(`SELECT role, content FROM messages WHERE session_id=? ORDER BY id ASC`, body.SessionID)
+	if err != nil {
+		jsonOut(w, 500, map[string]string{"error": "database error"})
+		return
+	}
 	for rows.Next() {
 		var role, content string
 		if rows.Scan(&role, &content) == nil {
 			history = append(history, provider.Message{Role: role, Content: content})
 		}
 	}
+	rows.Close()
+
 	promptMessages := chat.TruncateHistory(history, chat.DefaultConfig())
 
 	answer, elapsed, err := a.router.Call(r.Context(), normProvider, a.providerKey(normProvider), chosenModel, promptMessages, provider.CallOpts{})
