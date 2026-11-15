@@ -1905,11 +1905,11 @@ func main() {
 	}))
 
 	mux.HandleFunc("/api/orchestration/jobs", app.auth(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet:
+		if r.Method == http.MethodGet {
 			app.orchListJobs(w, r)
-		else if r.Method == http.MethodPost:
+		} else if r.Method == http.MethodPost {
 			app.orchCreateJob(w, r)
-		else {
+		} else {
 			http.Error(w, "method not allowed", 405)
 		}
 	}))
