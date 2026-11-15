@@ -24,22 +24,25 @@ import (
 	"github.com/sahand363/sahand-cortext/internal/orchestration"
 	"github.com/sahand363/sahand-cortext/internal/persona"
 	"github.com/sahand363/sahand-cortext/internal/provider"
+	"github.com/sahand363/sahand-cortext/internal/skill"
 	"github.com/sahand363/sahand-cortext/internal/telegram"
 	"golang.org/x/crypto/bcrypt"
 	_ "modernc.org/sqlite"
 )
 
-const AppVersion = "0.8.0"
+const AppVersion = "0.9.0"
 
 type App struct {
-	db           *sql.DB
-	mu           sync.RWMutex
-	sessions     map[string]time.Time
-	router       *provider.Router
-	personaStore *persona.Store
-	orchStorage  *orchestration.Storage
-	orchEngine   *orchestration.CollaborationEngine
-	orchPool     *orchestration.WorkerPool
+	db             *sql.DB
+	mu             sync.RWMutex
+	sessions       map[string]time.Time
+	webStagedSkill map[string]*skill.StagedDraft // keyed by session_id
+	router         *provider.Router
+	personaStore   *persona.Store
+	skillStore     *skill.Store
+	orchStorage    *orchestration.Storage
+	orchEngine     *orchestration.CollaborationEngine
+	orchPool       *orchestration.WorkerPool
 }
 
 type Session struct {
@@ -145,6 +148,9 @@ func (a *App) initDB() error {
 	}
 	_, _ = a.db.Exec(`ALTER TABLE sessions ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;`)
 	if err := a.personaStore.InitSchema(); err != nil {
+		return err
+	}
+	if err := a.skillStore.InitSchema(); err != nil {
 		return err
 	}
 	if err := a.orchStorage.InitSchema(); err != nil {
@@ -513,6 +519,7 @@ func (a *App) status(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	personas, _ := a.personaStore.List(r.Context(), false)
+	skills, _ := a.skillStore.List(r.Context(), "", false)
 	jsonOut(w, 200, map[string]any{
 		"status":                "online",
 		"version":               AppVersion,
@@ -527,7 +534,57 @@ func (a *App) status(w http.ResponseWriter, r *http.Request) {
 		"providers":             provMap,
 		"providers_list":        registered,
 		"personas":              personas,
+		"skills":                skills,
 	})
+}
+
+func (a *App) handleSkills(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		list, err := a.skillStore.List(r.Context(), r.URL.Query().Get("persona_id"), false)
+		if err != nil {
+			jsonOut(w, 500, map[string]string{"error": err.Error()})
+			return
+		}
+		jsonOut(w, 200, map[string]any{"skills": list})
+	case http.MethodPost:
+		var body skill.Skill
+		if json.NewDecoder(http.MaxBytesReader(w, r.Body, 512*1024)).Decode(&body) != nil {
+			jsonOut(w, 400, map[string]string{"error": "Invalid skill payload"})
+			return
+		}
+		saved, err := a.skillStore.Save(r.Context(), body)
+		if err != nil {
+			jsonOut(w, 400, map[string]string{"error": err.Error()})
+			return
+		}
+		list, _ := a.skillStore.List(r.Context(), "", false)
+		jsonOut(w, 201, map[string]any{"ok": true, "skill": saved, "skills": list})
+	default:
+		http.Error(w, "method not allowed", 405)
+	}
+}
+
+func (a *App) handleSkillByID(w http.ResponseWriter, r *http.Request) {
+	id := skill.CanonicalID(strings.TrimPrefix(r.URL.Path, "/api/skills/"))
+	if id == "" {
+		jsonOut(w, 400, map[string]string{"error": "Skill ID is required"})
+		return
+	}
+	if r.Method != http.MethodDelete {
+		http.Error(w, "method not allowed", 405)
+		return
+	}
+	if err := a.skillStore.Delete(r.Context(), id); err != nil {
+		status := 500
+		if errors.Is(err, skill.ErrSkillNotFound) {
+			status = 404
+		}
+		jsonOut(w, status, map[string]string{"error": err.Error()})
+		return
+	}
+	list, _ := a.skillStore.List(r.Context(), "", false)
+	jsonOut(w, 200, map[string]any{"ok": true, "deleted": id, "skills": list})
 }
 
 func (a *App) handlePersonas(w http.ResponseWriter, r *http.Request) {
@@ -1080,7 +1137,6 @@ func statusRank(s string) int {
 	}
 }
 
-// Separate Web Panel Sessions from Telegram Bot Sessions
 func (a *App) listSessions(w http.ResponseWriter, r *http.Request) {
 	onlyBots := r.URL.Query().Get("bots") == "true"
 	query := `SELECT id, title, coalesce(persona_id,''), pinned, updated_at FROM sessions WHERE id NOT LIKE 'tg-%' ORDER BY pinned DESC, updated_at DESC`
@@ -1238,8 +1294,9 @@ func (a *App) sendMessage(w http.ResponseWriter, r *http.Request) {
 		jsonOut(w, 400, map[string]string{"error": "Invalid message text"})
 		return
 	}
-	var currentTitle, sessionPersonaID string
-	if a.db.QueryRow(`SELECT title, coalesce(persona_id,'') FROM sessions WHERE id=?`, body.SessionID).Scan(&currentTitle, &sessionPersonaID) != nil {
+	var sessTitle string
+	var sessionPersonaID string
+	if a.db.QueryRow(`SELECT title, coalesce(persona_id,'') FROM sessions WHERE id=?`, body.SessionID).Scan(&sessTitle, &sessionPersonaID) != nil {
 		jsonOut(w, 404, map[string]string{"error": "session not found"})
 		return
 	}
@@ -1322,6 +1379,82 @@ func (a *App) sendMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	trimmedMsg := strings.TrimSpace(body.Message)
+
+	// Handle staged /learn skill confirmation in Web Chat
+	a.mu.Lock()
+	staged, hasStaged := a.webStagedSkill[body.SessionID]
+	a.mu.Unlock()
+
+	if hasStaged && !strings.HasPrefix(trimmedMsg, "/") {
+		lower := strings.ToLower(trimmedMsg)
+		isFull := lower == "full" || strings.Contains(lower, "full") || lower == "کامل"
+		isCompressed := lower == "compressed" || strings.Contains(lower, "compress") || lower == "فشرده" || lower == "خلاصه"
+		isCancel := lower == "cancel" || lower == "لغو"
+
+		if isCancel || isFull || isCompressed {
+			_, _ = a.db.Exec(`INSERT INTO messages(session_id,role,content) VALUES(?,?,?)`, body.SessionID, "user", body.Message)
+			a.mu.Lock()
+			delete(a.webStagedSkill, body.SessionID)
+			a.mu.Unlock()
+
+			var replyText string
+			if isCancel {
+				replyText = "✖ Cancelled saving skill."
+			} else {
+				mode := "compressed"
+				chosenContent := staged.CompressedContent
+				if isFull {
+					mode = "full"
+					chosenContent = staged.FullContent
+				}
+				saved, saveErr := a.skillStore.Save(r.Context(), skill.Skill{
+					Name:        staged.Name,
+					Description: staged.Description,
+					SourceURL:   staged.SourceURL,
+					StorageMode: mode,
+					Content:     chosenContent,
+					PersonaID:   staged.PersonaID,
+					Enabled:     true,
+				})
+				if saveErr != nil {
+					replyText = "⚠️ Failed to save skill: " + saveErr.Error()
+				} else {
+					replyText = fmt.Sprintf("✅ Saved skill \"%s\" (%s mode, %d chars) to database! It is now active across your workspace.", saved.Name, saved.StorageMode, len([]rune(saved.Content)))
+				}
+			}
+			_, _ = a.db.Exec(`INSERT INTO messages(session_id,role,content) VALUES(?,?,?)`, body.SessionID, "assistant", replyText)
+			jsonOut(w, 200, map[string]any{"reply": replyText, "provider": normProvider, "model": chosenModel, "persona_id": activePersonaID})
+			return
+		}
+	}
+
+	// Handle /learn <url> command in Web Chat
+	if strings.HasPrefix(strings.ToLower(trimmedMsg), "/learn ") {
+		parts := strings.Fields(trimmedMsg)
+		if len(parts) >= 2 {
+			targetURL := strings.TrimSpace(parts[1])
+			_, _ = a.db.Exec(`INSERT INTO messages(session_id,role,content) VALUES(?,?,?)`, body.SessionID, "user", body.Message)
+
+			draft, exErr := skill.ExtractSkillFromURL(r.Context(), a.router, normProvider, a.providerKey(normProvider), chosenModel, targetURL, activePersonaID)
+			var replyText string
+			if exErr != nil {
+				replyText = "⚠️ " + exErr.Error()
+			} else {
+				a.mu.Lock()
+				a.webStagedSkill[body.SessionID] = draft
+				a.mu.Unlock()
+				replyText = fmt.Sprintf(
+					"📚 Learned Skill: %s\n%s\n\nDo you want me to save the FULL version (~%d chars) or the COMPRESSED version (~%d chars, redundant info removed) to the database?\n\nReply with: Full or Compressed (or Cancel)",
+					draft.Name, draft.Description, len([]rune(draft.FullContent)), len([]rune(draft.CompressedContent)),
+				)
+			}
+			_, _ = a.db.Exec(`INSERT INTO messages(session_id,role,content) VALUES(?,?,?)`, body.SessionID, "assistant", replyText)
+			jsonOut(w, 200, map[string]any{"reply": replyText, "provider": normProvider, "model": chosenModel, "persona_id": activePersonaID})
+			return
+		}
+	}
+
 	_, err := a.db.Exec(`INSERT INTO messages(session_id,role,content) VALUES(?,?,?)`, body.SessionID, "user", body.Message)
 	if err != nil {
 		jsonOut(w, 500, map[string]string{"error": "database error"})
@@ -1336,11 +1469,17 @@ func (a *App) sendMessage(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 
 	var history []provider.Message
+	var sysBuilder strings.Builder
 	if activeBot != nil {
-		if sysPrompt := activeBot.BuildCombinedSystemPrompt(); sysPrompt != "" {
-			history = append(history, provider.Message{Role: "system", Content: sysPrompt})
-		}
+		sysBuilder.WriteString(activeBot.BuildCombinedSystemPrompt())
 	}
+	if a.skillStore != nil {
+		sysBuilder.WriteString(a.skillStore.BuildSkillPromptBlock(r.Context(), activePersonaID, body.Message))
+	}
+	if combinedSys := strings.TrimSpace(sysBuilder.String()); combinedSys != "" {
+		history = append(history, provider.Message{Role: "system", Content: combinedSys})
+	}
+
 	for rows.Next() {
 		var role, content string
 		if rows.Scan(&role, &content) == nil {
@@ -1373,7 +1512,7 @@ func (a *App) sendMessage(w http.ResponseWriter, r *http.Request) {
 	if activeBot != nil {
 		defaultBotTitle = activeBot.Icon + " " + activeBot.Name
 	}
-	if count <= 2 && (currentTitle == "" || currentTitle == "New conversation" || currentTitle == defaultBotTitle) {
+	if count <= 2 && (sessTitle == "" || sessTitle == "New conversation" || sessTitle == defaultBotTitle) {
 		title := strings.TrimSpace(body.Message)
 		if len([]rune(title)) > 42 {
 			title = string([]rune(title)[:42]) + "…"
@@ -1828,17 +1967,20 @@ func main() {
 
 	router := provider.NewRouter()
 	personaStore := persona.NewStore(db)
+	skillStore := skill.NewStore(db)
 	orchStorage := orchestration.NewStorage(db)
 
 	app := &App{
-		db:           db,
-		sessions:     map[string]time.Time{},
-		router:       router,
-		personaStore: personaStore,
-		orchStorage:  orchStorage,
+		db:             db,
+		sessions:       map[string]time.Time{},
+		webStagedSkill: map[string]*skill.StagedDraft{},
+		router:         router,
+		personaStore:   personaStore,
+		skillStore:     skillStore,
+		orchStorage:    orchStorage,
 	}
 
-	tgBridge := telegram.NewBridgeManager(db, personaStore, router, app.providerKey)
+	tgBridge := telegram.NewBridgeManager(db, personaStore, skillStore, router, app.providerKey)
 	bridgeCtx, bridgeCancel := context.WithCancel(context.Background())
 	tgBridge.StartSync(bridgeCtx)
 
@@ -1872,6 +2014,8 @@ func main() {
 	mux.HandleFunc("/api/personas", app.auth(app.handlePersonas))
 	mux.HandleFunc("/api/personas/train", app.auth(app.handleTrainPersona))
 	mux.HandleFunc("/api/personas/", app.auth(app.handlePersonaByID))
+	mux.HandleFunc("/api/skills", app.auth(app.handleSkills))
+	mux.HandleFunc("/api/skills/", app.auth(app.handleSkillByID))
 	mux.HandleFunc("/api/setup/gemini", app.auth(app.saveProviderKey))
 	mux.HandleFunc("/api/setup/provider", app.auth(app.saveProviderKey))
 	mux.HandleFunc("/api/models", app.auth(app.handleModels))
