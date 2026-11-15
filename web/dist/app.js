@@ -63,6 +63,7 @@ const pageNames = {
   sessions: "Bot Sessions",
   models: "Models & providers",
   orchestration: "AI orchestration",
+  skills: "Skills",
   memory: "Topic memory",
   usage: "Usage & analytics",
   settings: "Settings"
@@ -1759,6 +1760,62 @@ $("back-to-chat-list-btn")?.addEventListener("click", () => {
 });
 
 $("chat-list-new-btn")?.addEventListener("click", () => newSession());
+/* ============================================================================
+   SKILLS PAGE
+   ============================================================================ */
+
+function escapeHtml(s) {
+  return String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+async function loadSkills() {
+  const listEl = $("skills-list");
+  if (!listEl) return;
+  listEl.innerHTML = "<p class=\"muted-note\">Loading skills…</p>";
+  try {
+    const data = await api("/api/skills");
+    const skills = data.skills || [];
+    if (!skills.length) {
+      listEl.innerHTML = "<p class=\"muted-note\">No skills saved yet. Teach the bot with /learn &lt;url&gt; in chat or Telegram — or /learn-deep &lt;url&gt; to learn a whole page and its same-site links.</p>";
+      return;
+    }
+    listEl.innerHTML = skills.map(s => `
+      <div class="session-card">
+        <div><b>${escapeHtml(s.name)}</b><span>${escapeHtml(s.description || "")}</span></div>
+        <span>${escapeHtml(s.source_url || "")} · ${escapeHtml(s.storage_mode || "")} · ${s.enabled ? "ENABLED" : "DISABLED"}</span>
+        <div class="session-card-tools">
+          <button class="btn btn-quiet btn-small" onclick="toggleSkill('${escapeHtml(s.id)}', ${!s.enabled})">${s.enabled ? "Disable" : "Enable"}</button>
+          <button class="btn btn-quiet btn-small" onclick="viewSkill('${escapeHtml(s.id)}')">View</button>
+          <button class="btn btn-quiet btn-small" onclick="deleteSkill('${escapeHtml(s.id)}')">Delete</button>
+        </div>
+        <pre id="skill-content-${escapeHtml(s.id)}" class="hidden" style="white-space:pre-wrap;word-break:break-word;font-size:12px;color:var(--muted);max-height:300px;overflow:auto;margin:0">${escapeHtml(s.content || "")}</pre>
+      </div>`).join("");
+  } catch (e) {
+    listEl.innerHTML = "<p class=\"muted-note\">Could not load skills.</p>";
+  }
+}
+
+async function toggleSkill(id, enabled) {
+  await api("/api/skills/" + encodeURIComponent(id), { method: "PUT", body: JSON.stringify({ enabled }) });
+  loadSkills();
+}
+
+async function deleteSkill(id) {
+  if (!confirm("Delete this skill?")) return;
+  await api("/api/skills/" + encodeURIComponent(id), { method: "DELETE" });
+  loadSkills();
+}
+
+function viewSkill(id) {
+  const el = $("skill-content-" + id);
+  if (el) el.classList.toggle("hidden");
+}
+
+$("refresh-skills-btn")?.addEventListener("click", () => {
+  loadSkills();
+  toast("Skills refreshed");
+});
+
 $("refresh-bot-sessions-btn")?.addEventListener("click", () => {
   loadBotSessions();
   toast("Bot sessions refreshed");
@@ -1947,6 +2004,7 @@ function switchPage(name, autoRestoreChat = true) {
     restoreChatLastState();
   }
   if (name === "sessions") loadBotSessions();
+  if (name === "skills") loadSkills();
   if (name === "settings" || name === "models") {
     refreshStatus();
     if (name === "settings") {

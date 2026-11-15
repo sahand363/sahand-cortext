@@ -388,3 +388,140 @@ func truncateStr(s string, max int) string {
 	}
 	return string(r[:max]) + "…"
 }
+
+var hrefRe = regexp.MustCompile(`(?i)<a[^>]+href\s*=\s*["']([^"']+)["']`)
+
+// ExtractPageLinks fetches a page and returns its same-domain links, in order,
+// de-duplicated and capped at maxLinks. Only http(s) links on the same host are kept.
+func ExtractPageLinks(ctx context.Context, rawURL string, maxLinks int) ([]string, error) {
+	u, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return nil, errors.New("please provide a valid http:// or https:// URL")
+	}
+
+	client := &http.Client{Timeout: 25 * time.Second}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; Sahand-CorText/1.0)")
+	req.Header.Set("Accept", "text/html,text/plain,application/xhtml+xml;q=0.9,*/*;q=0.8")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to visit link: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("website returned HTTP %d", resp.StatusCode)
+	}
+
+	rawBytes, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20)) // 2 MB cap
+	if err != nil {
+		return nil, err
+	}
+
+	seen := map[string]bool{}
+	var links []string
+	for _, m := range hrefRe.FindAllStringSubmatch(string(rawBytes), -1) {
+		if len(links) >= maxLinks {
+			break
+		}
+		href := strings.TrimSpace(m[1])
+		if href == "" || strings.HasPrefix(href, "#") || strings.HasPrefix(href, "mailto:") ||
+			strings.HasPrefix(href, "tel:") || strings.HasPrefix(href, "javascript:") {
+			continue
+		}
+		ref, err := url.Parse(href)
+		if err != nil {
+			continue
+		}
+		abs := u.ResolveReference(ref)
+		if abs.Host != u.Host || (abs.Scheme != "http" && abs.Scheme != "https") {
+			continue
+		}
+		abs.Fragment = ""
+		key := abs.String()
+		if key == u.String() || seen[key] {
+			continue
+		}
+		seen[key] = true
+		links = append(links, key)
+	}
+	return links, nil
+}
+
+// LearnDeepResult is the outcome of a deep-learn run.
+type LearnDeepResult struct {
+	Learned []string // names of skills saved
+	Failed  []string // URLs that could not be learned
+}
+
+// LearnDeep learns a page and the links inside it (same domain only).
+// The page itself is learned first, then up to maxPages-1 linked pages.
+// Each page is saved as a compressed skill (dense, token-efficient) and enabled.
+// onProgress, if non-nil, is called after each page with the running count,
+// the page URL, and the saved skill name ("" when the page failed).
+// It never holds a DB row open across the AI call: extraction fetches the page
+// and calls the model first, and Save is a single short statement afterwards.
+func (s *Store) LearnDeep(ctx context.Context, router *provider.Router, provID, apiKey, modelID, targetURL, personaID string, maxPages int, onProgress func(done int, pageURL, skillName string)) LearnDeepResult {
+	if maxPages < 1 {
+		maxPages = 1
+	}
+	if maxPages > 10 {
+		maxPages = 10
+	}
+	var res LearnDeepResult
+
+	learnOne := func(pageURL string) {
+		draft, err := ExtractSkillFromURL(ctx, router, provID, apiKey, modelID, pageURL, personaID)
+		if err != nil {
+			res.Failed = append(res.Failed, pageURL)
+			if onProgress != nil {
+				onProgress(len(res.Learned)+len(res.Failed), pageURL, "")
+			}
+			return
+		}
+		content := strings.TrimSpace(draft.CompressedContent)
+		if content == "" {
+			content = strings.TrimSpace(draft.FullContent)
+		}
+		saved, err := s.Save(ctx, Skill{
+			Name:        draft.Name,
+			Description: draft.Description,
+			SourceURL:   draft.SourceURL,
+			StorageMode: "compressed",
+			Content:     content,
+			PersonaID:   draft.PersonaID,
+			Enabled:     true,
+		})
+		if err != nil {
+			res.Failed = append(res.Failed, pageURL)
+		} else {
+			res.Learned = append(res.Learned, saved.Name)
+		}
+		if onProgress != nil {
+			onProgress(len(res.Learned)+len(res.Failed), pageURL, draft.Name)
+		}
+	}
+
+	learnOne(targetURL)
+	if len(res.Learned)+len(res.Failed) >= maxPages {
+		return res
+	}
+	links, err := ExtractPageLinks(ctx, targetURL, maxPages-1)
+	if err != nil {
+		return res
+	}
+	for _, link := range links {
+		if len(res.Learned)+len(res.Failed) >= maxPages {
+			break
+		}
+		if err := ctx.Err(); err != nil {
+			break
+		}
+		learnOne(link)
+	}
+	return res
+}

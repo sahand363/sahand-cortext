@@ -195,6 +195,30 @@ func pollTelegramBot(ctx context.Context, mgr *BridgeManager, personaID, token s
 	}
 }
 
+// runDeepLearn learns a page and its same-site links in the background and
+// reports progress to the Telegram chat. It runs in its own goroutine so the
+// poll loop is never blocked by the (slow) fetch + AI calls.
+func (b *BridgeManager) runDeepLearn(client *http.Client, apiBase string, chatID int64, p *persona.Persona, prov, mod, targetURL string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	defer cancel()
+	res := b.skillStore.LearnDeep(ctx, b.router, prov, b.keyLookup(prov), mod, targetURL, p.ID, 10, func(done int, pageURL, skillName string) {
+		if skillName == "" {
+			sendTelegramMessage(client, apiBase, chatID, "⚠️ Could not learn: "+pageURL)
+		} else {
+			sendTelegramMessage(client, apiBase, chatID, "✅ Learned: "+skillName)
+		}
+	})
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "📚 Deep learn finished for %s\n\nLearned %d skill(s).", targetURL, len(res.Learned))
+	if len(res.Failed) > 0 {
+		fmt.Fprintf(&sb, "\n\n⚠️ Could not learn %d page(s):\n", len(res.Failed))
+		for _, u := range res.Failed {
+			fmt.Fprintf(&sb, "• %s\n", u)
+		}
+	}
+	sendTelegramMessage(client, apiBase, chatID, sb.String())
+}
+
 func sendTelegramMessage(client *http.Client, apiBase string, chatID int64, text string) {
 	url := apiBase + "/sendMessage"
 	payload, _ := json.Marshal(map[string]any{
@@ -317,7 +341,7 @@ func (b *BridgeManager) handleIncomingMessage(
 
 		switch cmd {
 		case "/start", "/help":
-			msg := fmt.Sprintf("🤖 %s %s\n\nCommands:\n/learn <url> - Visit a link, extract a skill, and save it to DB\n/skills - List active skills in my knowledge base\n/new - Start a fresh conversation\n/status - Check bot status", p.Icon, p.Name)
+			msg := fmt.Sprintf("🤖 %s %s\n\nCommands:\n/learn <url> - Visit a link, extract a skill, and save it to DB\n/learn-deep <url> - Learn a page AND its same-site links (up to 10 pages)\n/skills - List active skills in my knowledge base\n/new - Start a fresh conversation\n/status - Check bot status", p.Icon, p.Name)
 			sendTelegramMessage(client, apiBase, chatID, msg)
 			return
 
@@ -351,6 +375,21 @@ func (b *BridgeManager) handleIncomingMessage(
 				draft.Name, draft.Description, fullChars, compChars,
 			)
 			sendTelegramMessage(client, apiBase, chatID, promptMsg)
+			return
+
+		case "/learn-deep":
+			if len(parts) < 2 {
+				sendTelegramMessage(client, apiBase, chatID, "Usage: /learn-deep https://example.com/guide")
+				return
+			}
+			targetURL := strings.TrimSpace(parts[1])
+			prov, mod, err := b.resolveProviderAndModel(p)
+			if err != nil {
+				sendTelegramMessage(client, apiBase, chatID, "⚠️ Invalid provider configuration.")
+				return
+			}
+			sendTelegramMessage(client, apiBase, chatID, fmt.Sprintf("🔍 Deep learning %s — visiting the page and its same-site links (up to 10 pages)…", targetURL))
+			go b.runDeepLearn(client, apiBase, chatID, p, prov, mod, targetURL)
 			return
 
 		case "/skills":

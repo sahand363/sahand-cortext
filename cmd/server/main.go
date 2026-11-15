@@ -577,6 +577,32 @@ func (a *App) handleSkillByID(w http.ResponseWriter, r *http.Request) {
 		jsonOut(w, 400, map[string]string{"error": "Skill ID is required"})
 		return
 	}
+	if r.Method == http.MethodPut {
+		var body struct {
+			Enabled *bool `json:"enabled"`
+		}
+		if json.NewDecoder(http.MaxBytesReader(w, r.Body, 64*1024)).Decode(&body) != nil || body.Enabled == nil {
+			jsonOut(w, 400, map[string]string{"error": "enabled is required"})
+			return
+		}
+		existing, err := a.skillStore.Get(r.Context(), id)
+		if err != nil {
+			status := 500
+			if errors.Is(err, skill.ErrSkillNotFound) {
+				status = 404
+			}
+			jsonOut(w, status, map[string]string{"error": err.Error()})
+			return
+		}
+		existing.Enabled = *body.Enabled
+		if _, err := a.skillStore.Save(r.Context(), *existing); err != nil {
+			jsonOut(w, 500, map[string]string{"error": err.Error()})
+			return
+		}
+		list, _ := a.skillStore.List(r.Context(), "", false)
+		jsonOut(w, 200, map[string]any{"ok": true, "skill": existing, "skills": list})
+		return
+	}
 	if r.Method != http.MethodDelete {
 		http.Error(w, "method not allowed", 405)
 		return
@@ -1431,6 +1457,39 @@ func (a *App) sendMessage(w http.ResponseWriter, r *http.Request) {
 			}
 			_, _ = a.db.Exec(`INSERT INTO messages(session_id,role,content) VALUES(?,?,?)`, body.SessionID, "assistant", replyText)
 			jsonOut(w, 200, map[string]any{"reply": replyText, "provider": normProvider, "model": chosenModel, "persona_id": activePersonaID})
+			return
+		}
+	}
+
+	// Handle /learn-deep <url> command in Web Chat: learns the page plus its
+	// same-site links in the background and posts a summary into the chat.
+	if strings.HasPrefix(strings.ToLower(trimmedMsg), "/learn-deep ") {
+		parts := strings.Fields(trimmedMsg)
+		if len(parts) >= 2 {
+			targetURL := strings.TrimSpace(parts[1])
+			_, _ = a.db.Exec(`INSERT INTO messages(session_id,role,content) VALUES(?,?,?)`, body.SessionID, "user", body.Message)
+			startText := fmt.Sprintf("🔍 Deep learning %s — visiting the page and its same-site links (up to 10 pages)… I'll post a summary here when it's done.", targetURL)
+			_, _ = a.db.Exec(`INSERT INTO messages(session_id,role,content) VALUES(?,?,?)`, body.SessionID, "assistant", startText)
+			sessID := body.SessionID
+			provID, apiKey, modelID, personaID := normProvider, a.providerKey(normProvider), chosenModel, activePersonaID
+			go func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+				defer cancel()
+				res := a.skillStore.LearnDeep(ctx, a.router, provID, apiKey, modelID, targetURL, personaID, 10, nil)
+				var sb strings.Builder
+				fmt.Fprintf(&sb, "📚 Deep learn finished for %s\n\nLearned %d skill(s):\n", targetURL, len(res.Learned))
+				for _, name := range res.Learned {
+					fmt.Fprintf(&sb, "• %s\n", name)
+				}
+				if len(res.Failed) > 0 {
+					fmt.Fprintf(&sb, "\n⚠️ Could not learn %d page(s):\n", len(res.Failed))
+					for _, u := range res.Failed {
+						fmt.Fprintf(&sb, "• %s\n", u)
+					}
+				}
+				_, _ = a.db.Exec(`INSERT INTO messages(session_id,role,content) VALUES(?,?,?)`, sessID, "assistant", sb.String())
+			}()
+			jsonOut(w, 200, map[string]any{"reply": startText, "provider": normProvider, "model": chosenModel, "persona_id": activePersonaID})
 			return
 		}
 	}

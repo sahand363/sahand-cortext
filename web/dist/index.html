@@ -42,6 +42,7 @@
       <button class="nav-link" data-page="sessions"><span class="nav-icon">◷</span>Sessions <span class="nav-count" id="bot-sessions-count">00</span></button>
       <button class="nav-link" data-page="models"><span class="nav-icon">✳</span>Models & providers</button>
       <button class="nav-link" data-page="orchestration"><span class="nav-icon">⌘</span>AI orchestration <span class="nav-count" id="orch-count">00</span></button>
+      <button class="nav-link" data-page="skills"><span class="nav-icon">✦</span>Skills</button>
       <button class="nav-link" data-page="memory"><span class="nav-icon">◉</span>Topic memory <span class="soon">SOON</span></button>
     </nav>
    
@@ -455,6 +456,18 @@
           <button class="btn btn-quiet btn-small" id="refresh-bot-sessions-btn">↻ Refresh</button>
         </div>
         <div id="sessions-grid" class="sessions-grid"></div>
+      </section>
+
+      <section id="page-skills" class="page module-page hidden">
+        <div class="page-heading">
+          <div>
+            <div class="eyebrow">LEARNED KNOWLEDGE BASE</div>
+            <h1>Skills</h1>
+            <p>Skills the AI learned from links via /learn. They are injected into answers automatically when relevant.</p>
+          </div>
+          <button class="btn btn-quiet btn-small" id="refresh-skills-btn">↻ Refresh</button>
+        </div>
+        <div id="skills-list" class="sessions-grid"></div>
       </section>
 
       <section id="page-usage" class="page module-page hidden"><div class="page-heading"><div><div class="eyebrow">OBSERVABILITY</div><h1>Usage & analytics</h1><p>Understand model activity, response times and token usage.</p></div><span class="status-pill planned">IN DEVELOPMENT</span></div><div class="metric-grid"><div class="metric-card"><span>Tokens used</span><b>—</b><small>Waiting for telemetry module</small></div><div class="metric-card"><span>Requests</span><b>—</b><small>Waiting for telemetry module</small></div><div class="metric-card"><span>Average latency</span><b>—</b><small>Response timing will appear here</small></div></div><div class="chart-placeholder"><div class="chart-bars"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div><span>ACTIVITY VISUALIZATION · COMING SOON</span></div></section>
