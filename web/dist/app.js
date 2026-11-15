@@ -1231,6 +1231,10 @@ function showApp() {
 }
 
 async function checkAuth() {
+  // Read the last page BEFORE any async work: loading data can switch pages,
+  // and switchPage saves to localStorage, which would otherwise overwrite
+  // the page the user was on with "chat" before the restore below reads it.
+  const savedPageAtLoad = localStorage.getItem(DEVICE_STATE_KEYS.page);
   try {
     const s = await api("/api/status");
     showApp();
@@ -1251,7 +1255,7 @@ async function checkAuth() {
       showSetupNudge();
     }
 
-    const savedPage = localStorage.getItem(DEVICE_STATE_KEYS.page);
+    const savedPage = savedPageAtLoad;
     if (savedPage && pageNames[savedPage]) {
       switchPage(savedPage);
     } else {

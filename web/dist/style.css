@@ -124,6 +124,10 @@ a{color:var(--accent);text-decoration:none}
   padding:20px 14px 14px;
   display:flex;
   flex-direction:column;
+  position:sticky;
+  top:0;
+  height:100dvh;
+  overflow-y:auto;
 }
 .brand-row{height:42px;padding:0 8px;display:flex;align-items:center;justify-content:space-between;margin-bottom:18px}
 .new-chat{

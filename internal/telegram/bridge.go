@@ -219,11 +219,41 @@ func (b *BridgeManager) runDeepLearn(client *http.Client, apiBase string, chatID
 	sendTelegramMessage(client, apiBase, chatID, sb.String())
 }
 
+// isPersianRune reports whether r is a Persian/Arabic-script letter.
+func isPersianRune(r rune) bool {
+	return (r >= 0x0600 && r <= 0x06FF) || (r >= 0xFB50 && r <= 0xFDFF) || (r >= 0xFE70 && r <= 0xFEFF)
+}
+
+func isLatinLetter(r rune) bool {
+	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z')
+}
+
+// rtlWrap forces a Telegram message to render right-to-left when it is
+// dominantly Persian/Arabic. Telegram has no dir="auto" (the web chat already
+// uses dir="auto" on its bubbles), so without this, mixed Persian + English
+// text (URLs, skill names, numbers) comes out scrambled. The message is
+// wrapped in a Right-to-Left Isolate so embedded English words and URLs keep
+// their own left-to-right order inside the RTL flow.
+func rtlWrap(text string) string {
+	persian, latin := 0, 0
+	for _, r := range text {
+		if isPersianRune(r) {
+			persian++
+		} else if isLatinLetter(r) {
+			latin++
+		}
+	}
+	if persian > 0 && persian >= latin {
+		return "\u2067" + text + "\u2069"
+	}
+	return text
+}
+
 func sendTelegramMessage(client *http.Client, apiBase string, chatID int64, text string) {
 	url := apiBase + "/sendMessage"
 	payload, _ := json.Marshal(map[string]any{
 		"chat_id": chatID,
-		"text":    text,
+		"text":    rtlWrap(text),
 	})
 	_, _ = client.Post(url, "application/json", bytes.NewReader(payload))
 }
