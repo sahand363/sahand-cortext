@@ -79,9 +79,6 @@ else
   mv -f "${BIN}.tmp" "$BIN"
 fi
 
-# The service cannot start a binary without the execute bit (systemd fails
-# with 203/EXEC "Permission denied" and restarts in a loop), so guarantee it
-# here and fail loudly instead of leaving a broken install behind.
 chmod +x "$BIN"
 if [[ ! -x "$BIN" ]]; then
   echo -e "${R}Installed binary is not executable: $BIN${N}"
@@ -93,7 +90,7 @@ step 80 "Verifying service account and credentials"
 id cortext >/dev/null 2>&1 || useradd --system --home "$DATA" --shell /usr/sbin/nologin cortext
 install -d -o cortext -g cortext -m 750 "$DATA"
 
-if [[ -f "$ENV" ]] && grep -q "^HUB_PASSWORD_HASH=" "$ENV"; then
+if [[ -f "$ENV" ]] && grep -Eq '^HUB_PASSWORD_HASH=\$2[aby]\$' "$ENV"; then
   echo -e "${G}✓ Existing admin credentials and database preserved.${N}"
 else
   read -rp "Panel username [admin]: " username </dev/tty
@@ -109,14 +106,8 @@ else
   [[ "$p1" == "$p2" ]] || { echo "Passwords do not match."; exit 1; }
   hash=$("$BIN" hash-password "$p1")
   umask 077
-  cat > "$ENV" <<EOF
-HUB_ADDR=0.0.0.0:8787
-HUB_DATA_DIR=$DATA
-HUB_WEB_DIR=$DIR/web/dist
-HUB_USERNAME=$username
-HUB_PASSWORD_HASH=$hash
-HUB_COOKIE_SECURE=false
-EOF
+  printf 'HUB_ADDR=0.0.0.0:8787\nHUB_DATA_DIR=%s\nHUB_WEB_DIR=%s/web/dist\nHUB_USERNAME=%s\nHUB_PASSWORD_HASH=%s\nHUB_COOKIE_SECURE=false\n' \
+    "$DATA" "$DIR" "$username" "$hash" > "$ENV"
   chmod 600 "$ENV"
   unset p1 p2 hash
 fi
@@ -151,8 +142,6 @@ systemctl daemon-reload
 systemctl enable "$APP" >/dev/null 2>&1 || true
 systemctl restart "$APP"
 
-# Prove the service actually stays up instead of silently leaving it in a
-# restart loop (e.g. a bad binary). A healthy service is active within seconds.
 sleep 5
 if ! systemctl is-active --quiet "$APP"; then
   echo -e "${R}Service failed to start after install/update.${N}"
