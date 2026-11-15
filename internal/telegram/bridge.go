@@ -17,13 +17,15 @@ import (
 	"github.com/sahand363/sahand-cortext/internal/chat"
 	"github.com/sahand363/sahand-cortext/internal/persona"
 	"github.com/sahand363/sahand-cortext/internal/provider"
-	"github.com/sahand363/sahand-cortext/internal/skill"
+	"	"github.com/sahand363/sahand-cortext/internal/memory"
+	"github.com/sahand363/sahand-cortext/internal/skill""
 )
 
 type BridgeManager struct {
 	dbConn        interface{}
 	personaStore  *persona.Store
 	skillStore    *skill.Store
+	memoryStore   *memory.Store
 	router        *provider.Router
 	keyLookup     func(string) string
 	activePollers map[string]*botPoller
@@ -37,11 +39,12 @@ type botPoller struct {
 	cancel    context.CancelFunc
 }
 
-func NewBridgeManager(db interface{}, personaStore *persona.Store, skillStore *skill.Store, router *provider.Router, keyLookup func(string) string) *BridgeManager {
+func NewBridgeManager(db interface{}, personaStore *persona.Store, skillStore *skill.Store, memoryStore *memory.Store, router *provider.Router, keyLookup func(string) string) *BridgeManager {
 	return &BridgeManager{
 		dbConn:        db,
 		personaStore:  personaStore,
 		skillStore:    skillStore,
+		memoryStore:   memoryStore,
 		router:        router,
 		keyLookup:     keyLookup,
 		activePollers: make(map[string]*botPoller),
@@ -481,6 +484,9 @@ func (b *BridgeManager) handleIncomingMessage(
 	sysPrompt := p.BuildCombinedSystemPrompt()
 	if b.skillStore != nil {
 		sysPrompt += b.skillStore.BuildSkillPromptBlock(ctx, []string{p.ID}, trimmedText)
+	}
+	if b.memoryStore != nil {
+		sysPrompt += b.memoryStore.BuildMemoryPromptBlock(ctx, []string{p.ID}, trimmedText)
 	}
 	if strings.TrimSpace(sysPrompt) != "" {
 		history = append([]provider.Message{{Role: "system", Content: sysPrompt}}, history...)

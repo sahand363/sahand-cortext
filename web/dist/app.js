@@ -64,7 +64,7 @@ const pageNames = {
   models: "Models & providers",
   orchestration: "AI orchestration",
   skills: "Skills",
-  memory: "Topic memory",
+  memory: "Memories",
   usage: "Usage & analytics",
   settings: "Settings"
 };
@@ -1867,6 +1867,97 @@ function viewSkill(id) {
   if (el) el.classList.toggle("hidden");
 }
 
+async function loadMemories() {
+  const listEl = $("memories-list");
+  if (!listEl) return;
+  listEl.innerHTML = "<p class=\"muted-note\">Loading memories…</p>";
+  try {
+    const data = await api("/api/memories");
+    const memories = data.memories || [];
+    const personas = await getSkillPersonas();
+    const scopeSel = $("new-memory-scope");
+    if (scopeSel) {
+      const cur = scopeSel.value || "main";
+      scopeSel.innerHTML = `<option value="main">Main chat</option><option value="all">Everyone</option>` +
+        personas.map(p => `<option value="${escapeHtml(p.id)}">${escapeHtml(p.name)}</option>`).join("");
+      scopeSel.value = [...scopeSel.options].some(o => o.value === cur) ? cur : "main";
+    }
+    if (!memories.length) {
+      listEl.innerHTML = "<p class=\"muted-note\">No memories yet. Chat for a while and the AI will remember durable facts automatically — or add one above, or press “Extract now”.</p>";
+      return;
+    }
+    const scopeName = (sc) => {
+      if (sc === "all") return "Everyone";
+      if (sc === "main") return "Main chat";
+      const p = personas.find(x => x.id === sc);
+      return p ? p.name : sc;
+    };
+    listEl.innerHTML = memories.map(m => {
+      const opts = [`<option value="main" ${m.scope === "main" ? "selected" : ""}>Main chat</option>`,
+        `<option value="all" ${m.scope === "all" ? "selected" : ""}>Everyone</option>`]
+        .concat(personas.map(p => `<option value="${escapeHtml(p.id)}" ${m.scope === p.id ? "selected" : ""}>${escapeHtml(p.name)}</option>`)).join("");
+      return `
+      <div class="session-card">
+        <div><b>${escapeHtml(m.text)}</b></div>
+        <span>Visible to: ${escapeHtml(scopeName(m.scope))}${m.source_session ? " · from a chat" : ""} · ${escapeHtml(m.updated_at || "")}</span>
+        <div class="session-card-tools">
+          <span class="muted-note">Visible to:</span>
+          <select id="memory-scope-${escapeHtml(m.id)}" onchange="changeMemoryScope('${escapeHtml(m.id)}')">${opts}</select>
+          <button class="btn btn-quiet btn-small" onclick="deleteMemory('${escapeHtml(m.id)}')">Delete</button>
+        </div>
+      </div>`;
+    }).join("");
+  } catch (e) {
+    listEl.innerHTML = "<p class=\"muted-note\">Could not load memories.</p>";
+  }
+}
+
+async function changeMemoryScope(id) {
+  const sel = $("memory-scope-" + id);
+  if (!sel) return;
+  await api("/api/memories/" + encodeURIComponent(id), { method: "PUT", body: JSON.stringify({ scope: sel.value }) });
+  loadMemories();
+}
+
+async function deleteMemory(id) {
+  if (!confirm("Delete this memory? The AI will no longer remember this fact.")) return;
+  await api("/api/memories/" + encodeURIComponent(id), { method: "DELETE" });
+  loadMemories();
+}
+
+async function addMemory() {
+  const input = $("new-memory-text");
+  const scopeSel = $("new-memory-scope");
+  const text = input ? input.value.trim() : "";
+  if (!text) return;
+  await api("/api/memories", { method: "POST", body: JSON.stringify({ text, scope: scopeSel ? scopeSel.value : "main" }) });
+  if (input) input.value = "";
+  loadMemories();
+}
+
+async function extractMemories() {
+  await api("/api/memories/extract", { method: "POST", body: JSON.stringify({}) });
+  toast("Extraction started — memories will appear shortly");
+  setTimeout(loadMemories, 8000);
+}
+
+$("refresh-memories-btn")?.addEventListener("click", () => {
+  loadMemories();
+  toast("Memories refreshed");
+});
+
+$("extract-memories-btn")?.addEventListener("click", () => {
+  extractMemories();
+});
+
+$("add-memory-btn")?.addEventListener("click", () => {
+  addMemory();
+});
+
+$("new-memory-text")?.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") addMemory();
+});
+
 $("refresh-skills-btn")?.addEventListener("click", () => {
   loadSkills();
   toast("Skills refreshed");
@@ -2061,6 +2152,7 @@ function switchPage(name, autoRestoreChat = true) {
   }
   if (name === "sessions") loadBotSessions();
   if (name === "skills") loadSkills();
+  if (name === "memory") loadMemories();
   if (name === "settings" || name === "models") {
     refreshStatus();
     if (name === "settings") {

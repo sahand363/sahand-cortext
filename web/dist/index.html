@@ -43,7 +43,7 @@
       <button class="nav-link" data-page="models"><span class="nav-icon">✳</span>Models & providers</button>
       <button class="nav-link" data-page="orchestration"><span class="nav-icon">⌘</span>AI orchestration <span class="nav-count" id="orch-count">00</span></button>
       <button class="nav-link" data-page="skills"><span class="nav-icon">✦</span>Skills</button>
-      <button class="nav-link" data-page="memory"><span class="nav-icon">◉</span>Topic memory <span class="soon">SOON</span></button>
+      <button class="nav-link" data-page="memory"><span class="nav-icon">🧠</span>Memories</button>
     </nav>
    
     <div class="sidebar-bottom">
@@ -444,7 +444,25 @@
         </div>
       </section>
 
-      <section id="page-memory" class="page module-page hidden"><div class="page-heading"><div><div class="eyebrow">CONTEXT THAT COMPOUNDS</div><h1>Topic memory</h1><p>Keep useful context across conversations without carrying everything.</p></div><span class="status-pill planned">IN DEVELOPMENT</span></div><div class="memory-layout"><div class="memory-card"><div class="memory-card-top"><span>◉</span><span class="soon-pill">PREVIEW</span></div><h3>Relevant by design.</h3><p>Topic summaries, important facts and project context can be retrieved when a new conversation needs them.</p><div class="memory-switch-row"><div><b>Topic memory</b><small>Enable cross-session retrieval</small></div><span class="switch disabled"><i></i></span></div></div><div class="memory-card"><div class="memory-card-top"><span>⌁</span></div><h3>Context selection</h3><p>Only information relevant to the current topic should be added to the model context.</p><div class="memory-tags"><span>Topic summaries</span><span>Key facts</span><span>Project context</span></div></div></div></section>
+      <section id="page-memory" class="page module-page hidden">
+        <div class="page-heading">
+          <div>
+            <div class="eyebrow">REUSABLE MEMORY</div>
+            <h1>Memories</h1>
+            <p>Durable facts remembered from earlier conversations. They are injected into answers automatically when relevant.</p>
+          </div>
+          <div style="display:flex;gap:8px">
+            <button class="btn btn-quiet btn-small" id="extract-memories-btn">🧠 Extract now</button>
+            <button class="btn btn-quiet btn-small" id="refresh-memories-btn">↻ Refresh</button>
+          </div>
+        </div>
+        <div style="display:flex;gap:8px;margin-bottom:12px">
+          <input id="new-memory-text" placeholder="Add a fact to remember…" style="flex:1">
+          <select id="new-memory-scope"><option value="main">Main chat</option><option value="all">Everyone</option></select>
+          <button class="btn btn-small" id="add-memory-btn">Add</button>
+        </div>
+        <div id="memories-list" class="sessions-grid"></div>
+      </section>
 
       <section id="page-sessions" class="page module-page hidden">
         <div class="page-heading">
