@@ -396,22 +396,22 @@ func (b *BridgeManager) handleIncomingMessage(
 		sendTelegramMessage(client, apiBase, chatID, "⚠️ Database error loading history.")
 		return
 	}
-	defer rows.Close()
 
 	var history []provider.Message
-	sysPrompt := p.BuildCombinedSystemPrompt()
-	if b.skillStore != nil {
-		sysPrompt += b.skillStore.BuildSkillPromptBlock(ctx, p.ID, trimmedText)
-	}
-	if strings.TrimSpace(sysPrompt) != "" {
-		history = append(history, provider.Message{Role: "system", Content: sysPrompt})
-	}
-
 	for rows.Next() {
 		var role, content string
 		if rows.Scan(&role, &content) == nil {
 			history = append(history, provider.Message{Role: role, Content: content})
 		}
+	}
+	rows.Close() // release the single SQLite connection BEFORE the skill lookup below (which queries the same DB) and before the long AI call — otherwise the skill lookup blocks forever waiting for this connection and every login hangs
+
+	sysPrompt := p.BuildCombinedSystemPrompt()
+	if b.skillStore != nil {
+		sysPrompt += b.skillStore.BuildSkillPromptBlock(ctx, p.ID, trimmedText)
+	}
+	if strings.TrimSpace(sysPrompt) != "" {
+		history = append([]provider.Message{{Role: "system", Content: sysPrompt}}, history...)
 	}
 	promptMessages := chat.TruncateHistory(history, chat.DefaultConfig())
 
