@@ -1,15 +1,19 @@
 const $ = id => document.getElementById(id);
 let currentSession = null, toastTimer, deleteConfirmTimer;
 let sessionsCache = [];
+let botSessionsCache = [];
 
 const DEVICE_STATE_KEYS = {
   page: "cortext_active_page",
+  chatView: "cortext_chat_view_mode", // "list" | "active"
   session: "cortext_active_session",
   orchJob: "cortext_active_orch_job",
   orchSubView: "cortext_active_orch_subview",
   settingsTab: "cortext_active_settings_tab",
   selectedProvider: "cortext_selected_provider"
 };
+
+let chatViewMode = localStorage.getItem(DEVICE_STATE_KEYS.chatView) || "active";
 
 let providersList = [];
 let providerMap = {};
@@ -56,10 +60,10 @@ const contribPalette = [
 
 const pageNames = {
   chat: "Chat",
+  sessions: "Bot Sessions",
   models: "Models & providers",
   orchestration: "AI orchestration",
   memory: "Topic memory",
-  sessions: "Sessions",
   usage: "Usage & analytics",
   settings: "Settings"
 };
@@ -1237,6 +1241,7 @@ async function checkAuth() {
     }
 
     await loadSessions();
+    await loadBotSessions();
     await loadAllConfiguredModels();
     await loadOrchJobsList();
 
@@ -1248,6 +1253,8 @@ async function checkAuth() {
     const savedPage = localStorage.getItem(DEVICE_STATE_KEYS.page);
     if (savedPage && pageNames[savedPage]) {
       switchPage(savedPage);
+    } else {
+      restoreChatLastState();
     }
   } catch {
     showLogin();
@@ -1307,9 +1314,10 @@ function setActiveSelectionUI(provider, modelId) {
 
 function updateProviderBadges() {
   const anyConn = providersList.some(p => p.configured);
-  if ($("header-provider-state")) {
-    $("header-provider-state").textContent = anyConn ? "CONNECTED" : "SETUP";
-    $("header-provider-state").classList.toggle("connected", anyConn);
+  const connDot = $("header-conn-dot");
+  if (connDot) {
+    connDot.classList.toggle("online", anyConn);
+    connDot.title = anyConn ? "Connected & Ready" : "Needs API Key Setup";
   }
   renderProviderTabs();
 
@@ -1403,7 +1411,9 @@ $("models-free-only")?.addEventListener("change", e => {
 });
 
 function showSetupNudge() {
-  if (!currentSession) $("chat-empty")?.classList.remove("hidden");
+  if (!currentSession && chatViewMode !== "list") {
+    $("chat-empty")?.classList.remove("hidden");
+  }
 }
 
 $("login-form").addEventListener("submit", async e => {
@@ -1426,8 +1436,136 @@ $("logout").onclick = async () => {
 };
 
 /* ============================================================================
-   SESSIONS & MINIMAL CHAT
+   STATEFUL WEB CHAT LIST, ACTIVE CONVERSATION & BOT SESSIONS
    ============================================================================ */
+
+function setChatViewMode(mode) {
+  chatViewMode = mode === "list" ? "list" : "active";
+  try { localStorage.setItem(DEVICE_STATE_KEYS.chatView, chatViewMode); } catch {}
+}
+
+function showChatListView() {
+  setChatViewMode("list");
+  $("chat-active")?.classList.add("hidden");
+  $("chat-empty")?.classList.add("hidden");
+  $("chat-list-view")?.classList.remove("hidden");
+  renderCompactChatList();
+}
+
+async function restoreChatLastState() {
+  const savedMode = localStorage.getItem(DEVICE_STATE_KEYS.chatView) || "active";
+  if (savedMode === "list") {
+    showChatListView();
+    return;
+  }
+
+  const savedSessId = localStorage.getItem(DEVICE_STATE_KEYS.session);
+  if (savedSessId && sessionsCache.some(s => s.id === savedSessId)) {
+    await openSession(savedSessId, false);
+    return;
+  }
+
+  if (sessionsCache.length > 0) {
+    showChatListView();
+  } else {
+    $("chat-list-view")?.classList.add("hidden");
+    $("chat-active")?.classList.add("hidden");
+    $("chat-empty")?.classList.remove("hidden");
+  }
+}
+
+function formatCompactDate(ts) {
+  if (!ts) return "";
+  try {
+    const d = new Date(ts.replace(" ", "T") + (ts.includes("Z") ? "" : "Z"));
+    if (isNaN(d.getTime())) return "";
+    const now = new Date();
+    if (d.toDateString() === now.toDateString()) {
+      return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    }
+    return d.toLocaleDateString([], { month: "short", day: "numeric" });
+  } catch {
+    return "";
+  }
+}
+
+function renderCompactChatList() {
+  const container = $("chat-list-container");
+  if (!container) return;
+  container.innerHTML = "";
+
+  if (!sessionsCache.length) {
+    const empty = document.createElement("div");
+    empty.className = "orch-empty-note";
+    empty.textContent = "No web chats yet. Click \"＋ New Chat\" above to start a conversation.";
+    container.appendChild(empty);
+    return;
+  }
+
+  // Pinned first, then sorted by most recent updated_at (already ordered by API, enforced client-side too)
+  const sorted = [...sessionsCache].sort((a, b) => {
+    if (!!a.pinned !== !!b.pinned) return a.pinned ? -1 : 1;
+    return String(b.updated_at || "").localeCompare(String(a.updated_at || ""));
+  });
+
+  sorted.forEach(s => {
+    const row = document.createElement("div");
+    row.className = "compact-chat-row" + (s.pinned ? " is-pinned" : "");
+
+    const main = document.createElement("div");
+    main.className = "compact-chat-main";
+    main.onclick = () => openSession(s.id, true);
+
+    const titleEl = document.createElement("div");
+    titleEl.className = "compact-chat-title";
+    titleEl.setAttribute("dir", "auto");
+    titleEl.textContent = (s.pinned ? "📌 " : "") + s.title;
+
+    const dateEl = document.createElement("span");
+    dateEl.className = "compact-chat-date";
+    dateEl.textContent = formatCompactDate(s.updated_at);
+
+    main.append(titleEl, dateEl);
+
+    const actions = document.createElement("div");
+    actions.className = "compact-chat-actions";
+
+    const pinBtn = document.createElement("button");
+    pinBtn.type = "button";
+    pinBtn.className = "mini-act" + (s.pinned ? " is-pinned" : "");
+    pinBtn.title = s.pinned ? "Unpin" : "Pin to top";
+    pinBtn.textContent = "📌";
+    pinBtn.onclick = e => {
+      e.stopPropagation();
+      togglePinSession(s.id, !s.pinned);
+    };
+
+    const renBtn = document.createElement("button");
+    renBtn.type = "button";
+    renBtn.className = "mini-act";
+    renBtn.title = "Rename";
+    renBtn.textContent = "✎";
+    renBtn.onclick = async e => {
+      e.stopPropagation();
+      await openSession(s.id, false);
+      openRenameBar();
+    };
+
+    const delBtn = document.createElement("button");
+    delBtn.type = "button";
+    delBtn.className = "mini-act danger";
+    delBtn.title = "Delete";
+    delBtn.textContent = "🗑";
+    delBtn.onclick = e => {
+      e.stopPropagation();
+      deleteSessionById(s.id);
+    };
+
+    actions.append(pinBtn, renBtn, delBtn);
+    row.append(main, actions);
+    container.appendChild(row);
+  });
+}
 
 function updateCurrentSessionHeader() {
   const cur = sessionsCache.find(s => s.id === currentSession);
@@ -1446,12 +1584,11 @@ async function loadSessions() {
   const sessions = await api("/api/sessions");
   sessionsCache = sessions || [];
   $("session-list").innerHTML = "";
-  $("sessions-grid").innerHTML = "";
   $("chat-count").textContent = String(sessionsCache.length).padStart(2, "0");
 
   sessionsCache.forEach(s => {
     const row = document.createElement("div");
-    row.className = "session-row" + (s.id === currentSession ? " active" : "");
+    row.className = "session-row" + (s.id === currentSession && chatViewMode === "active" ? " active" : "");
 
     const openBtn = document.createElement("button");
     openBtn.type = "button";
@@ -1459,7 +1596,7 @@ async function loadSessions() {
     openBtn.setAttribute("dir", "auto");
     openBtn.textContent = (s.pinned ? "📌 " : "") + s.title;
     openBtn.onclick = () => {
-      switchPage("chat");
+      switchPage("chat", false);
       openSession(s.id);
     };
 
@@ -1483,8 +1620,8 @@ async function loadSessions() {
     renBtn.textContent = "✎";
     renBtn.onclick = async e => {
       e.stopPropagation();
-      if (currentSession !== s.id) {
-        switchPage("chat");
+      if (currentSession !== s.id || chatViewMode !== "active") {
+        switchPage("chat", false);
         await openSession(s.id, false);
       }
       openRenameBar();
@@ -1503,50 +1640,6 @@ async function loadSessions() {
     actions.append(pinBtn, renBtn, delBtn);
     row.append(openBtn, actions);
     $("session-list").appendChild(row);
-
-    const card = document.createElement("div");
-    card.className = "session-card" + (s.pinned ? " is-pinned" : "");
-
-    const cardMain = document.createElement("div");
-    cardMain.className = "session-card-main";
-    cardMain.onclick = () => { switchPage("chat"); openSession(s.id); };
-
-    const title = document.createElement("b");
-    title.setAttribute("dir", "auto");
-    title.textContent = (s.pinned ? "📌 " : "") + s.title;
-    const meta = document.createElement("span");
-    const bot = getPersonaById(s.persona_id);
-    meta.textContent = bot ? `${bot.icon || "🤖"} ${bot.name} · Open →` : "Open conversation →";
-    cardMain.append(title, meta);
-
-    const cardTools = document.createElement("div");
-    cardTools.className = "session-card-tools";
-
-    const cPin = document.createElement("button");
-    cPin.type = "button";
-    cPin.className = "tool-btn small";
-    cPin.textContent = s.pinned ? "📌 Unpin" : "📌 Pin";
-    cPin.onclick = () => togglePinSession(s.id, !s.pinned);
-
-    const cRen = document.createElement("button");
-    cRen.type = "button";
-    cRen.className = "tool-btn small";
-    cRen.textContent = "✎ Rename";
-    cRen.onclick = async () => {
-      switchPage("chat");
-      await openSession(s.id, false);
-      openRenameBar();
-    };
-
-    const cDel = document.createElement("button");
-    cDel.type = "button";
-    cDel.className = "tool-btn small danger";
-    cDel.textContent = "🗑 Delete";
-    cDel.onclick = () => deleteSessionById(s.id);
-
-    cardTools.append(cPin, cRen, cDel);
-    card.append(cardMain, cardTools);
-    $("sessions-grid").appendChild(card);
   });
 
   if (currentSession && !sessionsCache.some(s => s.id === currentSession)) {
@@ -1554,16 +1647,77 @@ async function loadSessions() {
     try { localStorage.removeItem(DEVICE_STATE_KEYS.session); } catch {}
   }
 
-  if (!currentSession && sessionsCache.length) {
-    const savedSessId = localStorage.getItem(DEVICE_STATE_KEYS.session);
-    const targetSess = sessionsCache.find(s => s.id === savedSessId) || sessionsCache[0];
-    await openSession(targetSess.id, false);
-  } else if (!sessionsCache.length) {
-    $("chat-active").classList.add("hidden");
-    $("chat-empty").classList.remove("hidden");
-  } else {
+  renderCompactChatList();
+  if (chatViewMode === "active" && currentSession) {
     updateCurrentSessionHeader();
   }
+}
+
+async function loadBotSessions() {
+  try {
+    const bots = await api("/api/sessions?bots=true");
+    botSessionsCache = bots || [];
+    if ($("bot-sessions-count")) {
+      $("bot-sessions-count").textContent = String(botSessionsCache.length).padStart(2, "0");
+    }
+    const grid = $("sessions-grid");
+    if (!grid) return;
+    grid.innerHTML = "";
+
+    if (!botSessionsCache.length) {
+      const empty = document.createElement("div");
+      empty.className = "orch-empty-note";
+      empty.textContent = "No Telegram chatbot conversations yet. Once someone messages one of your connected Telegram bots, its session log will appear here.";
+      grid.appendChild(empty);
+      return;
+    }
+
+    botSessionsCache.forEach(s => {
+      const card = document.createElement("div");
+      card.className = "session-card" + (s.pinned ? " is-pinned" : "");
+
+      const cardMain = document.createElement("div");
+      cardMain.className = "session-card-main";
+      cardMain.onclick = async () => {
+        // Preview bot transcript in a toast or modal-free view without hijacking web chat state
+        try {
+          const msgs = await api("/api/messages?session_id=" + encodeURIComponent(s.id));
+          toast(`${s.title}: ${msgs.length} message(s) stored`);
+        } catch {}
+      };
+
+      const title = document.createElement("b");
+      title.setAttribute("dir", "auto");
+      title.textContent = (s.pinned ? "📌 " : "") + s.title;
+
+      const meta = document.createElement("span");
+      const bot = getPersonaById(s.persona_id);
+      const tgChatId = s.id.replace(/^tg-/, "");
+      meta.textContent = `${bot ? `${bot.icon || "🤖"} ${bot.name}` : "Telegram Bot"} · Chat ID: ${tgChatId}`;
+      cardMain.append(title, meta);
+
+      const cardTools = document.createElement("div");
+      cardTools.className = "session-card-tools";
+
+      const cDel = document.createElement("button");
+      cDel.type = "button";
+      cDel.className = "tool-btn small danger";
+      cDel.textContent = "🗑 Clear Bot History";
+      cDel.onclick = async () => {
+        try {
+          await api("/api/sessions?id=" + encodeURIComponent(s.id), { method: "DELETE" });
+          toast("🗑 Bot session history cleared");
+          await loadBotSessions();
+        } catch (err) {
+          toast("Clear failed: " + err.message);
+        }
+      };
+
+      cardTools.appendChild(cDel);
+      card.append(cardMain, cardTools);
+      grid.appendChild(card);
+    });
+  } catch {}
 }
 
 async function newSession(personaId = "") {
@@ -1572,9 +1726,11 @@ async function newSession(personaId = "") {
     body: JSON.stringify({ persona_id: personaId })
   });
   currentSession = s.id;
+  setChatViewMode("active");
   try { localStorage.setItem(DEVICE_STATE_KEYS.session, s.id); } catch {}
-  $("chat-empty").classList.add("hidden");
-  $("chat-active").classList.remove("hidden");
+  $("chat-list-view")?.classList.add("hidden");
+  $("chat-empty")?.classList.add("hidden");
+  $("chat-active")?.classList.remove("hidden");
   $("conversation-title").textContent = s.title || "New conversation";
   $("messages").innerHTML = "";
   await loadSessions();
@@ -1590,10 +1746,12 @@ async function newSession(personaId = "") {
 
 async function openSession(id, refresh = true) {
   currentSession = id;
+  setChatViewMode("active");
   try { localStorage.setItem(DEVICE_STATE_KEYS.session, id); } catch {}
   const msgs = await api("/api/messages?session_id=" + encodeURIComponent(id));
-  $("chat-empty").classList.add("hidden");
-  $("chat-active").classList.remove("hidden");
+  $("chat-list-view")?.classList.add("hidden");
+  $("chat-empty")?.classList.add("hidden");
+  $("chat-active")?.classList.remove("hidden");
   $("messages").innerHTML = "";
   msgs.forEach(addMessage);
   if (refresh) await loadSessions();
@@ -1625,9 +1783,19 @@ function openRenameBar() {
 }
 
 function closeRenameBar() {
-  $("rename-form").classList.add("hidden");
-  $("title-display-row").classList.remove("hidden");
+  $("rename-form")?.classList.add("hidden");
+  $("title-display-row")?.classList.remove("hidden");
 }
+
+$("back-to-chat-list-btn")?.addEventListener("click", () => {
+  showChatListView();
+});
+
+$("chat-list-new-btn")?.addEventListener("click", () => newSession());
+$("refresh-bot-sessions-btn")?.addEventListener("click", () => {
+  loadBotSessions();
+  toast("Bot sessions refreshed");
+});
 
 $("rename-session-btn").onclick = () => openRenameBar();
 $("conversation-title").onclick = () => openRenameBar();
@@ -1681,12 +1849,16 @@ async function deleteSessionById(id) {
   try {
     await api("/api/sessions?id=" + encodeURIComponent(id), { method: "DELETE" });
     resetDeleteButton();
-    if (currentSession === id) {
+    const wasCurrent = currentSession === id;
+    if (wasCurrent) {
       currentSession = null;
       try { localStorage.removeItem(DEVICE_STATE_KEYS.session); } catch {}
     }
     toast("🗑 Conversation deleted");
     await loadSessions();
+    if (wasCurrent) {
+      showChatListView();
+    }
   } catch (err) {
     toast("Delete failed: " + err.message);
   }
@@ -1712,7 +1884,10 @@ function resizeMessageInput() {
 
 $("message-input").addEventListener("input", resizeMessageInput);
 
-$("new-chat").onclick = $("hero-start").onclick = $("clear-view").onclick = $("sessions-new").onclick = () => newSession();
+$("new-chat").onclick = $("hero-start").onclick = $("clear-view").onclick = () => {
+  switchPage("chat", false);
+  newSession();
+};
 $("refresh-sessions").onclick = () => loadSessions();
 
 $("model").addEventListener("change", () => {
@@ -1793,7 +1968,7 @@ function switchSettingsTab(tabId) {
 
 document.querySelectorAll(".settings-tab").forEach(b => b.onclick = () => switchSettingsTab(b.dataset.tab));
 
-function switchPage(name) {
+function switchPage(name, autoRestoreChat = true) {
   try { localStorage.setItem(DEVICE_STATE_KEYS.page, name); } catch {}
   document.querySelectorAll(".page").forEach(p => p.classList.add("hidden"));
   $("page-" + name).classList.remove("hidden");
@@ -1801,7 +1976,10 @@ function switchPage(name) {
   $("breadcrumb-page").textContent = pageNames[name];
   setMobileSidebarOpen(false);
 
-  if (name === "sessions") loadSessions();
+  if (name === "chat" && autoRestoreChat) {
+    restoreChatLastState();
+  }
+  if (name === "sessions") loadBotSessions();
   if (name === "settings" || name === "models") {
     refreshStatus();
     if (name === "settings") {
@@ -1819,8 +1997,9 @@ function switchPage(name) {
   }
 }
 
-document.querySelectorAll(".nav-link").forEach(b => b.addEventListener("click", () => switchPage(b.dataset.page)));
-document.querySelectorAll("[data-goto]").forEach(b => b.addEventListener("click", () => switchPage(b.dataset.goto)));
+document.querySelectorAll(".nav-link").forEach(b => b.addEventListener("click", () => switchPage(b.dataset.page, true)));
+document.querySelectorAll("[data-goto]").forEach(b => b.addEventListener("click", () => switchPage(b.dataset.goto, true)));
+if ($("topbar-chat-btn")) $("topbar-chat-btn").onclick = () => switchPage("chat", true);
 if ($("setup-open")) $("setup-open").onclick = () => switchPage("settings");
 
 async function refreshStatus() {
@@ -2612,7 +2791,6 @@ function renderOrchParticipantsBuilder() {
     const gridRow = document.createElement("div");
     gridRow.className = "orch-part-grid";
 
-    // Optional Persona / Chatbot selector
     const botWrap = document.createElement("label");
     const botSpan = document.createElement("span");
     botSpan.textContent = "Chatbot Persona (Optional)";
@@ -3991,7 +4169,7 @@ function formatShortTimestamp(ts) {
 document.addEventListener("keydown", e => {
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
     e.preventDefault();
-    switchPage("chat");
+    switchPage("chat", false);
     newSession();
   }
   if (e.key === "Escape") {
