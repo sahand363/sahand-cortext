@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -43,6 +44,83 @@ type App struct {
 	orchStorage    *orchestration.Storage
 	orchEngine     *orchestration.CollaborationEngine
 	orchPool       *orchestration.WorkerPool
+	loginLimit     *loginLimiter
+}
+
+// loginLimiter blocks an IP after repeated failed logins. It is in-memory on
+// purpose: a server restart clears a lockout, so the owner can never lock
+// themself out permanently.
+type loginLimiter struct {
+	mu       sync.Mutex
+	attempts map[string]*loginAttempt
+}
+
+type loginAttempt struct {
+	count       int
+	firstSeen   time.Time
+	lockedUntil time.Time
+}
+
+const (
+	loginMaxAttempts = 5
+	loginWindow      = 15 * time.Minute
+	loginLockout     = 15 * time.Minute
+)
+
+func newLoginLimiter() *loginLimiter {
+	return &loginLimiter{attempts: map[string]*loginAttempt{}}
+}
+
+func (l *loginLimiter) locked(ip string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	a, ok := l.attempts[ip]
+	if !ok {
+		return false
+	}
+	now := time.Now()
+	if !a.lockedUntil.IsZero() {
+		if now.Before(a.lockedUntil) {
+			return true
+		}
+		// Lock expired: fresh start.
+		delete(l.attempts, ip)
+		return false
+	}
+	if now.Sub(a.firstSeen) > loginWindow {
+		delete(l.attempts, ip)
+	}
+	return false
+}
+
+func (l *loginLimiter) recordFailure(ip string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := time.Now()
+	a, ok := l.attempts[ip]
+	if !ok || now.Sub(a.firstSeen) > loginWindow {
+		a = &loginAttempt{count: 0, firstSeen: now}
+		l.attempts[ip] = a
+	}
+	a.count++
+	if a.count >= loginMaxAttempts {
+		a.lockedUntil = now.Add(loginLockout)
+	}
+}
+
+func (l *loginLimiter) recordSuccess(ip string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	delete(l.attempts, ip)
+}
+
+// clientIP returns the remote address without the port.
+func clientIP(r *http.Request) string {
+	ip := r.RemoteAddr
+	if h, _, err := net.SplitHostPort(ip); err == nil {
+		ip = h
+	}
+	return strings.TrimSpace(ip)
 }
 
 type Session struct {
@@ -468,10 +546,21 @@ func (a *App) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	hash := []byte(os.Getenv("HUB_PASSWORD_HASH"))
+	ip := clientIP(r)
+	if a.loginLimit != nil && a.loginLimit.locked(ip) {
+		jsonOut(w, 429, map[string]string{"error": "Too many failed login attempts. Try again later."})
+		return
+	}
 	if body.Username != env("HUB_USERNAME", "admin") || len(hash) == 0 || bcrypt.CompareHashAndPassword(hash, []byte(body.Password)) != nil {
+		if a.loginLimit != nil {
+			a.loginLimit.recordFailure(ip)
+		}
 		time.Sleep(500 * time.Millisecond)
 		jsonOut(w, 401, map[string]string{"error": "Invalid username or password"})
 		return
+	}
+	if a.loginLimit != nil {
+		a.loginLimit.recordSuccess(ip)
 	}
 	token, err := randomToken()
 	if err != nil {
@@ -2090,6 +2179,7 @@ func main() {
 		personaStore:   personaStore,
 		skillStore:     skillStore,
 		orchStorage:    orchStorage,
+		loginLimit:     newLoginLimiter(),
 	}
 
 	tgBridge := telegram.NewBridgeManager(db, personaStore, skillStore, router, app.providerKey)

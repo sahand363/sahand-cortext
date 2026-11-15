@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"html"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -366,13 +367,130 @@ var (
 )
 
 // FetchAndCleanURL visits a webpage directly from the Go server and extracts clean readable text.
-func FetchAndCleanURL(ctx context.Context, rawURL string) (string, error) {
+// isBlockedIP reports whether ip must never be fetched: private, loopback,
+// link-local (including the cloud metadata address 169.254.169.254),
+// multicast, or unspecified addresses.
+func isBlockedIP(ip net.IP) bool {
+	if ip == nil {
+		return true
+	}
+	return ip.IsUnspecified() || ip.IsLoopback() || ip.IsPrivate() ||
+		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast()
+}
+
+// validateFetchHost rejects hostnames that are local by name, and resolves
+// every other hostname to IPs and rejects it if any of them is blocked.
+// It is used both before the first request and on every redirect, so a
+// redirect to an internal address is refused too.
+func validateFetchHost(ctx context.Context, host string) error {
+	host = strings.ToLower(strings.TrimSpace(host))
+	if host == "" {
+		return errors.New("missing host")
+	}
+	// Local by name, without needing a DNS lookup.
+	if host == "localhost" || strings.HasSuffix(host, ".localhost") ||
+		strings.HasSuffix(host, ".local") || strings.HasSuffix(host, ".internal") ||
+		strings.HasSuffix(host, ".lan") || strings.HasSuffix(host, ".home") ||
+		strings.HasSuffix(host, ".corp") {
+		return errors.New("refusing to fetch a local address")
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if isBlockedIP(ip) {
+			return errors.New("refusing to fetch a private or local address")
+		}
+		return nil
+	}
+	ips, err := net.DefaultResolver.LookupIP(ctx, "ip", host)
+	if err != nil {
+		return fmt.Errorf("cannot resolve host: %w", err)
+	}
+	for _, ip := range ips {
+		if isBlockedIP(ip) {
+			return errors.New("refusing to fetch a private or local address")
+		}
+	}
+	return nil
+}
+
+// validateFetchURL parses a URL and checks its scheme, host, and that it
+// carries no embedded credentials.
+func validateFetchURL(ctx context.Context, rawURL string) (*url.URL, error) {
 	u, err := url.Parse(strings.TrimSpace(rawURL))
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		return "", errors.New("please provide a valid http:// or https:// URL")
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil {
+		return nil, errors.New("please provide a valid http:// or https:// URL")
+	}
+	if err := validateFetchHost(ctx, u.Hostname()); err != nil {
+		return nil, err
+	}
+	return u, nil
+}
+
+// safeDialContext resolves the host and dials only an allowed IP. Dialing by
+// IP (instead of letting the dialer resolve again) also closes the
+// DNS-rebinding gap where the address could change between validation and
+// connect. TLS still uses the hostname for SNI and certificate verification.
+func safeDialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateFetchHost(ctx, host); err != nil {
+		return nil, err
+	}
+	ips, err := net.DefaultResolver.LookupIP(ctx, "ip", host)
+	if err != nil {
+		return nil, err
+	}
+	d := &net.Dialer{Timeout: 10 * time.Second}
+	var lastErr error
+	for _, ip := range ips {
+		if isBlockedIP(ip) {
+			continue
+		}
+		conn, err := d.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
+		if err == nil {
+			return conn, nil
+		}
+		lastErr = err
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, errors.New("no allowed address for host")
+}
+
+// safeFetchClient returns an HTTP client that never fetches a private,
+// loopback, or internal address, and re-validates every redirect target.
+func safeFetchClient() *http.Client {
+	return &http.Client{
+		Timeout: 25 * time.Second,
+		Transport: &http.Transport{
+			Proxy:                 http.ProxyFromEnvironment,
+			DialContext:           safeDialContext,
+			MaxIdleConns:          10,
+			IdleConnTimeout:       30 * time.Second,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ExpectContinueTimeout: 1 * time.Second,
+		},
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 5 {
+				return errors.New("too many redirects")
+			}
+			if _, err := validateFetchURL(req.Context(), req.URL.String()); err != nil {
+				return err
+			}
+			return nil
+		},
+	}
+}
+
+func FetchAndCleanURL(ctx context.Context, rawURL string) (string, error) {
+	u, err := validateFetchURL(ctx, rawURL)
+	if err != nil {
+		return "", err
 	}
 
-	client := &http.Client{Timeout: 25 * time.Second}
+	client := safeFetchClient()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
 		return "", err
@@ -517,12 +635,12 @@ var hrefRe = regexp.MustCompile(`(?i)<a[^>]+href\s*=\s*["']([^"']+)["']`)
 // ExtractPageLinks fetches a page and returns its same-domain links, in order,
 // de-duplicated and capped at maxLinks. Only http(s) links on the same host are kept.
 func ExtractPageLinks(ctx context.Context, rawURL string, maxLinks int) ([]string, error) {
-	u, err := url.Parse(strings.TrimSpace(rawURL))
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		return nil, errors.New("please provide a valid http:// or https:// URL")
+	u, err := validateFetchURL(ctx, rawURL)
+	if err != nil {
+		return nil, err
 	}
 
-	client := &http.Client{Timeout: 25 * time.Second}
+	client := safeFetchClient()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
 		return nil, err

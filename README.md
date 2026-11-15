@@ -1,8 +1,10 @@
-# Sahand-CorText · v0.2.2
+# Sahand-CorText · v0.9.0
 
 **A private, secure, single-user AI workspace hosted on your own Ubuntu server.**
 
 Sahand-CorText provides a private AI gateway where browser communication goes directly to your self-hosted server, while upstream AI provider requests are routed server-side to protect your client IP address.
+
+It supports many providers through one registry — AIPrime, Google Gemini, Anthropic, OpenAI-compatible endpoints, and custom providers — plus multi-model orchestration, a skills engine that learns from web pages, Telegram bots, and personas.
 
 ---
 
@@ -19,7 +21,7 @@ curl -fsSL https://raw.githubusercontent.com/sahand363/sahand-cortext/main/insta
 The installer automatically:
 
 - Checks and installs required prerequisites.
-- Downloads the latest optimized pre-built release.
+- Downloads the latest optimized pre-built release (linux/amd64; on ARM64 it builds locally).
 - Creates a restricted system service account (`cortext`).
 - Registers a sandboxed `systemd` service.
 - Configures the application environment.
@@ -61,9 +63,11 @@ sudo cortext update
 
 ---
 
-## ✳️ Gemini AI Setup & Model Verification
+## ✳️ AI Providers & Model Verification
 
-Follow these steps to connect your Google Gemini account:
+Sahand-CorText connects to many providers through one registry. AIPrime (`https://api.aiprime.shop/v1`) is featured — `glm-5.3-flash` is the recommended model — and Google Gemini, Anthropic, OpenAI-compatible endpoints, and custom providers are supported too.
+
+Follow these steps to connect a provider:
 
 1. Open your browser and navigate to your server panel:
 
@@ -73,11 +77,11 @@ Follow these steps to connect your Google Gemini account:
 
 2. Log in using your administrator credentials.
 
-3. Navigate to **Settings → AI Providers**, or click the **Set up Gemini** banner.
+3. Navigate to **Settings → AI Providers** and pick a provider.
 
-4. Enter your **Google AI Studio API Key** and click **Save Key & Load Models**.
+4. Enter your **API key** for that provider and click **Save Key & Load Models**.
 
-5. Sahand-CorText queries Google's live API model catalog and displays the models available to your API key.
+5. Sahand-CorText queries the provider's live model catalog and displays the models available to your API key.
 
 6. Click any model card to perform a live generation test.
 
@@ -89,16 +93,18 @@ Follow these steps to connect your Google Gemini account:
 
    The successfully tested model is automatically selected as your active chat model.
 
+Models can be enabled or disabled individually (including a batch enable/disable for a whole provider), so you can keep only the 1–2 models you actually use active.
+
 ---
 
 ## 🛠️ Technology Stack
 
 | Component | Technology |
 |---|---|
-| **Server OS** | Ubuntu Linux (AMD64 & ARM64) |
-| **Backend** | Go (`net/http`, standard library concurrency) |
-| **Database** | Embedded SQLite (`modernc.org/sqlite`, WAL mode) |
-| **Authentication** | Bcrypt password hashing + persistent SQLite sessions |
+| **Server OS** | Ubuntu Linux (AMD64 pre-built; ARM64 builds locally via the installer) |
+| **Backend** | Go 1.23 (`net/http`, standard library concurrency) |
+| **Database** | Embedded SQLite (`modernc.org/sqlite`, WAL mode, single connection) |
+| **Authentication** | Bcrypt password hashing + persistent SQLite sessions, with login rate limiting |
 | **Frontend** | Vanilla HTML5, CSS3, and JavaScript |
 | **Deployment** | Pre-built static binary via GitHub Actions |
 | **Service Management** | Sandboxed `systemd` service |
@@ -111,8 +117,20 @@ Follow these steps to connect your Google Gemini account:
 ### 🔐 Private AI Gateway
 All upstream AI provider requests originate from your Ubuntu server rather than your local browser, keeping your client IP address separate from provider-facing requests.
 
-### 🔍 Live Model Discovery & Testing
-Dynamically discovers available Gemini `generateContent` models based on your API key and verifies model availability through live generation tests.
+### 🤖 Multi-Provider Registry
+AIPrime, Gemini, Anthropic, OpenAI-compatible, and custom providers behind one registry, with per-model enable/disable and live model discovery and testing.
+
+### 🧑‍🤝‍🧑 AI Orchestration
+Multi-model collaboration with intelligent task routing across specialized models, pause/resume, mid-job participant and model swapping, and a live progress timeline.
+
+### 📚 Skills Engine
+Learn a web page as a skill (`/learn`), or a page plus its same-site links (`/learn-deep`, up to 10 pages). Skills are managed on the **Skills** page and can be assigned to the main chat, to one or many Telegram bots, or to everyone. URL fetching blocks private, loopback, and internal addresses (SSRF protection).
+
+### 💬 Telegram Bots
+Long-polling Telegram bridge: each bot has its own persona, model, and skills. Commands: `/start`, `/help`, `/learn`, `/learn-deep`, `/skills`, `/new`, `/status`. Bot replies render mixed Persian/English correctly (RTL isolation).
+
+### 👤 Personas & Voice Trainer
+Personas with their own system prompt, voice, and allowed models, usable in the web chat and in Telegram bots.
 
 ### 💬 Persistent Conversations
 - SQLite-backed conversation storage.
@@ -124,6 +142,7 @@ Dynamically discovers available Gemini `generateContent` models based on your AP
 - Bcrypt password hashing.
 - Persistent SQLite-backed sessions.
 - Multi-day session persistence across server restarts.
+- Failed-login delay plus per-IP rate limiting (temporary lockout after repeated failures).
 
 ### 👤 Single-User Architecture
 Designed as a private personal AI workspace rather than a public, multi-tenant SaaS platform.
@@ -134,8 +153,8 @@ Designed as a private personal AI workspace rather than a public, multi-tenant S
 
 The following modules are planned for future releases:
 
-- [ ] **Multi-Provider Registry:** Native integrations for OpenAI (GPT), Anthropic (Claude), DeepSeek, and custom OpenAI-compatible endpoints.
-- [ ] **AI Orchestration Layer:** Multi-agent coordination with intelligent task routing across specialized models.
+- [x] **Multi-Provider Registry:** Native integrations for AIPrime, OpenAI (GPT), Anthropic (Claude), DeepSeek, and custom OpenAI-compatible endpoints.
+- [x] **AI Orchestration Layer:** Multi-agent coordination with intelligent task routing across specialized models.
 - [ ] **Topic-Based Memory:** Cross-session vector or keyword-based memory retrieval for long-term project context.
 - [ ] **Token & Cost Telemetry:** Usage analytics, token consumption tracking, and request latency history.
 
@@ -160,6 +179,7 @@ The following modules are planned for future releases:
 - **Use Strong Credentials:** Choose a strong administrator password and rotate it periodically through the SSH Control Center.
 - **Keep Updated:** Regularly install the latest releases using `sudo cortext update`.
 - **Protect API Keys:** Never share your provider API keys or expose them in frontend code.
+- **Note:** Provider API keys are stored in the local SQLite database. Keep the database file private and back it up securely.
 
 ---
 
