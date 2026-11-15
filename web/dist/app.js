@@ -1056,8 +1056,8 @@ function syncCustomProviderSpecDefaults() {
   const isAnt = spec === "anthropic_compat";
   if ($("cp-base-url") && !$("cp-base-url").dataset.touched) {
     $("cp-base-url").placeholder = isAnt
-      ? "[https://api.anthropic.com/v1](https://api.anthropic.com/v1) (or Anthropic-compatible proxy)"
-      : "[https://api.openai.com/v1](https://api.openai.com/v1) (or ChatGPT/Groq/Ollama endpoint…)";
+      ? "https://api.anthropic.com/v1 (or Anthropic-compatible proxy)"
+      : "https://api.openai.com/v1 (or ChatGPT/Groq/Ollama endpoint…)";
   }
   if (editingCustomProviderId === "__new__" && $("cp-auth-type")) {
     $("cp-auth-type").value = isAnt ? "header" : "bearer";
@@ -1619,58 +1619,6 @@ async function loadSessions() {
   }
 }
 
-    const actions = document.createElement("div");
-    actions.className = "session-row-actions";
-
-    const pinBtn = document.createElement("button");
-    pinBtn.type = "button";
-    pinBtn.className = "mini-act" + (s.pinned ? " is-pinned" : "");
-    pinBtn.title = s.pinned ? "Unpin" : "Pin to top";
-    pinBtn.textContent = "📌";
-    pinBtn.onclick = e => {
-      e.stopPropagation();
-      togglePinSession(s.id, !s.pinned);
-    };
-
-    const renBtn = document.createElement("button");
-    renBtn.type = "button";
-    renBtn.className = "mini-act";
-    renBtn.title = "Rename";
-    renBtn.textContent = "✎";
-    renBtn.onclick = async e => {
-      e.stopPropagation();
-      if (currentSession !== s.id || chatViewMode !== "active") {
-        switchPage("chat", false);
-        await openSession(s.id, false);
-      }
-      openRenameBar();
-    };
-
-    const delBtn = document.createElement("button");
-    delBtn.type = "button";
-    delBtn.className = "mini-act danger";
-    delBtn.title = "Delete conversation";
-    delBtn.textContent = "×";
-    delBtn.onclick = e => {
-      e.stopPropagation();
-      deleteSessionById(s.id);
-    };
-
-    actions.append(pinBtn, renBtn, delBtn);
-    row.append(openBtn, actions);
-    $("session-list").appendChild(row);
-  });
-
-  if (currentSession && !sessionsCache.some(s => s.id === currentSession)) {
-    currentSession = null;
-    try { localStorage.removeItem(DEVICE_STATE_KEYS.session); } catch {}
-  }
-
-  renderCompactChatList();
-  if (chatViewMode === "active" && currentSession) {
-    updateCurrentSessionHeader();
-  }
-}
 
 async function loadBotSessions() {
   try {
