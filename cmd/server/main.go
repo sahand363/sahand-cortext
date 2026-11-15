@@ -29,7 +29,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const AppVersion = "0.7.0"
+const AppVersion = "0.8.0"
 
 type App struct {
 	db           *sql.DB
@@ -47,6 +47,7 @@ type Session struct {
 	Title     string `json:"title"`
 	PersonaID string `json:"persona_id"`
 	Pinned    bool   `json:"pinned"`
+	IsBot     bool   `json:"is_bot"`
 	UpdatedAt string `json:"updated_at"`
 }
 
@@ -1079,8 +1080,14 @@ func statusRank(s string) int {
 	}
 }
 
+// Separate Web Panel Sessions from Telegram Bot Sessions
 func (a *App) listSessions(w http.ResponseWriter, r *http.Request) {
-	rows, err := a.db.Query(`SELECT id,title,coalesce(persona_id,''),pinned,updated_at FROM sessions ORDER BY pinned DESC, updated_at DESC`)
+	onlyBots := r.URL.Query().Get("bots") == "true"
+	query := `SELECT id, title, coalesce(persona_id,''), pinned, updated_at FROM sessions WHERE id NOT LIKE 'tg-%' ORDER BY pinned DESC, updated_at DESC`
+	if onlyBots {
+		query = `SELECT id, title, coalesce(persona_id,''), pinned, updated_at FROM sessions WHERE id LIKE 'tg-%' ORDER BY pinned DESC, updated_at DESC`
+	}
+	rows, err := a.db.Query(query)
 	if err != nil {
 		jsonOut(w, 500, map[string]string{"error": "database error"})
 		return
@@ -1092,6 +1099,7 @@ func (a *App) listSessions(w http.ResponseWriter, r *http.Request) {
 		var pinnedInt int
 		if rows.Scan(&s.ID, &s.Title, &s.PersonaID, &pinnedInt, &s.UpdatedAt) == nil {
 			s.Pinned = pinnedInt != 0
+			s.IsBot = strings.HasPrefix(s.ID, "tg-")
 			out = append(out, s)
 		}
 	}
@@ -1123,7 +1131,7 @@ func (a *App) createSession(w http.ResponseWriter, r *http.Request) {
 		jsonOut(w, 500, map[string]string{"error": "database error"})
 		return
 	}
-	jsonOut(w, 201, Session{ID: id, Title: title, PersonaID: personaID, Pinned: false})
+	jsonOut(w, 201, Session{ID: id, Title: title, PersonaID: personaID, Pinned: false, IsBot: false})
 }
 
 func (a *App) updateSession(w http.ResponseWriter, r *http.Request) {
@@ -1175,6 +1183,7 @@ func (a *App) updateSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.Pinned = pinnedInt != 0
+	s.IsBot = strings.HasPrefix(s.ID, "tg-")
 	jsonOut(w, 200, s)
 }
 
@@ -1230,7 +1239,7 @@ func (a *App) sendMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var currentTitle, sessionPersonaID string
-	if a.db.QueryRow(`SELECT title, coalesce(persona_id,'') FROM sessions WHERE id=?`, body.SessionID).Scan(&currentTitle, &sessionPersonaID) != nil {
+	if a.db.QueryRow(`SELECT title, coalesce(persona_id,'') FROM sessions WHERE id=?`, body.SessionID).Scan(¤tTitle, &sessionPersonaID) != nil {
 		jsonOut(w, 404, map[string]string{"error": "session not found"})
 		return
 	}
@@ -1829,7 +1838,6 @@ func main() {
 		orchStorage:  orchStorage,
 	}
 
-	// Initialize and start background Telegram Bot Bridge manager
 	tgBridge := telegram.NewBridgeManager(db, personaStore, router, app.providerKey)
 	bridgeCtx, bridgeCancel := context.WithCancel(context.Background())
 	tgBridge.StartSync(bridgeCtx)
@@ -1897,11 +1905,11 @@ func main() {
 	}))
 
 	mux.HandleFunc("/api/orchestration/jobs", app.auth(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet {
+		if r.Method == http.MethodGet:
 			app.orchListJobs(w, r)
-		} else if r.Method == http.MethodPost {
+		else if r.Method == http.MethodPost:
 			app.orchCreateJob(w, r)
-		} else {
+		else {
 			http.Error(w, "method not allowed", 405)
 		}
 	}))
