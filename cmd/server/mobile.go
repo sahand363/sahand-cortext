@@ -666,6 +666,25 @@ func (a *App) mobileModels(w http.ResponseWriter, r *http.Request) {
 	if resp.Models == nil {
 		resp.Models = []ModelInfo{}
 	}
+	// The app's model picker must show exactly what the web main
+	// chat shows. The web chat limits the list to the chat model
+	// scope (mode "selected" + allowed_models, chosen in the web UI);
+	// the app only knows the global Enabled flag, so the hub applies
+	// the scope here. When the mode is "all", every enabled model
+	// stays, matching the web chat.
+	if scope := a.loadChatModelScope(); scope.Mode == "selected" {
+		allowed := map[string]bool{}
+		for _, key := range scope.AllowedModels {
+			allowed[key] = true
+		}
+		kept := make([]ModelInfo, 0, len(resp.Models))
+		for _, m := range resp.Models {
+			if allowed[m.Provider+"::"+m.ID] {
+				kept = append(kept, m)
+			}
+		}
+		resp.Models = kept
+	}
 	a.writeMobileEncrypted(w, map[string]any{
 		"models":          resp.Models,
 		"active_provider": resp.ActiveProvider,
