@@ -64,6 +64,7 @@ const pageNames = {
   models: "Models & providers",
   orchestration: "AI orchestration",
   skills: "Skills",
+  personas: "Personas",
   memory: "Memories",
   mobile: "Mobile App",
   usage: "Usage & analytics",
@@ -1834,6 +1835,129 @@ async function loadSkills() {
   }
 }
 
+/* ============================================================================
+   PERSONAS PAGE (simple manager: list / create / edit / delete)
+   The full editor (voice trainer, model allowlists, Telegram) lives in
+   Settings → Chatbots & personas. This page only touches name,
+   description and system instructions — and when editing it sends the
+   persona's FULL stored object back (with the three fields replaced),
+   so the voice blueprint, examples and other advanced settings are
+   never wiped by a simple rename.
+   ============================================================================ */
+
+let editingPersonaPageId = null;
+let editingPersonaPageFull = null;
+
+async function loadPersonasPage() {
+  const listEl = $("personas-page-list");
+  if (!listEl) return;
+  listEl.innerHTML = "<p class=\"muted-note\">Loading personas…</p>";
+  try {
+    const data = await api("/api/personas");
+    const list = data.personas || [];
+    hydratePersonas(list); // keep the Chat dropdown + Settings grid in sync
+    if (!list.length) {
+      listEl.innerHTML = "<p class=\"muted-note\">No personas yet. Create one — give it a name and instructions — and it appears in Chat and in the Android app.</p>";
+      return;
+    }
+    listEl.innerHTML = list.map(p => {
+      const prompt = (p.system_prompt || "");
+      return `
+      <div class="session-card">
+        <div><b>${escapeHtml(p.icon || "🤖")} ${escapeHtml(p.name)}</b><span>${escapeHtml(p.description || "")}</span></div>
+        <span>${escapeHtml(prompt.slice(0, 160))}${prompt.length > 160 ? "…" : ""}</span>
+        <div class="session-card-tools">
+          <button class="btn btn-quiet btn-small" onclick="openPersonaPageEditor('${escapeHtml(p.id)}')">Edit</button>
+          <button class="btn btn-quiet btn-small" onclick="deletePersonaPage('${escapeHtml(p.id)}')">Delete</button>
+        </div>
+      </div>`;
+    }).join("");
+  } catch (e) {
+    listEl.innerHTML = "<p class=\"muted-note\">Could not load personas.</p>";
+  }
+}
+
+async function openPersonaPageEditor(id) {
+  const form = $("persona-page-form");
+  if (!form) return;
+  editingPersonaPageId = id || null;
+  editingPersonaPageFull = null;
+  if (id) {
+    try {
+      const p = await api("/api/personas/" + encodeURIComponent(id));
+      editingPersonaPageFull = p;
+      $("persona-page-name").value = p.name || "";
+      $("persona-page-desc").value = p.description || "";
+      $("persona-page-prompt").value = p.system_prompt || "";
+      $("persona-page-form-title").textContent = "Edit Persona · " + (p.name || "");
+    } catch (e) {
+      toast("Could not load that persona");
+      return;
+    }
+  } else {
+    $("persona-page-name").value = "";
+    $("persona-page-desc").value = "";
+    $("persona-page-prompt").value = "";
+    $("persona-page-form-title").textContent = "New Persona";
+  }
+  form.classList.remove("hidden");
+  form.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  $("persona-page-name").focus();
+}
+
+function closePersonaPageEditor() {
+  $("persona-page-form")?.classList.add("hidden");
+  editingPersonaPageId = null;
+  editingPersonaPageFull = null;
+}
+
+async function deletePersonaPage(id) {
+  const p = getPersonaById(id);
+  if (!confirm(`Delete persona "${p ? p.name : id}"? Chats using it switch back to the Default Assistant.`)) return;
+  try {
+    const res = await api("/api/personas/" + encodeURIComponent(id), { method: "DELETE" });
+    if (res.personas) hydratePersonas(res.personas);
+    toast("Persona deleted");
+    loadPersonasPage();
+  } catch (e) {
+    toast("Could not delete persona: " + (e.message || e));
+  }
+}
+
+$("new-persona-page-btn")?.addEventListener("click", () => openPersonaPageEditor(null));
+$("cancel-persona-page-btn")?.addEventListener("click", () => closePersonaPageEditor());
+$("refresh-personas-page-btn")?.addEventListener("click", () => loadPersonasPage());
+$("persona-page-form")?.addEventListener("submit", async e => {
+  e.preventDefault();
+  const name = $("persona-page-name").value.trim();
+  if (!name) {
+    toast("Give the persona a name");
+    return;
+  }
+  const btn = $("save-persona-page-btn");
+  btn.disabled = true;
+  try {
+    // Edit: send the full stored persona back with the three fields
+    // replaced, so voice/examples/model settings survive. Create:
+    // only the three fields (the rest take their defaults).
+    const payload = editingPersonaPageFull
+      ? { ...editingPersonaPageFull, name, description: $("persona-page-desc").value.trim(), system_prompt: $("persona-page-prompt").value.trim() }
+      : { name, description: $("persona-page-desc").value.trim(), system_prompt: $("persona-page-prompt").value.trim() };
+    const res = await api("/api/personas", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
+    if (res.personas) hydratePersonas(res.personas);
+    toast(editingPersonaPageId ? "Persona updated" : "Persona created");
+    closePersonaPageEditor();
+    loadPersonasPage();
+  } catch (err) {
+    toast("Could not save persona: " + (err.message || err));
+  } finally {
+    btn.disabled = false;
+  }
+});
+
 function skillScopesState(id) {
   const boxEl = $("skill-scopes-" + id);
   if (!boxEl) return { global: false, scopes: [] };
@@ -2265,6 +2389,7 @@ function switchPage(name, autoRestoreChat = true) {
   }
   if (name === "sessions") loadBotSessions();
   if (name === "skills") loadSkills();
+  if (name === "personas") loadPersonasPage();
   if (name === "memory") loadMemories();
   if (name === "mobile") loadMobile();
   if (name === "settings" || name === "models") {

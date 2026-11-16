@@ -43,6 +43,7 @@
       <button class="nav-link" data-page="models"><span class="nav-icon">✳</span>Models & providers</button>
       <button class="nav-link" data-page="orchestration"><span class="nav-icon">⌘</span>AI orchestration <span class="nav-count" id="orch-count">00</span></button>
       <button class="nav-link" data-page="skills"><span class="nav-icon">✦</span>Skills</button>
+      <button class="nav-link" data-page="personas"><span class="nav-icon">🤖</span>Personas</button>
       <button class="nav-link" data-page="memory"><span class="nav-icon">🧠</span>Memories</button>
       <button class="nav-link" data-page="mobile"><span class="nav-icon">📱</span>Mobile App</button>
     </nav>
@@ -576,6 +577,51 @@
           <button class="btn btn-quiet btn-small" id="refresh-skills-btn">↻ Refresh</button>
         </div>
         <div id="skills-list" class="sessions-grid"></div>
+      </section>
+
+      <section id="page-personas" class="page module-page hidden">
+        <div class="page-heading">
+          <div>
+            <div class="eyebrow">PLUGGABLE CHATBOTS</div>
+            <h1>Personas</h1>
+            <p>Specialised AI assistants with their own instructions. Pick one in Chat or in the Android app to talk to it. Advanced options (voice, models, Telegram) live in Settings → Chatbots &amp; personas.</p>
+          </div>
+          <div style="display:flex;gap:8px">
+            <button class="btn btn-quiet btn-small" id="refresh-personas-page-btn">↻ Refresh</button>
+            <button class="btn btn-primary btn-small" id="new-persona-page-btn">＋ New Persona</button>
+          </div>
+        </div>
+
+        <form id="persona-page-form" class="settings-panel hidden" style="margin-bottom:12px">
+          <div class="settings-section-head" style="padding-bottom:12px;margin-bottom:14px">
+            <div>
+              <h2 id="persona-page-form-title">New Persona</h2>
+              <p>Name it and write what it should do.</p>
+            </div>
+            <button type="button" id="cancel-persona-page-btn" class="btn btn-quiet btn-small">Cancel</button>
+          </div>
+          <div class="orch-part-grid" style="margin-bottom:12px">
+            <label>
+              <span>Name</span>
+              <input id="persona-page-name" type="text" class="form-control" placeholder="e.g. Senior Go Reviewer" required>
+            </label>
+            <label>
+              <span>Short description</span>
+              <input id="persona-page-desc" type="text" class="form-control" placeholder="e.g. Reviews Go code strictly">
+            </label>
+          </div>
+          <div style="margin-bottom:12px">
+            <label style="display:grid;gap:6px;font-size:13px;color:var(--muted)">
+              <span>Role &amp; system instructions</span>
+              <textarea id="persona-page-prompt" dir="auto" rows="4" class="form-control" placeholder="Define who this persona is, its rules, and what it should or shouldn't do…"></textarea>
+            </label>
+          </div>
+          <div class="key-actions">
+            <button type="submit" class="btn btn-primary btn-small" id="save-persona-page-btn">Save Persona <span>↗</span></button>
+          </div>
+        </form>
+
+        <div id="personas-page-list" class="sessions-grid"></div>
       </section>
 
       <section id="page-usage" class="page module-page hidden"><div class="page-heading"><div><div class="eyebrow">OBSERVABILITY</div><h1>Usage & analytics</h1><p>Understand model activity, response times and token usage.</p></div><span class="status-pill planned">IN DEVELOPMENT</span></div><div class="metric-grid"><div class="metric-card"><span>Tokens used</span><b>—</b><small>Waiting for telemetry module</small></div><div class="metric-card"><span>Requests</span><b>—</b><small>Waiting for telemetry module</small></div><div class="metric-card"><span>Average latency</span><b>—</b><small>Response timing will appear here</small></div></div><div class="chart-placeholder"><div class="chart-bars"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div><span>ACTIVITY VISUALIZATION · COMING SOON</span></div></section>

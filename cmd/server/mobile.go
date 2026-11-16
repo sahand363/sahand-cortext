@@ -194,14 +194,19 @@ func writeMobilePlainError(w http.ResponseWriter, status int, body []byte) {
 // same function, same behaviour) and returns its HTTP status + JSON body.
 // provider/model are passed through when non-empty; when both are empty the
 // handler falls back to the active provider/model, exactly as the web chat
-// does when they are not given.
-func (a *App) dispatchChat(r *http.Request, sessionID, message, provider, model string) (int, []byte) {
+// does when they are not given. personaID, when non-empty, is the persona
+// for this chat — sendMessage uses the session's stored persona when it is
+// empty, and updates the session's persona when it is given and different.
+func (a *App) dispatchChat(r *http.Request, sessionID, message, provider, model, personaID string) (int, []byte) {
 	payload := map[string]string{"session_id": sessionID, "message": message}
 	if strings.TrimSpace(provider) != "" {
 		payload["provider"] = strings.TrimSpace(provider)
 	}
 	if strings.TrimSpace(model) != "" {
 		payload["model"] = strings.TrimSpace(model)
+	}
+	if strings.TrimSpace(personaID) != "" {
+		payload["persona_id"] = strings.TrimSpace(personaID)
 	}
 	body, _ := json.Marshal(payload)
 	req := httptest.NewRequest(http.MethodPost, "/api/messages", strings.NewReader(string(body)))
@@ -220,13 +225,48 @@ func (a *App) dispatchHistory(r *http.Request, sessionID string) (int, []byte) {
 	return rec.Code, rec.Body.Bytes()
 }
 
-// dispatchCreateSession runs the web UI's createSession handler internally
-// (main chat, no persona).
-func (a *App) dispatchCreateSession(r *http.Request) (int, []byte) {
-	req := httptest.NewRequest(http.MethodPost, "/api/sessions", strings.NewReader(`{"persona_id": ""}`))
+// dispatchCreateSession runs the web UI's createSession handler internally.
+// personaID ("" = main chat) is passed through; createSession validates
+// it against the persona store and falls back to "" when unknown.
+func (a *App) dispatchCreateSession(r *http.Request, personaID string) (int, []byte) {
+	payload := map[string]string{"persona_id": personaID}
+	body, _ := json.Marshal(payload)
+	req := httptest.NewRequest(http.MethodPost, "/api/sessions", strings.NewReader(string(body)))
 	req = req.WithContext(r.Context())
 	rec := httptest.NewRecorder()
 	a.createSession(rec, req)
+	return rec.Code, rec.Body.Bytes()
+}
+
+// dispatchListSessions runs the web UI's listSessions handler internally
+// (all non-Telegram sessions, pinned first, then most recent).
+func (a *App) dispatchListSessions(r *http.Request) (int, []byte) {
+	req := httptest.NewRequest(http.MethodGet, "/api/sessions", nil)
+	req = req.WithContext(r.Context())
+	rec := httptest.NewRecorder()
+	a.listSessions(rec, req)
+	return rec.Code, rec.Body.Bytes()
+}
+
+// dispatchUpdateSession runs the web UI's updateSession handler
+// internally (PATCH) to set a session's pinned flag.
+func (a *App) dispatchUpdateSession(r *http.Request, id string, pinned bool) (int, []byte) {
+	payload := map[string]any{"id": id, "pinned": pinned}
+	body, _ := json.Marshal(payload)
+	req := httptest.NewRequest(http.MethodPatch, "/api/sessions", strings.NewReader(string(body)))
+	req = req.WithContext(r.Context())
+	rec := httptest.NewRecorder()
+	a.updateSession(rec, req)
+	return rec.Code, rec.Body.Bytes()
+}
+
+// dispatchDeleteSession runs the web UI's deleteSession handler
+// internally (DELETE ?id=) to delete a session and its messages.
+func (a *App) dispatchDeleteSession(r *http.Request, id string) (int, []byte) {
+	req := httptest.NewRequest(http.MethodDelete, "/api/sessions?id="+url.QueryEscape(id), nil)
+	req = req.WithContext(r.Context())
+	rec := httptest.NewRecorder()
+	a.deleteSession(rec, req)
 	return rec.Code, rec.Body.Bytes()
 }
 
@@ -249,33 +289,150 @@ func (a *App) mobileHealth(w http.ResponseWriter, r *http.Request) {
 	jsonOut(w, 200, map[string]any{"ok": true, "mobile_enabled": a.mobileEnabled()})
 }
 
-// POST /api/mobile/sessions — encrypted body {}. Creates a CorText session
-// (main chat) and replies (encrypted) {"id": "<session id>"}.
+// GET /api/mobile/sessions — encrypted body {} (the token check; the
+// body is otherwise ignored). Lists the app/hub chats — the same list
+// the web panel shows (non-Telegram sessions, pinned first, then most
+// recent). Replies (encrypted) {"sessions": [{id, title, persona_id,
+// pinned, updated_at}]}. The app and the hub list the same sessions
+// table, so a chat started in either place shows up in the other.
+//
+// POST /api/mobile/sessions — encrypted body {"persona_id": "..."} (optional).
+// Creates a CorText session (main chat when persona_id is empty, or a
+// persona chat when it names a persona) and replies (encrypted)
+// {"id": "<session id>"}.
 func (a *App) mobileSessions(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
+	switch r.Method {
+	case http.MethodGet:
+		if a.readMobileBody(w, r) == nil {
+			return
+		}
+		status, body := a.dispatchListSessions(r)
+		if status != http.StatusOK {
+			writeMobilePlainError(w, status, body)
+			return
+		}
+		var sessions []Session
+		if json.Unmarshal(body, &sessions) != nil {
+			jsonOut(w, 502, map[string]string{"error": "unexpected sessions response"})
+			return
+		}
+		if sessions == nil {
+			sessions = []Session{}
+		}
+		a.writeMobileEncrypted(w, map[string]any{"sessions": sessions})
+	case http.MethodPost:
+		pt := a.readMobileBody(w, r)
+		if pt == nil {
+			return
+		}
+		var body struct {
+			PersonaID string `json:"persona_id"`
+		}
+		_ = json.Unmarshal(pt, &body)
+		status, respBody := a.dispatchCreateSession(r, body.PersonaID)
+		if status != http.StatusCreated {
+			writeMobilePlainError(w, status, respBody)
+			return
+		}
+		var sess Session
+		if json.Unmarshal(respBody, &sess) != nil || sess.ID == "" {
+			jsonOut(w, 502, map[string]string{"error": "unexpected session response"})
+			return
+		}
+		a.writeMobileEncrypted(w, map[string]string{"id": sess.ID})
+	default:
+		http.Error(w, "method not allowed", 405)
+	}
+}
+
+// mobilePersonaItem is one entry of the GET /api/mobile/personas reply.
+type mobilePersonaItem struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// GET /api/mobile/personas — encrypted body {} (the token check; the body
+// is otherwise ignored). Lists the hub's enabled personas (encrypted)
+// {"personas": [{"id", "name"}]}. For the app's persona picker.
+func (a *App) mobilePersonas(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", 405)
 		return
 	}
 	if a.readMobileBody(w, r) == nil {
 		return
 	}
-	status, body := a.dispatchCreateSession(r)
-	if status != http.StatusCreated {
-		writeMobilePlainError(w, status, body)
+	list, err := a.personaStore.List(r.Context(), false)
+	if err != nil {
+		jsonOut(w, 500, map[string]string{"error": "could not list personas"})
 		return
 	}
-	var sess Session
-	if json.Unmarshal(body, &sess) != nil || sess.ID == "" {
-		jsonOut(w, 502, map[string]string{"error": "unexpected session response"})
+	out := []mobilePersonaItem{}
+	for _, p := range list {
+		if !p.Enabled {
+			continue
+		}
+		out = append(out, mobilePersonaItem{ID: p.ID, Name: p.Name})
+	}
+	a.writeMobileEncrypted(w, map[string]any{"personas": out})
+}
+
+// mobileSessionByID handles the /api/mobile/sessions/{id} subtree:
+//   POST /api/mobile/sessions/{id}/pin — encrypted body {"pinned": bool}.
+//     Sets the pinned flag and replies (encrypted) with the updated session.
+//   DELETE /api/mobile/sessions/{id} — encrypted body {} (the token check).
+//     Deletes the chat (its session row + its messages) and replies
+//     (encrypted) {"ok": true}.
+func (a *App) mobileSessionByID(w http.ResponseWriter, r *http.Request) {
+	rest := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/mobile/sessions/"), "/")
+	parts := strings.Split(rest, "/")
+	if len(parts) == 2 && parts[1] == "pin" && r.Method == http.MethodPost {
+		pt := a.readMobileBody(w, r)
+		if pt == nil {
+			return
+		}
+		var body struct {
+			Pinned *bool `json:"pinned"`
+		}
+		if json.Unmarshal(pt, &body) != nil || body.Pinned == nil {
+			jsonOut(w, 400, map[string]string{"error": "pinned is required"})
+			return
+		}
+		status, respBody := a.dispatchUpdateSession(r, parts[0], *body.Pinned)
+		if status != http.StatusOK {
+			writeMobilePlainError(w, status, respBody)
+			return
+		}
+		var sess Session
+		if json.Unmarshal(respBody, &sess) != nil {
+			jsonOut(w, 502, map[string]string{"error": "unexpected session response"})
+			return
+		}
+		a.writeMobileEncrypted(w, sess)
 		return
 	}
-	a.writeMobileEncrypted(w, map[string]string{"id": sess.ID})
+	if len(parts) == 1 && parts[0] != "" && r.Method == http.MethodDelete {
+		if a.readMobileBody(w, r) == nil {
+			return
+		}
+		status, respBody := a.dispatchDeleteSession(r, parts[0])
+		if status != http.StatusOK {
+			writeMobilePlainError(w, status, respBody)
+			return
+		}
+		a.writeMobileEncrypted(w, map[string]bool{"ok": true})
+		return
+	}
+	http.Error(w, "not found", 404)
 }
 
 // POST /api/mobile/chat — encrypted body {"session_id","message"}.
 // Optional "provider" and "model" choose the model for this chat (the
 // app's model picker); when omitted the hub uses the active provider/model,
-// exactly as the web chat does. Replies (encrypted) {"reply": "..."}.
+// exactly as the web chat does. Optional "persona_id" chooses the persona
+// for this chat — when omitted the session's stored persona is used, and
+// when given and different the session's persona is updated to it.
+// Replies (encrypted) {"reply": "..."}.
 // On a CorText error it returns a non-200 PLAIN JSON {"error": "..."} so
 // the app can show the error text.
 func (a *App) mobileChat(w http.ResponseWriter, r *http.Request) {
@@ -292,12 +449,13 @@ func (a *App) mobileChat(w http.ResponseWriter, r *http.Request) {
 		Message   string `json:"message"`
 		Provider  string `json:"provider"`
 		Model     string `json:"model"`
+		PersonaID string `json:"persona_id"`
 	}
 	if json.Unmarshal(pt, &body) != nil || strings.TrimSpace(body.Message) == "" || len(body.Message) > 30000 {
 		jsonOut(w, 400, map[string]string{"error": "Invalid message text"})
 		return
 	}
-	status, respBody := a.dispatchChat(r, body.SessionID, body.Message, body.Provider, body.Model)
+	status, respBody := a.dispatchChat(r, body.SessionID, body.Message, body.Provider, body.Model, body.PersonaID)
 	if status != http.StatusOK {
 		writeMobilePlainError(w, status, respBody)
 		return
