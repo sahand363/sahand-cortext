@@ -210,18 +210,18 @@ func (a *AnthropicCompatAdapter) chat(ctx context.Context, cfg ProviderConfig, r
 	if err == nil && onChunk != nil && text != "" {
 		onChunk(text)
 	}
-	resp := ChatResponse{Content: text}
+	chatResp := ChatResponse{Content: text}
 	if parsed.Usage != nil {
 		// The provider reported real usage: record it. Absent usage
 		// stays zero-valued with Available=false — never invent counts.
-		resp.Usage = Usage{
+		chatResp.Usage = Usage{
 			PromptTokens:     parsed.Usage.InputTokens,
 			CompletionTokens: parsed.Usage.OutputTokens,
 			TotalTokens:      parsed.Usage.InputTokens + parsed.Usage.OutputTokens,
 			Available:        true,
 		}
 	}
-	return resp, err
+	return chatResp, err
 }
 
 func (a *AnthropicCompatAdapter) ListModels(ctx context.Context, cfg ProviderConfig) ([]DiscoveredModel, error) {

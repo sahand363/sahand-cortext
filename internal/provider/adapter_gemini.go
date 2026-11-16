@@ -174,22 +174,22 @@ func (g *GeminiAdapter) Chat(ctx context.Context, cfg ProviderConfig, req ChatRe
 	if strings.TrimSpace(out) == "" {
 		return ChatResponse{}, errors.New("empty text response from Gemini model")
 	}
-	resp := ChatResponse{Content: out}
+	chatResp := ChatResponse{Content: out}
 	if parsed.UsageMetadata != nil {
 		// Gemini reports real token counts in usageMetadata. Absent
 		// metadata stays zero-valued with Available=false — never
 		// invent token counts.
-		resp.Usage = Usage{
+		chatResp.Usage = Usage{
 			PromptTokens:     parsed.UsageMetadata.PromptTokenCount,
 			CompletionTokens: parsed.UsageMetadata.CandidatesTokenCount,
 			TotalTokens:      parsed.UsageMetadata.TotalTokenCount,
 			Available:        true,
 		}
-		if resp.Usage.TotalTokens == 0 {
-			resp.Usage.TotalTokens = resp.Usage.PromptTokens + resp.Usage.CompletionTokens
+		if chatResp.Usage.TotalTokens == 0 {
+			chatResp.Usage.TotalTokens = chatResp.Usage.PromptTokens + chatResp.Usage.CompletionTokens
 		}
 	}
-	return resp, nil
+	return chatResp, nil
 }
 
 func (g *GeminiAdapter) ListModels(ctx context.Context, cfg ProviderConfig) ([]DiscoveredModel, error) {
