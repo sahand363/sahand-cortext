@@ -67,6 +67,7 @@ const pageNames = {
   personas: "Personas",
   memory: "Memories",
   mobile: "Mobile App",
+  backup: "Backup",
   usage: "Usage & analytics",
   settings: "Settings"
 };
@@ -2194,6 +2195,89 @@ $("mobile-copy-token-btn")?.addEventListener("click", () => { copyMobileField("m
 $("mobile-regen-token-btn")?.addEventListener("click", () => { regenerateMobileToken(); });
 $("mobile-copy-installer-btn")?.addEventListener("click", () => { copyMobileField("mobile-installer", "Installer command"); });
 $("mobile-refresh-btn")?.addEventListener("click", () => { loadMobile(); toast("Status refreshed"); });
+
+// --- Backup page -----------------------------------------------------------
+// Export: GET /api/backup/export returns a .zip download. Import: POST
+// /api/backup/import with a multipart file field; the hub stages the
+// restore and the panel shows the exact restart step (plus the env
+// one-liner when the hub could not write /etc/sahand-cortext.env itself).
+async function exportBackup() {
+  const status = $("backup-export-status");
+  if (status) status.textContent = "Preparing backup…";
+  try {
+    const r = await fetch("/api/backup/export");
+    if (!r.ok) {
+      let d = {};
+      try { d = await r.json(); } catch {}
+      throw new Error(d.error || "Export failed");
+    }
+    const blob = await r.blob();
+    let filename = "cortext-backup-" + new Date().toISOString().slice(0, 10) + ".zip";
+    const cd = r.headers.get("Content-Disposition") || "";
+    const m = cd.match(/filename="([^"]+)"/);
+    if (m) filename = m[1];
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    if (status) status.textContent = "Backup downloaded: " + filename;
+    toast("Backup downloaded");
+  } catch (e) {
+    if (status) status.textContent = "Export failed: " + e.message;
+    toast("Export failed: " + e.message);
+  }
+}
+
+async function importBackup() {
+  const fileInput = $("backup-import-file");
+  const result = $("backup-import-result");
+  const file = fileInput && fileInput.files ? fileInput.files[0] : null;
+  if (!file) { toast("Choose a backup .zip file first"); return; }
+  if (!$("backup-import-confirm") || !$("backup-import-confirm").checked) {
+    toast("Tick the confirmation box first — importing replaces everything on this hub");
+    return;
+  }
+  if (!confirm("Restore this backup? It will REPLACE all chats, personas, skills, memories and settings on this hub.")) return;
+  if (result) result.innerHTML = "Uploading and checking the backup…";
+  try {
+    const fd = new FormData();
+    fd.append("file", file);
+    const r = await fetch("/api/backup/import", { method: "POST", body: fd });
+    let d = {};
+    try { d = await r.json(); } catch {}
+    if (!r.ok) throw new Error(d.error || "Import failed");
+    let html = "<b>Backup restored and staged.</b><br>";
+    html += "<span class='muted-note'>The database will become live when the hub restarts. After the restart you will be logged out — sign in with the restored password.</span><br>";
+    if (d.env_applied) {
+      html += "<span class='muted-note'>The login and encryption secrets were applied.</span><br>";
+    } else if (d.env_oneliner) {
+      html += "<span class='muted-note'>" + (d.env_note || "The secrets could not be written automatically.") + "</span><br>";
+      html += "<label class='muted-note'>Run this on the server to apply the secrets and restart:</label>";
+      html += "<div style='display:flex;gap:8px;margin-top:4px'><input id='backup-env-oneliner' class='form-control' readonly style='flex:1;font-family:monospace;font-size:12px'><button class='btn btn-quiet btn-small' id='backup-copy-oneliner-btn'>Copy</button></div>";
+    } else if (d.env_note) {
+      html += "<span class='muted-note'>" + d.env_note + "</span><br>";
+    }
+    html += "<label class='muted-note' style='display:block;margin-top:12px'>Restart the hub to finish:</label>";
+    html += "<div style='display:flex;gap:8px;margin-top:4px'><input id='backup-restart-cmd' class='form-control' readonly style='flex:1;font-family:monospace' value='sudo systemctl restart sahand-cortext'><button class='btn btn-quiet btn-small' id='backup-copy-restart-btn'>Copy</button></div>";
+    if (result) result.innerHTML = html;
+    if (d.env_oneliner) {
+      const el = $("backup-env-oneliner");
+      if (el) el.value = d.env_oneliner;
+      $("backup-copy-oneliner-btn")?.addEventListener("click", () => { copyMobileField("backup-env-oneliner", "Command"); });
+    }
+    $("backup-copy-restart-btn")?.addEventListener("click", () => { copyMobileField("backup-restart-cmd", "Command"); });
+    toast("Backup staged — restart the hub to finish");
+  } catch (e) {
+    if (result) result.innerHTML = "<b>Import failed:</b> " + e.message;
+    toast("Import failed: " + e.message);
+  }
+}
+
+$("backup-export-btn")?.addEventListener("click", () => { exportBackup(); });
+$("backup-import-btn")?.addEventListener("click", () => { importBackup(); });
 
 $("refresh-skills-btn")?.addEventListener("click", () => {
   loadSkills();

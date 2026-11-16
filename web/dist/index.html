@@ -46,6 +46,7 @@
       <button class="nav-link" data-page="personas"><span class="nav-icon">🤖</span>Personas</button>
       <button class="nav-link" data-page="memory"><span class="nav-icon">🧠</span>Memories</button>
       <button class="nav-link" data-page="mobile"><span class="nav-icon">📱</span>Mobile App</button>
+      <button class="nav-link" data-page="backup"><span class="nav-icon">💾</span>Backup</button>
     </nav>
    
     <div class="sidebar-bottom">
@@ -552,6 +553,40 @@
           <div style="margin-top:12px">
             <button class="btn btn-quiet btn-small" id="mobile-refresh-btn">↻ Refresh status</button>
           </div>
+        </div>
+      </section>
+
+      <section id="page-backup" class="page module-page hidden">
+        <div class="page-heading">
+          <div>
+            <div class="eyebrow">MOVE OR RECOVER</div>
+            <h1>Backup</h1>
+            <p>Take everything with you — chats, personas, skills, memories, settings — so you can reset this server or move to a new one and restore it all in one step.</p>
+          </div>
+        </div>
+
+        <div class="settings-panel" style="margin-bottom:12px">
+          <b>Export — download a backup</b>
+          <div class="muted-note" style="margin:6px 0 12px">One file with everything: all chats, personas, skills, memories and settings, plus the login and encryption secrets a fresh hub needs to restore them. Download it before you reset or move the server.</div>
+          <div>
+            <button class="btn btn-primary btn-small" id="backup-export-btn">⬇ Download backup</button>
+          </div>
+          <div class="muted-note" style="margin-top:12px">⚠️ This file is extremely sensitive — it contains your login password hash, the API-key encryption key and the mobile token. Keep it somewhere safe and never share it.</div>
+          <div class="muted-note" id="backup-export-status" style="margin-top:8px"></div>
+        </div>
+
+        <div class="settings-panel">
+          <b>Import — restore from a backup</b>
+          <div class="muted-note" style="margin:6px 0 12px">Restoring <b>replaces everything</b> on this hub — all current chats, personas, skills, memories and settings — with the contents of the backup file.</div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+            <input type="file" id="backup-import-file" accept=".zip" class="form-control" style="flex:1;min-width:200px">
+            <button class="btn btn-primary btn-small" id="backup-import-btn">Restore from backup</button>
+          </div>
+          <label style="display:flex;align-items:center;gap:8px;margin-top:12px;cursor:pointer">
+            <input type="checkbox" id="backup-import-confirm">
+            <span class="muted-note">I understand this replaces everything on this hub.</span>
+          </label>
+          <div id="backup-import-result" style="margin-top:12px"></div>
         </div>
       </section>
 

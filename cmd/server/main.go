@@ -2512,6 +2512,8 @@ func main() {
 
 	dataDir := env("HUB_DATA_DIR", "./data")
 	_ = os.MkdirAll(dataDir, 0700)
+	// A staged restore (from a backup import) becomes live on restart.
+	restoreDB(dataDir)
 	db, e := sql.Open("sqlite", filepath.Join(dataDir, "cortext.db"))
 	if e != nil {
 		log.Fatal(e)
@@ -2585,6 +2587,11 @@ func main() {
 	mux.HandleFunc("/api/models/toggle", app.auth(app.handleToggleModel))
 	mux.HandleFunc("/api/models/custom", app.auth(app.handleAddCustomModel))
 	mux.HandleFunc("/api/chat/model-scope", app.auth(app.handleChatModelScope))
+
+	// Backup (Export / Import): take everything with you — one zip with
+	// the database plus the env secrets a fresh hub needs to restore it.
+	mux.HandleFunc("/api/backup/export", app.auth(app.backupExport))
+	mux.HandleFunc("/api/backup/import", app.auth(app.backupImport))
 
 	// Mobile (hub-owned): the Android app talks to CorText directly or
 	// through a dumb relay. The encrypted endpoints verify the mobile token
