@@ -193,22 +193,22 @@ func (o *OpenAICompatAdapter) chat(ctx context.Context, cfg ProviderConfig, req 
 	if err == nil && onChunk != nil && text != "" {
 		onChunk(text)
 	}
-	resp := ChatResponse{Content: text}
+	chatResp := ChatResponse{Content: text}
 	if parsed.Usage != nil {
 		// The provider reported real usage: record it. If the usage
 		// object is absent, Usage stays zero-valued with
 		// Available=false — never invent token counts.
-		resp.Usage = Usage{
+		chatResp.Usage = Usage{
 			PromptTokens:     parsed.Usage.PromptTokens,
 			CompletionTokens: parsed.Usage.CompletionTokens,
 			TotalTokens:      parsed.Usage.TotalTokens,
 			Available:        true,
 		}
-		if resp.Usage.TotalTokens == 0 {
-			resp.Usage.TotalTokens = resp.Usage.PromptTokens + resp.Usage.CompletionTokens
+		if chatResp.Usage.TotalTokens == 0 {
+			chatResp.Usage.TotalTokens = chatResp.Usage.PromptTokens + chatResp.Usage.CompletionTokens
 		}
 	}
-	return resp, err
+	return chatResp, err
 }
 
 func (o *OpenAICompatAdapter) ListModels(ctx context.Context, cfg ProviderConfig) ([]DiscoveredModel, error) {
