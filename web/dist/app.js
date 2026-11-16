@@ -2090,10 +2090,17 @@ $("new-memory-text")?.addEventListener("keydown", (e) => {
 
 let mobileStatusCache = null;
 
+// The one-liner installs (or updates) the Go relay binary on the middle
+// server. It kills any old relay FIRST — re-running the old one-liner
+// used to fail silently with "Address already in use" because the old
+// relay still held the port — then downloads the right binary for the
+// server's arch from GitHub Releases (latest) and starts it. The relay
+// is a plain Go binary now, not a Python script: no python3 needed on
+// the middle server, and the same one-liner both installs and updates.
 function buildMobileInstaller() {
   const port = ($("mobile-relay-port")?.value || "8080").trim() || "8080";
   const host = window.location.host; // hostname:port of this hub page
-  return `curl -fsSL http://${host}/api/mobile/relay.py -o /tmp/cortext-relay.py && nohup python3 /tmp/cortext-relay.py --hub http://${host} --port ${port} > /tmp/cortext-relay.log 2>&1 &`;
+  return `pkill -f cortext-relay; sleep 1; arch=$(dpkg --print-architecture 2>/dev/null || uname -m); case "$arch" in amd64|x86_64) asset=cortext-relay;; arm64|aarch64) asset=cortext-relay-arm64;; *) echo "unsupported arch: $arch"; exit 1;; esac; curl -fsSL "https://github.com/sahand363/sahand-cortext/releases/latest/download/$asset" -o /tmp/cortext-relay && chmod +x /tmp/cortext-relay && nohup /tmp/cortext-relay --hub http://${host} --port ${port} > /tmp/cortext-relay.log 2>&1 &`;
 }
 
 function timeAgoText(iso) {

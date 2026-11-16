@@ -2607,7 +2607,6 @@ func main() {
 	mux.HandleFunc("/api/mobile/history", app.mobileHistory)
 	mux.HandleFunc("/api/mobile/status", app.auth(app.mobileStatus))
 	mux.HandleFunc("/api/mobile/settings", app.auth(app.mobileSettings))
-	mux.HandleFunc("/api/mobile/relay.py", app.mobileRelayPy)
 
 	mux.HandleFunc("/api/sessions", app.auth(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {

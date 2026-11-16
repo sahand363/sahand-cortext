@@ -781,11 +781,3 @@ func (a *App) mobileSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	jsonOut(w, 200, a.mobileStatusPayload())
 }
-
-// GET /api/mobile/relay.py — plain (NOT encrypted, no auth). Serves the
-// embedded relay script. This is what the one-liner downloads.
-func (a *App) mobileRelayPy(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(mobile.RelayPy)
-}
