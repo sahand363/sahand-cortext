@@ -2208,6 +2208,66 @@ $("mobile-refresh-btn")?.addEventListener("click", () => { loadMobile(); toast("
 // /api/backup/import with a multipart file field; the hub stages the
 // restore and the panel shows the exact restart step (plus the env
 // one-liner when the hub could not write /etc/sahand-cortext.env itself).
+// Usage & analytics page: totals, per-model and per-day breakdowns
+// from GET /api/usage/summary. No cost is shown — the hub has no
+// per-model pricing to compute it from.
+let usageDays = 30;
+async function loadUsage() {
+  const daysSel = $("usage-days");
+  if (daysSel) usageDays = parseInt(daysSel.value, 10) || 30;
+  const tokensEl = $("usage-tokens"), reqEl = $("usage-requests"), latEl = $("usage-latency");
+  const reqSub = $("usage-requests-sub"), tokSub = $("usage-tokens-sub");
+  const emptyEl = $("usage-empty"), contentEl = $("usage-content");
+  const modelsEl = $("usage-models-list"), barsEl = $("usage-bars"), daysEl = $("usage-days-list");
+  if (!tokensEl) return;
+  const fmt = n => (Number(n) || 0).toLocaleString("en-US");
+  tokensEl.textContent = "…"; reqEl.textContent = "…"; latEl.textContent = "…";
+  try {
+    const data = await api("/api/usage/summary?days=" + usageDays);
+    const t = data.totals || {};
+    tokensEl.textContent = fmt(t.total_tokens);
+    if (tokSub) tokSub.textContent = fmt(t.prompt_tokens) + " prompt · " + fmt(t.completion_tokens) + " completion";
+    reqEl.textContent = fmt(t.requests);
+    if (reqSub) reqSub.textContent = fmt(t.successful) + " successful · " + fmt(t.failed) + " failed";
+    latEl.textContent = (t.requests ? Math.round(t.avg_latency_ms || 0).toLocaleString("en-US") + " ms" : "—");
+    const hasData = (t.requests || 0) > 0;
+    if (emptyEl) emptyEl.classList.toggle("hidden", hasData);
+    if (contentEl) contentEl.classList.toggle("hidden", !hasData);
+    const models = data.by_model || [];
+    if (modelsEl) {
+      if (!models.length) {
+        modelsEl.innerHTML = "<p class=\"muted-note\">No models used in this range.</p>";
+      } else {
+        modelsEl.innerHTML = models.map(m =>
+          "<div style=\"display:flex;justify-content:space-between;gap:8px;padding:8px 0;border-bottom:1px solid var(--line)\">" +
+          "<span><b>" + escapeHtml(m.provider || "") + "</b> · " + escapeHtml(m.model || "") + "</span>" +
+          "<span class=\"muted-note\">" + fmt(m.requests) + " requests · " + fmt(m.total_tokens) + " tokens · " + Math.round(m.avg_latency_ms || 0).toLocaleString("en-US") + " ms avg</span></div>"
+        ).join("");
+      }
+    }
+    const days = data.by_day || [];
+    if (barsEl) {
+      const last = days.slice(-30);
+      const max = Math.max(1, ...last.map(d => d.total_tokens || 0));
+      barsEl.innerHTML = last.map(d => {
+        const h = Math.max(4, Math.round(((d.total_tokens || 0) / max) * 100));
+        return "<i style=\"--h:" + h + "%;flex:1\" title=\"" + escapeHtml(d.day) + ": " + fmt(d.requests) + " requests, " + fmt(d.total_tokens) + " tokens\"></i>";
+      }).join("");
+    }
+    if (daysEl) {
+      const rows = [...days].reverse();
+      daysEl.innerHTML = rows.length ? rows.map(d =>
+        "<div style=\"display:flex;justify-content:space-between;gap:8px;padding:6px 0;border-bottom:1px solid var(--line)\">" +
+        "<span>" + escapeHtml(d.day) + "</span>" +
+        "<span class=\"muted-note\">" + fmt(d.requests) + " requests · " + fmt(d.total_tokens) + " tokens</span></div>"
+      ).join("") : "<p class=\"muted-note\">No daily activity in this range.</p>";
+    }
+  } catch (e) {
+    tokensEl.textContent = "—"; reqEl.textContent = "—"; latEl.textContent = "—";
+    if (modelsEl) modelsEl.innerHTML = "<p class=\"muted-note\">Could not load usage: " + escapeHtml(e.message || e) + "</p>";
+  }
+}
+
 async function exportBackup() {
   const status = $("backup-export-status");
   if (status) status.textContent = "Preparing backup…";
@@ -2285,6 +2345,8 @@ async function importBackup() {
 
 $("backup-export-btn")?.addEventListener("click", () => { exportBackup(); });
 $("backup-import-btn")?.addEventListener("click", () => { importBackup(); });
+$("usage-days")?.addEventListener("change", () => { loadUsage(); });
+$("usage-refresh-btn")?.addEventListener("click", () => { loadUsage(); });
 
 $("refresh-skills-btn")?.addEventListener("click", () => {
   loadSkills();
@@ -2483,6 +2545,7 @@ function switchPage(name, autoRestoreChat = true) {
   if (name === "skills") loadSkills();
   if (name === "personas") loadPersonasPage();
   if (name === "memory") loadMemories();
+  if (name === "usage") loadUsage();
   if (name === "mobile") loadMobile();
   if (name === "settings" || name === "models") {
     refreshStatus();

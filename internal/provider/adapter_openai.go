@@ -166,6 +166,11 @@ func (o *OpenAICompatAdapter) chat(ctx context.Context, cfg ProviderConfig, req 
 				ReasoningContent string `json:"reasoning_content"`
 			} `json:"message"`
 		} `json:"choices"`
+		Usage *struct {
+			PromptTokens     int64 `json:"prompt_tokens"`
+			CompletionTokens int64 `json:"completion_tokens"`
+			TotalTokens      int64 `json:"total_tokens"`
+		} `json:"usage"`
 	}
 	if err := json.Unmarshal(trimmedRaw, &parsed); err != nil {
 		return ChatResponse{}, fmt.Errorf("invalid JSON response from %s: %w", o.meta.Name, err)
@@ -188,7 +193,22 @@ func (o *OpenAICompatAdapter) chat(ctx context.Context, cfg ProviderConfig, req 
 	if err == nil && onChunk != nil && text != "" {
 		onChunk(text)
 	}
-	return ChatResponse{Content: text}, err
+	resp := ChatResponse{Content: text}
+	if parsed.Usage != nil {
+		// The provider reported real usage: record it. If the usage
+		// object is absent, Usage stays zero-valued with
+		// Available=false — never invent token counts.
+		resp.Usage = Usage{
+			PromptTokens:     parsed.Usage.PromptTokens,
+			CompletionTokens: parsed.Usage.CompletionTokens,
+			TotalTokens:      parsed.Usage.TotalTokens,
+			Available:        true,
+		}
+		if resp.Usage.TotalTokens == 0 {
+			resp.Usage.TotalTokens = resp.Usage.PromptTokens + resp.Usage.CompletionTokens
+		}
+	}
+	return resp, err
 }
 
 func (o *OpenAICompatAdapter) ListModels(ctx context.Context, cfg ProviderConfig) ([]DiscoveredModel, error) {

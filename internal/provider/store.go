@@ -54,6 +54,43 @@ func (s *Store) InitSchema() error {
 	return err
 }
 
+// UsageEvent is one recorded provider call attempt: a chat completion
+// (web, mobile, Telegram, orchestration, streaming or buffered) or a
+// failed attempt. Token counts are only ever what the provider
+// reported; when it reported nothing they are 0 and Available is
+// false (see Usage in contracts.go). The usage_events table itself is
+// created by the app's InitSchema (cmd/server/main.go).
+type UsageEvent struct {
+	Provider         string
+	Model            string
+	SessionID        string
+	PersonaID        string
+	PromptTokens     int64
+	CompletionTokens int64
+	TotalTokens      int64
+	LatencyMs        int64
+	Success          bool
+	Error            string
+}
+
+// RecordUsageEvent inserts one usage_events row. Best-effort: it
+// returns the error to the caller, which logs it and never fails a
+// chat over telemetry. It takes no locks and holds no rows open, so
+// it is safe under the single-connection (MaxOpenConns(1)) rule.
+func (s *Store) RecordUsageEvent(ctx context.Context, ev UsageEvent) error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	success := 0
+	if ev.Success {
+		success = 1
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO usage_events(created_at, provider, model, session_id, persona_id, prompt_tokens, completion_tokens, total_tokens, latency_ms, success, error) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+		time.Now().Unix(), ev.Provider, ev.Model, ev.SessionID, ev.PersonaID,
+		ev.PromptTokens, ev.CompletionTokens, ev.TotalTokens, ev.LatencyMs, success, ev.Error)
+	return err
+}
+
 type storedProviderOptions struct {
 	KeyLabel               string   `json:"key_label,omitempty"`
 	KeyPlaceholder         string   `json:"key_placeholder,omitempty"`

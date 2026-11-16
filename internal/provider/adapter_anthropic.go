@@ -160,8 +160,8 @@ func (a *AnthropicCompatAdapter) chat(ctx context.Context, cfg ProviderConfig, r
 
 	contentType := strings.ToLower(resp.Header.Get("Content-Type"))
 	if req.Stream && strings.Contains(contentType, "text/event-stream") {
-		text, err := parseAnthropicSSEStream(resp.Body, a.meta.Name, model, onChunk)
-		return ChatResponse{Content: text}, err
+		text, usage, err := parseAnthropicSSEStream(resp.Body, a.meta.Name, model, onChunk)
+		return ChatResponse{Content: text, Usage: usage}, err
 	}
 
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
@@ -170,8 +170,8 @@ func (a *AnthropicCompatAdapter) chat(ctx context.Context, cfg ProviderConfig, r
 		return ChatResponse{}, fmt.Errorf("empty response body from %s model %s", a.meta.Name, model)
 	}
 	if bytes.HasPrefix(trimmedRaw, []byte("event:")) || bytes.HasPrefix(trimmedRaw, []byte("data:")) {
-		text, err := parseAnthropicSSEStream(bytes.NewReader(trimmedRaw), a.meta.Name, model, onChunk)
-		return ChatResponse{Content: text}, err
+		text, usage, err := parseAnthropicSSEStream(bytes.NewReader(trimmedRaw), a.meta.Name, model, onChunk)
+		return ChatResponse{Content: text, Usage: usage}, err
 	}
 
 	var parsed struct {
@@ -182,6 +182,10 @@ func (a *AnthropicCompatAdapter) chat(ctx context.Context, cfg ProviderConfig, r
 			Text     string `json:"text"`
 			Thinking string `json:"thinking"`
 		} `json:"content"`
+		Usage *struct {
+			InputTokens  int64 `json:"input_tokens"`
+			OutputTokens int64 `json:"output_tokens"`
+		} `json:"usage"`
 	}
 	if err := json.Unmarshal(trimmedRaw, &parsed); err != nil {
 		return ChatResponse{}, fmt.Errorf("invalid JSON response from %s: %w", a.meta.Name, err)
@@ -206,7 +210,18 @@ func (a *AnthropicCompatAdapter) chat(ctx context.Context, cfg ProviderConfig, r
 	if err == nil && onChunk != nil && text != "" {
 		onChunk(text)
 	}
-	return ChatResponse{Content: text}, err
+	resp := ChatResponse{Content: text}
+	if parsed.Usage != nil {
+		// The provider reported real usage: record it. Absent usage
+		// stays zero-valued with Available=false — never invent counts.
+		resp.Usage = Usage{
+			PromptTokens:     parsed.Usage.InputTokens,
+			CompletionTokens: parsed.Usage.OutputTokens,
+			TotalTokens:      parsed.Usage.InputTokens + parsed.Usage.OutputTokens,
+			Available:        true,
+		}
+	}
+	return resp, err
 }
 
 func (a *AnthropicCompatAdapter) ListModels(ctx context.Context, cfg ProviderConfig) ([]DiscoveredModel, error) {
@@ -363,15 +378,21 @@ func applyAnthropicAuthAndHeaders(req *http.Request, cfg ProviderConfig) {
 	}
 }
 
-// parseAnthropicSSEStream reads an Anthropic SSE stream and returns the
-// full reply text. When onChunk != nil, each delta's text is also passed
-// to onChunk as it arrives (in order), so the caller can forward it
+// parseAnthropicSSEStream reads an Anthropic SSE stream and returns
+// the full reply text plus the token usage the provider reported.
+// When onChunk != nil, each delta's text is also passed to onChunk
+// as it arrives (in order), so the caller can forward it
 // immediately instead of waiting for the whole reply.
-func parseAnthropicSSEStream(r io.Reader, label, model string, onChunk func(string)) (string, error) {
+// Usage comes from the stream's own events (message_start carries
+// input_tokens, message_delta carries output_tokens) — real numbers
+// the provider sends by default, never guessed. If no usage event
+// arrives, Usage stays zero-valued with Available=false.
+func parseAnthropicSSEStream(r io.Reader, label, model string, onChunk func(string)) (string, Usage, error) {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 64*1024), 8*1024*1024)
 
 	var contentSB, thinkingSB strings.Builder
+	usage := Usage{}
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if !strings.HasPrefix(line, "data:") {
@@ -390,14 +411,35 @@ func parseAnthropicSSEStream(r io.Reader, label, model string, onChunk func(stri
 				Text     string `json:"text"`
 				Thinking string `json:"thinking"`
 			} `json:"delta"`
+			Usage *struct {
+				InputTokens  int64 `json:"input_tokens"`
+				OutputTokens int64 `json:"output_tokens"`
+			} `json:"usage"`
+			Message struct {
+				Usage *struct {
+					InputTokens  int64 `json:"input_tokens"`
+					OutputTokens int64 `json:"output_tokens"`
+				} `json:"usage"`
+			} `json:"message"`
 		}
 		if err := json.Unmarshal([]byte(payload), &ev); err != nil {
 			continue
 		}
 		if ev.Error != nil || ev.Type == "error" {
-			return "", fmt.Errorf("%s error: %s", label, ExtractAPIError([]byte(payload)))
+			return "", Usage{}, fmt.Errorf("%s error: %s", label, ExtractAPIError([]byte(payload)))
 		}
-		if ev.Type == "content_block_delta" {
+		switch ev.Type {
+		case "message_start":
+			if ev.Message.Usage != nil {
+				usage.PromptTokens = ev.Message.Usage.InputTokens
+				usage.Available = true
+			}
+		case "message_delta":
+			if ev.Usage != nil {
+				usage.CompletionTokens = ev.Usage.OutputTokens
+				usage.Available = true
+			}
+		case "content_block_delta":
 			if ev.Delta.Text != "" {
 				contentSB.WriteString(ev.Delta.Text)
 				if onChunk != nil {
@@ -411,9 +453,15 @@ func parseAnthropicSSEStream(r io.Reader, label, model string, onChunk func(stri
 	}
 	if err := scanner.Err(); err != nil {
 		if len(contentSB.String()) > 200 {
-			return strings.TrimSpace(contentSB.String()), nil
+			usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
+			return strings.TrimSpace(contentSB.String()), usage, nil
 		}
-		return "", fmt.Errorf("%s stream error: %w", label, err)
+		return "", Usage{}, fmt.Errorf("%s stream error: %w", label, err)
 	}
-	return validateOrSalvageReasoning(contentSB.String(), thinkingSB.String(), label, model)
+	text, err := validateOrSalvageReasoning(contentSB.String(), thinkingSB.String(), label, model)
+	if err != nil {
+		return "", Usage{}, err
+	}
+	usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
+	return text, usage, nil
 }

@@ -223,6 +223,21 @@ func (a *App) initDB() error {
 		);`,
 		`CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);`,
 		`CREATE TABLE IF NOT EXISTS auth_sessions(token TEXT PRIMARY KEY, expires_at DATETIME NOT NULL);`,
+		`CREATE TABLE IF NOT EXISTS usage_events(
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			created_at INTEGER NOT NULL,
+			provider TEXT NOT NULL DEFAULT '',
+			model TEXT NOT NULL DEFAULT '',
+			session_id TEXT NOT NULL DEFAULT '',
+			persona_id TEXT NOT NULL DEFAULT '',
+			prompt_tokens INTEGER NOT NULL DEFAULT 0,
+			completion_tokens INTEGER NOT NULL DEFAULT 0,
+			total_tokens INTEGER NOT NULL DEFAULT 0,
+			latency_ms INTEGER NOT NULL DEFAULT 0,
+			success INTEGER NOT NULL DEFAULT 1,
+			error TEXT NOT NULL DEFAULT ''
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_usage_events_created_at ON usage_events(created_at);`,
 		`PRAGMA journal_mode=WAL;`,
 		`PRAGMA foreign_keys=ON;`,
 		`PRAGMA busy_timeout=10000;`,
@@ -1366,7 +1381,7 @@ func (a *App) handleAddCustomModel(w http.ResponseWriter, r *http.Request) {
 	testPrompt := []provider.Message{
 		{Role: "user", Content: "Reply with the single word OK."},
 	}
-	reply, latency, callErr := a.router.Call(r.Context(), norm, a.providerKey(norm), modelID, testPrompt, provider.CallOpts{MaxTokens: 512})
+	reply, latency, callErr := a.router.Call(r.Context(), norm, a.providerKey(norm), modelID, testPrompt, provider.CallOpts{MaxTokens: 512, SkipUsage: true})
 	if callErr != nil {
 		a.saveTestRecord(norm, modelID, ModelTestRecord{
 			Status:    "failed",
@@ -1433,7 +1448,7 @@ func (a *App) handleTestModel(w http.ResponseWriter, r *http.Request) {
 	testPrompt := []provider.Message{
 		{Role: "user", Content: "Reply with the single word OK."},
 	}
-	reply, latency, callErr := a.router.Call(r.Context(), norm, a.providerKey(norm), model, testPrompt, provider.CallOpts{MaxTokens: 512})
+	reply, latency, callErr := a.router.Call(r.Context(), norm, a.providerKey(norm), model, testPrompt, provider.CallOpts{MaxTokens: 512, SkipUsage: true})
 	if callErr != nil {
 		a.saveTestRecord(norm, model, ModelTestRecord{
 			Status:    "failed",
@@ -1473,6 +1488,116 @@ func (a *App) handleTestModel(w http.ResponseWriter, r *http.Request) {
 		"reply":           strings.TrimSpace(reply),
 		"active_provider": a.activeProvider(),
 		"active_model":    a.activeModel(),
+	})
+}
+
+// GET /api/usage/summary?days=N — aggregated usage analytics for the
+// Usage & analytics page. All aggregates are computed in SQL, never by
+// loading every row into memory. Each query is fully drained and its
+// rows closed before the next query runs (single-connection rule).
+// No cost/money is returned: the hub has no structured per-model
+// pricing to compute it from — only tokens, requests and latency.
+func (a *App) usageSummary(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", 405)
+		return
+	}
+	days := 30
+	if q := strings.TrimSpace(r.URL.Query().Get("days")); q != "" {
+		if n, err := strconv.Atoi(q); err == nil {
+			days = n
+		}
+	}
+	if days < 1 {
+		days = 1
+	}
+	if days > 365 {
+		days = 365
+	}
+	cutoff := time.Now().Unix() - int64(days)*86400
+
+	type usageTotals struct {
+		Requests         int64   `json:"requests"`
+		Successful       int64   `json:"successful"`
+		Failed           int64   `json:"failed"`
+		PromptTokens     int64   `json:"prompt_tokens"`
+		CompletionTokens int64   `json:"completion_tokens"`
+		TotalTokens      int64   `json:"total_tokens"`
+		AvgLatencyMs     float64 `json:"avg_latency_ms"`
+	}
+	type usageByModel struct {
+		Provider    string  `json:"provider"`
+		Model       string  `json:"model"`
+		Requests    int64   `json:"requests"`
+		TotalTokens int64   `json:"total_tokens"`
+		AvgLatency  float64 `json:"avg_latency_ms"`
+	}
+	type usageByDay struct {
+		Day         string `json:"day"`
+		Requests    int64  `json:"requests"`
+		TotalTokens int64  `json:"total_tokens"`
+	}
+
+	var totals usageTotals
+	err := a.db.QueryRow(`SELECT COUNT(*),
+		COALESCE(SUM(CASE WHEN success=1 THEN 1 ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN success=0 THEN 1 ELSE 0 END),0),
+		COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(completion_tokens),0),
+		COALESCE(SUM(total_tokens),0), COALESCE(AVG(latency_ms),0)
+		FROM usage_events WHERE created_at >= ?`, cutoff).Scan(
+		&totals.Requests, &totals.Successful, &totals.Failed,
+		&totals.PromptTokens, &totals.CompletionTokens, &totals.TotalTokens,
+		&totals.AvgLatencyMs)
+	if err != nil {
+		jsonOut(w, 500, map[string]string{"error": "database error"})
+		return
+	}
+
+	byModel := []usageByModel{}
+	rows, err := a.db.Query(`SELECT provider, model, COUNT(*),
+		COALESCE(SUM(total_tokens),0), COALESCE(AVG(latency_ms),0)
+		FROM usage_events WHERE created_at >= ?
+		GROUP BY provider, model ORDER BY COUNT(*) DESC`, cutoff)
+	if err != nil {
+		jsonOut(w, 500, map[string]string{"error": "database error"})
+		return
+	}
+	for rows.Next() {
+		var m usageByModel
+		if err := rows.Scan(&m.Provider, &m.Model, &m.Requests, &m.TotalTokens, &m.AvgLatency); err != nil {
+			rows.Close()
+			jsonOut(w, 500, map[string]string{"error": "database error"})
+			return
+		}
+		byModel = append(byModel, m)
+	}
+	rows.Close()
+
+	byDay := []usageByDay{}
+	rows, err = a.db.Query(`SELECT strftime('%Y-%m-%d', created_at, 'unixepoch') AS day,
+		COUNT(*), COALESCE(SUM(total_tokens),0)
+		FROM usage_events WHERE created_at >= ?
+		GROUP BY day ORDER BY day ASC`, cutoff)
+	if err != nil {
+		jsonOut(w, 500, map[string]string{"error": "database error"})
+		return
+	}
+	for rows.Next() {
+		var d usageByDay
+		if err := rows.Scan(&d.Day, &d.Requests, &d.TotalTokens); err != nil {
+			rows.Close()
+			jsonOut(w, 500, map[string]string{"error": "database error"})
+			return
+		}
+		byDay = append(byDay, d)
+	}
+	rows.Close()
+
+	jsonOut(w, 200, map[string]any{
+		"totals":     totals,
+		"by_model":   byModel,
+		"by_day":     byDay,
+		"range_days": days,
 	})
 }
 
@@ -2587,6 +2712,7 @@ func main() {
 	mux.HandleFunc("/api/models/toggle", app.auth(app.handleToggleModel))
 	mux.HandleFunc("/api/models/custom", app.auth(app.handleAddCustomModel))
 	mux.HandleFunc("/api/chat/model-scope", app.auth(app.handleChatModelScope))
+	mux.HandleFunc("/api/usage/summary", app.auth(app.usageSummary))
 
 	// Backup (Export / Import): take everything with you — one zip with
 	// the database plus the env secrets a fresh hub needs to restore it.

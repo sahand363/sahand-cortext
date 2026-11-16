@@ -151,6 +151,11 @@ func (g *GeminiAdapter) Chat(ctx context.Context, cfg ProviderConfig, req ChatRe
 				} `json:"parts"`
 			} `json:"content"`
 		} `json:"candidates"`
+		UsageMetadata *struct {
+			PromptTokenCount     int64 `json:"promptTokenCount"`
+			CandidatesTokenCount int64 `json:"candidatesTokenCount"`
+			TotalTokenCount      int64 `json:"totalTokenCount"`
+		} `json:"usageMetadata"`
 	}
 	if err := json.Unmarshal(raw, &parsed); err != nil {
 		return ChatResponse{}, fmt.Errorf("malformed Gemini response: %w", err)
@@ -169,7 +174,22 @@ func (g *GeminiAdapter) Chat(ctx context.Context, cfg ProviderConfig, req ChatRe
 	if strings.TrimSpace(out) == "" {
 		return ChatResponse{}, errors.New("empty text response from Gemini model")
 	}
-	return ChatResponse{Content: out}, nil
+	resp := ChatResponse{Content: out}
+	if parsed.UsageMetadata != nil {
+		// Gemini reports real token counts in usageMetadata. Absent
+		// metadata stays zero-valued with Available=false — never
+		// invent token counts.
+		resp.Usage = Usage{
+			PromptTokens:     parsed.UsageMetadata.PromptTokenCount,
+			CompletionTokens: parsed.UsageMetadata.CandidatesTokenCount,
+			TotalTokens:      parsed.UsageMetadata.TotalTokenCount,
+			Available:        true,
+		}
+		if resp.Usage.TotalTokens == 0 {
+			resp.Usage.TotalTokens = resp.Usage.PromptTokens + resp.Usage.CompletionTokens
+		}
+	}
+	return resp, nil
 }
 
 func (g *GeminiAdapter) ListModels(ctx context.Context, cfg ProviderConfig) ([]DiscoveredModel, error) {

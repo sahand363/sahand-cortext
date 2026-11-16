@@ -51,7 +51,7 @@
    
     <div class="sidebar-bottom">
       <nav class="main-nav bottom-nav">
-        <button class="nav-link" data-page="usage"><span class="nav-icon">⌁</span>Usage & analytics <span class="soon">SOON</span></button>
+        <button class="nav-link" data-page="usage"><span class="nav-icon">⌁</span>Usage & analytics</button>
         <button class="nav-link" data-page="settings"><span class="nav-icon">⚙</span>Settings</button>
       </nav>
       <div class="profile-row">
@@ -685,7 +685,40 @@
         <div id="personas-page-list" class="sessions-grid"></div>
       </section>
 
-      <section id="page-usage" class="page module-page hidden"><div class="page-heading"><div><div class="eyebrow">OBSERVABILITY</div><h1>Usage & analytics</h1><p>Understand model activity, response times and token usage.</p></div><span class="status-pill planned">IN DEVELOPMENT</span></div><div class="metric-grid"><div class="metric-card"><span>Tokens used</span><b>—</b><small>Waiting for telemetry module</small></div><div class="metric-card"><span>Requests</span><b>—</b><small>Waiting for telemetry module</small></div><div class="metric-card"><span>Average latency</span><b>—</b><small>Response timing will appear here</small></div></div><div class="chart-placeholder"><div class="chart-bars"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div><span>ACTIVITY VISUALIZATION · COMING SOON</span></div></section>
+      <section id="page-usage" class="page module-page hidden">
+        <div class="page-heading">
+          <div>
+            <div class="eyebrow">OBSERVABILITY</div>
+            <h1>Usage & analytics</h1>
+            <p>Understand model activity, response times and token usage. Cost is not shown — the hub has no per-model pricing to compute it from.</p>
+          </div>
+          <div style="display:flex;gap:8px;align-items:center">
+            <select id="usage-days" class="form-control" style="width:auto" aria-label="Range in days">
+              <option value="7">Last 7 days</option>
+              <option value="30" selected>Last 30 days</option>
+              <option value="90">Last 90 days</option>
+            </select>
+            <button class="btn btn-quiet btn-small" id="usage-refresh-btn">↻ Refresh</button>
+          </div>
+        </div>
+        <div class="metric-grid">
+          <div class="metric-card"><span>Tokens used</span><b id="usage-tokens">—</b><small id="usage-tokens-sub">Prompt + completion tokens</small></div>
+          <div class="metric-card"><span>Requests</span><b id="usage-requests">—</b><small id="usage-requests-sub">—</small></div>
+          <div class="metric-card"><span>Average latency</span><b id="usage-latency">—</b><small>Response timing</small></div>
+        </div>
+        <div id="usage-empty" class="muted-note hidden" style="margin:14px 0">No usage recorded yet — send a message and it will appear here.</div>
+        <div id="usage-content">
+          <div class="settings-panel" style="margin-top:14px">
+            <b>Per model</b>
+            <div id="usage-models-list" style="margin-top:10px"></div>
+          </div>
+          <div class="settings-panel" style="margin-top:12px">
+            <b>Daily activity</b>
+            <div class="chart-bars" id="usage-bars" style="margin-top:12px"></div>
+            <div id="usage-days-list" style="margin-top:10px"></div>
+          </div>
+        </div>
+      </section>
 
       <section id="page-settings" class="page module-page hidden">
         <div class="page-heading"><div><div class="eyebrow">YOUR HUB, YOUR RULES</div><h1>Settings</h1><p>Configure providers, build pluggable chatbots & voice clones, and personalize your workspace.</p></div></div>

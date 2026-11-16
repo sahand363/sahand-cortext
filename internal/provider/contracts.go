@@ -11,6 +11,9 @@ type CallOpts struct {
 	MaxTokens    int
 	Stream       bool
 	DisableRetry bool
+	// SkipUsage records no usage_events row for this call (used by
+	// the model-test endpoints, which are not chat completions).
+	SkipUsage bool
 }
 
 type ChatRequest struct {
@@ -21,9 +24,21 @@ type ChatRequest struct {
 	DisableRetry bool
 }
 
+// Usage is the token accounting a provider reports for one call.
+// Available is false when the provider did not report any usage
+// (streams that carry no usage chunk, or providers without usage
+// data) — the token counts are then 0 and must never be guessed.
+type Usage struct {
+	PromptTokens     int64 `json:"prompt_tokens"`
+	CompletionTokens int64 `json:"completion_tokens"`
+	TotalTokens      int64 `json:"total_tokens"`
+	Available        bool  `json:"available"`
+}
+
 type ChatResponse struct {
 	Content   string
 	LatencyMs int64
+	Usage     Usage
 }
 
 type Capabilities struct {
