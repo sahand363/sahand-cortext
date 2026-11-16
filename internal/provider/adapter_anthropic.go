@@ -38,6 +38,22 @@ func (a *AnthropicCompatAdapter) NormalizeModelID(id string) string {
 }
 
 func (a *AnthropicCompatAdapter) Chat(ctx context.Context, cfg ProviderConfig, req ChatRequest) (ChatResponse, error) {
+	return a.chat(ctx, cfg, req, nil)
+}
+
+// ChatStream is Chat, but it yields the reply in pieces as the provider
+// produces them (onChunk is called with each delta, in order) and still
+// returns the full reply when the stream finishes. It forces the
+// upstream request to stream (req.Stream = true).
+func (a *AnthropicCompatAdapter) ChatStream(ctx context.Context, cfg ProviderConfig, req ChatRequest, onChunk func(string)) (ChatResponse, error) {
+	req.Stream = true
+	return a.chat(ctx, cfg, req, onChunk)
+}
+
+// chat is the shared implementation. onChunk == nil means the buffered
+// Chat call; onChunk != nil means ChatStream (each delta is also passed
+// to onChunk as it arrives).
+func (a *AnthropicCompatAdapter) chat(ctx context.Context, cfg ProviderConfig, req ChatRequest, onChunk func(string)) (ChatResponse, error) {
 	if !cfg.Enabled {
 		return ChatResponse{}, fmt.Errorf("%w: %s", ErrProviderDisabled, a.meta.Name)
 	}
@@ -144,7 +160,7 @@ func (a *AnthropicCompatAdapter) Chat(ctx context.Context, cfg ProviderConfig, r
 
 	contentType := strings.ToLower(resp.Header.Get("Content-Type"))
 	if req.Stream && strings.Contains(contentType, "text/event-stream") {
-		text, err := parseAnthropicSSEStream(resp.Body, a.meta.Name, model)
+		text, err := parseAnthropicSSEStream(resp.Body, a.meta.Name, model, onChunk)
 		return ChatResponse{Content: text}, err
 	}
 
@@ -154,7 +170,7 @@ func (a *AnthropicCompatAdapter) Chat(ctx context.Context, cfg ProviderConfig, r
 		return ChatResponse{}, fmt.Errorf("empty response body from %s model %s", a.meta.Name, model)
 	}
 	if bytes.HasPrefix(trimmedRaw, []byte("event:")) || bytes.HasPrefix(trimmedRaw, []byte("data:")) {
-		text, err := parseAnthropicSSEStream(bytes.NewReader(trimmedRaw), a.meta.Name, model)
+		text, err := parseAnthropicSSEStream(bytes.NewReader(trimmedRaw), a.meta.Name, model, onChunk)
 		return ChatResponse{Content: text}, err
 	}
 
@@ -185,6 +201,11 @@ func (a *AnthropicCompatAdapter) Chat(ctx context.Context, cfg ProviderConfig, r
 	}
 
 	text, err := validateOrSalvageReasoning(textSB.String(), thinkingSB.String(), a.meta.Name, model)
+	// The upstream answered with plain JSON (not a stream) even though
+	// streaming was asked for: deliver the whole reply as one chunk.
+	if err == nil && onChunk != nil && text != "" {
+		onChunk(text)
+	}
 	return ChatResponse{Content: text}, err
 }
 
@@ -342,7 +363,11 @@ func applyAnthropicAuthAndHeaders(req *http.Request, cfg ProviderConfig) {
 	}
 }
 
-func parseAnthropicSSEStream(r io.Reader, label, model string) (string, error) {
+// parseAnthropicSSEStream reads an Anthropic SSE stream and returns the
+// full reply text. When onChunk != nil, each delta's text is also passed
+// to onChunk as it arrives (in order), so the caller can forward it
+// immediately instead of waiting for the whole reply.
+func parseAnthropicSSEStream(r io.Reader, label, model string, onChunk func(string)) (string, error) {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 64*1024), 8*1024*1024)
 
@@ -375,6 +400,9 @@ func parseAnthropicSSEStream(r io.Reader, label, model string) (string, error) {
 		if ev.Type == "content_block_delta" {
 			if ev.Delta.Text != "" {
 				contentSB.WriteString(ev.Delta.Text)
+				if onChunk != nil {
+					onChunk(ev.Delta.Text)
+				}
 			}
 			if ev.Delta.Thinking != "" {
 				thinkingSB.WriteString(ev.Delta.Thinking)

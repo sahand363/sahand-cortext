@@ -136,6 +136,82 @@ func (r *Router) Call(ctx context.Context, providerID, key, model string, messag
 	return "", totalLatency, lastErr
 }
 
+// CallStream is Call, but it yields the reply in pieces: onChunk is
+// invoked with each piece of the reply text, in order, as the provider
+// produces it, and the full reply is still returned when the stream
+// finishes. It uses the provider's ChatStream when it implements the
+// Streamer interface (OpenAI- and Anthropic-compatible adapters);
+// otherwise it falls back to the buffered Call and delivers the whole
+// reply as a single chunk (Gemini has no streaming form here, so a
+// Gemini reply arrives in one piece at the end — the call still works).
+// Retry and error classification match Call.
+func (r *Router) CallStream(ctx context.Context, providerID, key, model string, messages []Message, opts CallOpts, onChunk func(string)) (string, int64, error) {
+	p, cfg, err := r.registry.Get(providerID)
+	if err != nil {
+		return "", 0, err
+	}
+	if !cfg.Enabled {
+		return "", 0, fmt.Errorf("%w: %s", ErrProviderDisabled, p.Metadata().Name)
+	}
+	if strings.TrimSpace(key) != "" {
+		cfg.APIKey = strings.TrimSpace(key)
+	}
+	if p.Metadata().RequiresAPIKey && !strings.EqualFold(cfg.AuthType, "none") && strings.TrimSpace(cfg.APIKey) == "" {
+		return "", 0, fmt.Errorf("missing API key for %s", p.Metadata().Name)
+	}
+
+	streamer, canStream := p.(Streamer)
+	if !canStream {
+		// No incremental streaming for this provider: run the buffered
+		// call and deliver the whole reply as one chunk.
+		content, latency, err := r.Call(ctx, providerID, key, model, messages, opts)
+		if err == nil && onChunk != nil && content != "" {
+			onChunk(content)
+		}
+		return content, latency, err
+	}
+
+	maxRetries := 1
+	if opts.DisableRetry {
+		maxRetries = 0
+	}
+
+	var lastErr error
+	var totalLatency int64
+
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if attempt > 0 {
+			backoff := time.Duration(math.Pow(2, float64(attempt))) * 500 * time.Millisecond
+			select {
+			case <-time.After(backoff):
+			case <-ctx.Done():
+				return "", 0, ctx.Err()
+			}
+		}
+
+		start := time.Now()
+		resp, callErr := streamer.ChatStream(ctx, cfg, ChatRequest{
+			Model:        model,
+			Messages:     messages,
+			MaxTokens:    opts.MaxTokens,
+			Stream:       true,
+			DisableRetry: opts.DisableRetry,
+		}, onChunk)
+		elapsed := time.Since(start).Milliseconds()
+		totalLatency += elapsed
+
+		if callErr == nil {
+			return resp.Content, elapsed, nil
+		}
+		lastErr = ClassifyProviderError(callErr, elapsed)
+		if !IsRetryable(callErr) || ctx.Err() != nil {
+			return "", elapsed, lastErr
+		}
+	}
+
+	return "", totalLatency, lastErr
+}
+
 func (r *Router) ListModels(ctx context.Context, providerID, keyOverride string) ([]DiscoveredModel, error) {
 	p, cfg, err := r.registry.Get(providerID)
 	if err != nil {

@@ -23,6 +23,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -32,6 +33,7 @@ import (
 	"time"
 
 	"github.com/sahand363/sahand-cortext/internal/mobile"
+	"github.com/sahand363/sahand-cortext/internal/provider"
 )
 
 const (
@@ -468,6 +470,146 @@ func (a *App) mobileChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.writeMobileEncrypted(w, map[string]string{"reply": resp.Reply})
+}
+
+// mobileSSEWriter encrypts each SSE event with the mobile token and
+// flushes it immediately, so the app receives chunks as they arrive.
+// Each event is one line: data: <encrypted wire>\n\n — the app decrypts
+// the wire to get {"chunk": "..."} / {"done": true} / {"error": "..."}.
+type mobileSSEWriter struct {
+	w     http.ResponseWriter
+	token string
+}
+
+func newMobileSSEWriter(w http.ResponseWriter, token string) *mobileSSEWriter {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(http.StatusOK)
+	return &mobileSSEWriter{w: w, token: token}
+}
+
+func (s *mobileSSEWriter) event(v any) {
+	data, err := json.Marshal(v)
+	if err != nil {
+		return
+	}
+	wire, err := mobile.Encrypt(s.token, data)
+	if err != nil {
+		return
+	}
+	fmt.Fprintf(s.w, "data: %s\n\n", wire)
+	if f, ok := s.w.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// POST /api/mobile/chat/stream — encrypted body {"session_id","message","provider?","model?","persona_id?"}.
+// Streams the AI reply as SSE: each data: line is one encrypted event
+// {"chunk": "..."}; when the reply is complete the hub writes the FULL
+// reply to the DB exactly like the buffered chat (so history/memory stay
+// correct) and sends {"done": true}. On error it sends {"error": "..."}.
+// /learn and /learn-deep commands and staged-skill confirmations are
+// NOT streamed — they dispatch to sendMessage and return its reply as a
+// single chunk, exactly like the buffered endpoint. The buffered
+// /api/mobile/chat is untouched (the app falls back to it when the
+// stream endpoint is missing on an older hub).
+func (a *App) mobileChatStream(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", 405)
+		return
+	}
+	pt := a.readMobileBody(w, r)
+	if pt == nil {
+		return
+	}
+	var body struct {
+		SessionID string `json:"session_id"`
+		Message   string `json:"message"`
+		Provider  string `json:"provider"`
+		Model     string `json:"model"`
+		PersonaID string `json:"persona_id"`
+	}
+	if json.Unmarshal(pt, &body) != nil || strings.TrimSpace(body.Message) == "" || len(body.Message) > 30000 {
+		jsonOut(w, 400, map[string]string{"error": "Invalid message text"})
+		return
+	}
+
+	trimmedMsg := strings.TrimSpace(body.Message)
+
+	// Commands and staged-skill confirmations are handled by sendMessage
+	// (they return a short reply, not a model answer) — return that reply
+	// as one chunk, not a stream.
+	a.mu.Lock()
+	_, hasStaged := a.webStagedSkill[body.SessionID]
+	a.mu.Unlock()
+	if (hasStaged && !strings.HasPrefix(trimmedMsg, "/")) || strings.HasPrefix(trimmedMsg, "/learn ") || strings.HasPrefix(trimmedMsg, "/learn-deep ") {
+		status, respBody := a.dispatchChat(r, body.SessionID, body.Message, body.Provider, body.Model, body.PersonaID)
+		sw := newMobileSSEWriter(w, a.mobileToken())
+		if status != http.StatusOK {
+			var errResp struct {
+				Error string `json:"error"`
+			}
+			_ = json.Unmarshal(respBody, &errResp)
+			if errResp.Error == "" {
+				errResp.Error = "chat failed"
+			}
+			sw.event(map[string]string{"error": errResp.Error})
+			return
+		}
+		var resp struct {
+			Reply string `json:"reply"`
+		}
+		if json.Unmarshal(respBody, &resp) != nil {
+			sw.event(map[string]string{"error": "unexpected chat response"})
+			return
+		}
+		sw.event(map[string]string{"chunk": resp.Reply})
+		sw.event(map[string]bool{"done": true})
+		return
+	}
+
+	// Resolve the chat (session / persona / provider / model) exactly
+	// like sendMessage. This happens BEFORE any SSE header is sent, so
+	// a failure here is still a plain HTTP error and the app can fall
+	// back to the buffered endpoint.
+	t, cerr := a.resolveChatTarget(r.Context(), body.SessionID, body.PersonaID, body.Provider, body.Model)
+	if cerr != nil {
+		errBody, _ := json.Marshal(map[string]string{"error": cerr.message})
+		writeMobilePlainError(w, cerr.status, errBody)
+		return
+	}
+
+	promptMessages, err := a.buildChatPrompt(r.Context(), t, body.Message)
+	if err != nil {
+		jsonOut(w, 500, map[string]string{"error": "database error"})
+		return
+	}
+
+	// Start the stream. From here on, every chunk is flushed as it
+	// arrives. The skill/memory reads and the history rows are already
+	// closed (buildChatPrompt), so the long model call holds no DB
+	// connection, and the final DB write happens after the stream ends.
+	sw := newMobileSSEWriter(w, a.mobileToken())
+	answer, elapsed, err := a.router.CallStream(r.Context(), t.normProvider, a.providerKey(t.normProvider), t.chosenModel, promptMessages, provider.CallOpts{}, func(chunk string) {
+		if chunk == "" {
+			return
+		}
+		sw.event(map[string]string{"chunk": chunk})
+	})
+	if err != nil {
+		a.saveTestRecord(t.normProvider, t.chosenModel, ModelTestRecord{Status: "failed", LatencyMs: elapsed, LastError: err.Error()})
+		sw.event(map[string]string{"error": fmt.Sprintf("[%s · %s] %s", t.providerName, t.chosenModel, err.Error())})
+		return
+	}
+
+	// The stream finished: write the FULL reply to the DB exactly like
+	// the buffered chat (history/memory stay correct), then signal done.
+	if err := a.finishChat(t, body.Message, answer, elapsed); err != nil {
+		sw.event(map[string]string{"error": "database error"})
+		return
+	}
+	sw.event(map[string]bool{"done": true})
 }
 
 // POST /api/mobile/models — encrypted body {}. Returns the available

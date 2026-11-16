@@ -110,3 +110,16 @@ type Provider interface {
 	ListModels(ctx context.Context, cfg ProviderConfig) ([]DiscoveredModel, error)
 	TestConnection(ctx context.Context, cfg ProviderConfig) error
 }
+
+// Streamer is an optional interface for providers that can yield the
+// reply in pieces as it arrives (true streaming), instead of only
+// returning the full reply at the end. ChatStream calls onChunk with
+// each piece of the reply text in order, as the provider produces it,
+// and still returns the full reply (ChatResponse) when the stream
+// finishes. A provider that does not implement Streamer is used
+// through the buffered Chat call instead (see Router.CallStream).
+// Gemini does not implement it (its generateContent API has no
+// streaming form here); OpenAI- and Anthropic-compatible adapters do.
+type Streamer interface {
+	ChatStream(ctx context.Context, cfg ProviderConfig, req ChatRequest, onChunk func(string)) (ChatResponse, error)
+}

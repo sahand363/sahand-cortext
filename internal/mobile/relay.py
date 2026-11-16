@@ -22,6 +22,9 @@ Behaviour:
       X-Mobile-Relay: <relay-id>) and the exact raw body, with a 600s
       timeout. The hub's exact response (status, body, Content-Type)
       is returned. The body is never read, parsed, or decrypted.
+      Streaming responses (Content-Type: text/event-stream) are passed
+      through chunk-by-chunk as they arrive, instead of being buffered,
+      so a streamed reply reaches the app word-by-word.
     * GET / returns plain JSON {"ok": true, "service": "cortext-relay",
       "hub": "<hub>"}.
     * Anything else returns 404 plain JSON {"error": "not found"}.
@@ -79,7 +82,11 @@ class RelayHandler(http.server.BaseHTTPRequestHandler):
         return self.rfile.read(n)
 
     def _forward(self):
-        """Forward this request to the hub and return the hub's response."""
+        """Forward this request to the hub and return the hub's response.
+        Streaming responses (Content-Type: text/event-stream) are passed
+        through chunk-by-chunk as they arrive, instead of being buffered;
+        every other response is buffered and returned exactly as before.
+        """
         hub = self.server.hub_url          # e.g. http://192.168.1.5:8787
         parsed = urllib.parse.urlparse(hub)
         is_https = parsed.scheme == "https"
@@ -109,10 +116,8 @@ class RelayHandler(http.server.BaseHTTPRequestHandler):
                     hub_host, hub_port, timeout=FORWARD_TIMEOUT_SECS)
             conn.request(self.command, target, body=body, headers=headers)
             resp = conn.getresponse()
-            resp_body = resp.read()
             status = resp.status
-            content_type = resp.getheader("Content-Type")
-            conn.close()
+            content_type = resp.getheader("Content-Type") or ""
         except Exception as exc:  # hub unreachable / timeout / TLS error
             log("FORWARD %s %s -> hub unreachable (%s)"
                 % (self.command, self.path, exc))
@@ -120,6 +125,48 @@ class RelayHandler(http.server.BaseHTTPRequestHandler):
             return
 
         log("FORWARD %s %s -> %d" % (self.command, self.path, status))
+
+        if content_type.startswith("text/event-stream"):
+            # SSE: forward each chunk as it arrives (no Content-Length;
+            # the client reads until the connection closes).
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            cache = resp.getheader("Cache-Control")
+            if cache:
+                self.send_header("Cache-Control", cache)
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.close_connection = True
+            # read1 (not read): return as soon as ANY bytes are available,
+            # instead of waiting to fill the buffer or for EOF — read()
+            # would block until 4096 bytes or the end of the stream, which
+            # is exactly the buffering this code exists to avoid.
+            read_chunk = getattr(resp, "read1", resp.read)
+            try:
+                while True:
+                    chunk = read_chunk(4096)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    self.wfile.flush()
+            except Exception as exc:
+                log("STREAM %s %s -> interrupted (%s)"
+                    % (self.command, self.path, exc))
+            finally:
+                conn.close()
+            return
+
+        # Non-streaming: buffer the whole body and return it exactly as
+        # before.
+        try:
+            resp_body = resp.read()
+        except Exception as exc:
+            log("FORWARD %s %s -> read failed (%s)"
+                % (self.command, self.path, exc))
+            conn.close()
+            self._send_json(502, {"error": "hub unreachable"})
+            return
+        conn.close()
 
         self.send_response(status)
         if content_type:

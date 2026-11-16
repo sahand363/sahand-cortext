@@ -36,6 +36,23 @@ func (o *OpenAICompatAdapter) NormalizeModelID(id string) string {
 }
 
 func (o *OpenAICompatAdapter) Chat(ctx context.Context, cfg ProviderConfig, req ChatRequest) (ChatResponse, error) {
+	return o.chat(ctx, cfg, req, nil)
+}
+
+// ChatStream is Chat, but it yields the reply in pieces as the provider
+// produces them (onChunk is called with each delta, in order) and still
+// returns the full reply when the stream finishes. It forces the
+// upstream request to stream (req.Stream = true).
+func (o *OpenAICompatAdapter) ChatStream(ctx context.Context, cfg ProviderConfig, req ChatRequest, onChunk func(string)) (ChatResponse, error) {
+	req.Stream = true
+	return o.chat(ctx, cfg, req, onChunk)
+}
+
+// chat is the shared implementation. onChunk == nil means the buffered
+// Chat call (the full reply is returned at the end and nothing is
+// yielded early); onChunk != nil means ChatStream (each delta is also
+// passed to onChunk as it arrives).
+func (o *OpenAICompatAdapter) chat(ctx context.Context, cfg ProviderConfig, req ChatRequest, onChunk func(string)) (ChatResponse, error) {
 	if !cfg.Enabled {
 		return ChatResponse{}, fmt.Errorf("%w: %s", ErrProviderDisabled, o.meta.Name)
 	}
@@ -125,7 +142,7 @@ func (o *OpenAICompatAdapter) Chat(ctx context.Context, cfg ProviderConfig, req 
 
 	contentType := strings.ToLower(resp.Header.Get("Content-Type"))
 	if req.Stream && strings.Contains(contentType, "text/event-stream") {
-		text, err := parseOpenAISSEStream(resp.Body, o.meta.Name, model)
+		text, err := parseOpenAISSEStream(resp.Body, o.meta.Name, model, onChunk)
 		return ChatResponse{Content: text}, err
 	}
 
@@ -136,7 +153,7 @@ func (o *OpenAICompatAdapter) Chat(ctx context.Context, cfg ProviderConfig, req 
 	}
 
 	if bytes.HasPrefix(trimmedRaw, []byte("data:")) {
-		text, err := parseOpenAISSEStream(bytes.NewReader(trimmedRaw), o.meta.Name, model)
+		text, err := parseOpenAISSEStream(bytes.NewReader(trimmedRaw), o.meta.Name, model, onChunk)
 		return ChatResponse{Content: text}, err
 	}
 
@@ -166,6 +183,11 @@ func (o *OpenAICompatAdapter) Chat(ctx context.Context, cfg ProviderConfig, req 
 		reasoning = strings.TrimSpace(msg.Reasoning)
 	}
 	text, err := validateOrSalvageReasoning(msg.Content, reasoning, o.meta.Name, model)
+	// The upstream answered with plain JSON (not a stream) even though
+	// streaming was asked for: deliver the whole reply as one chunk.
+	if err == nil && onChunk != nil && text != "" {
+		onChunk(text)
+	}
 	return ChatResponse{Content: text}, err
 }
 
@@ -419,7 +441,11 @@ func validateOrSalvageReasoning(content, reasoning, label, model string) (string
 	return "", fmt.Errorf("%s model %s exhausted output tokens during internal reasoning without writing final deliverable", label, model)
 }
 
-func parseOpenAISSEStream(r io.Reader, label, model string) (string, error) {
+// parseOpenAISSEStream reads an OpenAI-compatible SSE stream and returns
+// the full reply text. When onChunk != nil, each delta's content is also
+// passed to onChunk as it arrives (in order), so the caller can forward
+// it immediately instead of waiting for the whole reply.
+func parseOpenAISSEStream(r io.Reader, label, model string, onChunk func(string)) (string, error) {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 64*1024), 8*1024*1024)
 
@@ -465,8 +491,14 @@ func parseOpenAISSEStream(r io.Reader, label, model string) (string, error) {
 		for _, ch := range chunk.Choices {
 			if ch.Delta.Content != "" {
 				contentSB.WriteString(ch.Delta.Content)
+				if onChunk != nil {
+					onChunk(ch.Delta.Content)
+				}
 			} else if ch.Message.Content != "" {
 				contentSB.WriteString(ch.Message.Content)
+				if onChunk != nil {
+					onChunk(ch.Message.Content)
+				}
 			}
 			if ch.Delta.ReasoningContent != "" {
 				reasoningSB.WriteString(ch.Delta.ReasoningContent)
