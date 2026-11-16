@@ -147,6 +147,32 @@
             </form>
           </div>
         </div>
+        <details class="chat-model-settings" id="chat-model-settings">
+          <summary>⚙ Model settings — Main Chat allowed models</summary>
+          <div class="setting-row" style="align-items:flex-start;flex-direction:column;gap:12px">
+            <div style="display:flex;justify-content:space-between;align-items:center;width:100%;gap:12px;flex-wrap:wrap">
+              <div>
+                <b>Main Chat allowed models</b>
+                <small>Choose whether Main Chat can pick from all globally enabled models or only a curated subset.</small>
+              </div>
+              <select id="chat-scope-mode" class="form-control" style="width:auto;min-width:210px">
+                <option value="all">All enabled models (default)</option>
+                <option value="selected">Selected models only</option>
+              </select>
+            </div>
+            <div id="chat-scope-picker-wrap" class="chat-scope-box hidden">
+              <div class="chat-scope-toolbar">
+                <span id="chat-scope-summary" class="muted-note">Select which globally enabled models appear in Main Chat:</span>
+                <div class="heading-actions">
+                  <button type="button" class="btn btn-quiet btn-small" id="chat-scope-select-all">✓ Select All</button>
+                  <button type="button" class="btn btn-quiet btn-small" id="chat-scope-clear-all">☐ Clear</button>
+                  <button type="button" class="btn btn-primary btn-small" id="save-chat-scope-btn">Save Chat Models</button>
+                </div>
+              </div>
+              <div id="chat-scope-models-list" class="chat-scope-list"></div>
+            </div>
+          </div>
+        </details>
       </section>
 
       <section id="page-models" class="page module-page hidden">
@@ -973,30 +999,6 @@ Sahand: آره ردیفه الان دارم تستش میکنم 🚀"></textarea
                   <option value="dark">Dark Mode</option>
                   <option value="light">GitHub Light</option>
                 </select>
-              </div>
-              <div class="setting-row" style="align-items:flex-start;flex-direction:column;gap:12px">
-                <div style="display:flex;justify-content:space-between;align-items:center;width:100%;gap:12px;flex-wrap:wrap">
-                  <div>
-                    <b>Main Chat allowed models</b>
-                    <small>Choose whether Main Chat can pick from all globally enabled models or only a curated subset.</small>
-                  </div>
-                  <select id="chat-scope-mode" class="form-control" style="width:auto;min-width:210px">
-                    <option value="all">All enabled models (default)</option>
-                    <option value="selected">Selected models only</option>
-                  </select>
-                </div>
-
-                <div id="chat-scope-picker-wrap" class="chat-scope-box hidden">
-                  <div class="chat-scope-toolbar">
-                    <span id="chat-scope-summary" class="muted-note">Select which globally enabled models appear in Main Chat:</span>
-                    <div class="heading-actions">
-                      <button type="button" class="btn btn-quiet btn-small" id="chat-scope-select-all">✓ Select All</button>
-                      <button type="button" class="btn btn-quiet btn-small" id="chat-scope-clear-all">☐ Clear</button>
-                      <button type="button" class="btn btn-primary btn-small" id="save-chat-scope-btn">Save Chat Models</button>
-                    </div>
-                  </div>
-                  <div id="chat-scope-models-list" class="chat-scope-list"></div>
-                </div>
               </div>
               <div class="setting-row"><div><b>Persian & BiDi typography</b><small>Vazirmatn font + automatic RTL/LTR mixed sentence alignment.</small></div><span class="status-pill connected">Enabled</span></div>
               <div class="setting-row"><div><b>Pluggable provider & chatbot registry</b><small>Gemini, OpenRouter, AIPrime, CodeCraft, custom APIs, and trainable personas.</small></div><span class="status-pill connected">Active</span></div>

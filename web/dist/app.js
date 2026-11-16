@@ -2478,6 +2478,7 @@ function switchPage(name, autoRestoreChat = true) {
   if (name === "chat" && autoRestoreChat) {
     restoreChatLastState();
   }
+  if (name === "chat") renderChatModelScopeSettings();
   if (name === "sessions") loadBotSessions();
   if (name === "skills") loadSkills();
   if (name === "personas") loadPersonasPage();
