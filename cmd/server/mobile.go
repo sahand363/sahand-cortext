@@ -303,25 +303,24 @@ func (a *App) mobileHealth(w http.ResponseWriter, r *http.Request) {
 // persona chat when it names a persona) and replies (encrypted)
 // {"id": "<session id>"}.
 func (a *App) mobileSessions(w http.ResponseWriter, r *http.Request) {
+	// POST /api/mobile/sessions/list — the list endpoint as a POST.
+	// The app uses POST, not GET-with-a-body, for the list: a GET
+	// request body is not reliably carried by HttpURLConnection, so
+	// the list came back empty even though the hub had the chats.
+	// GET /api/mobile/sessions still lists, for backward compatibility.
+	if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/list") {
+		if a.readMobileBody(w, r) == nil {
+			return
+		}
+		a.mobileListSessions(w, r)
+		return
+	}
 	switch r.Method {
 	case http.MethodGet:
 		if a.readMobileBody(w, r) == nil {
 			return
 		}
-		status, body := a.dispatchListSessions(r)
-		if status != http.StatusOK {
-			writeMobilePlainError(w, status, body)
-			return
-		}
-		var sessions []Session
-		if json.Unmarshal(body, &sessions) != nil {
-			jsonOut(w, 502, map[string]string{"error": "unexpected sessions response"})
-			return
-		}
-		if sessions == nil {
-			sessions = []Session{}
-		}
-		a.writeMobileEncrypted(w, map[string]any{"sessions": sessions})
+		a.mobileListSessions(w, r)
 	case http.MethodPost:
 		pt := a.readMobileBody(w, r)
 		if pt == nil {
@@ -347,17 +346,42 @@ func (a *App) mobileSessions(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// mobileListSessions is the shared list implementation for GET
+// /api/mobile/sessions and POST /api/mobile/sessions/list. It reuses
+// the web UI's listSessions handler, so the app and the hub list the
+// same sessions table — a chat started in either place shows up in
+// the other.
+func (a *App) mobileListSessions(w http.ResponseWriter, r *http.Request) {
+	status, body := a.dispatchListSessions(r)
+	if status != http.StatusOK {
+		writeMobilePlainError(w, status, body)
+		return
+	}
+	var sessions []Session
+	if json.Unmarshal(body, &sessions) != nil {
+		jsonOut(w, 502, map[string]string{"error": "unexpected sessions response"})
+		return
+	}
+	if sessions == nil {
+		sessions = []Session{}
+	}
+	a.writeMobileEncrypted(w, map[string]any{"sessions": sessions})
+}
+
 // mobilePersonaItem is one entry of the GET /api/mobile/personas reply.
 type mobilePersonaItem struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
 }
 
-// GET /api/mobile/personas — encrypted body {} (the token check; the body
-// is otherwise ignored). Lists the hub's enabled personas (encrypted)
-// {"personas": [{"id", "name"}]}. For the app's persona picker.
+// GET or POST /api/mobile/personas — encrypted body {} (the token
+// check; the body is otherwise ignored). Lists the hub's enabled
+// personas (encrypted) {"personas": [{"id", "name"}]}. For the app's
+// persona picker. POST is accepted as well as GET: the app uses POST,
+// because a GET request body is not reliably carried by
+// HttpURLConnection, so the list came back empty.
 func (a *App) mobilePersonas(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
+	if r.Method != http.MethodGet && r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", 405)
 		return
 	}

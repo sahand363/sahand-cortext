@@ -2598,6 +2598,7 @@ func main() {
 	// by decrypting the body; the status/settings endpoints use the web login.
 	mux.HandleFunc("/api/mobile/health", app.mobileHealth)
 	mux.HandleFunc("/api/mobile/sessions", app.mobileSessions)
+	mux.HandleFunc("/api/mobile/sessions/list", app.mobileSessions)
 	mux.HandleFunc("/api/mobile/sessions/", app.mobileSessionByID)
 	mux.HandleFunc("/api/mobile/personas", app.mobilePersonas)
 	mux.HandleFunc("/api/mobile/chat", app.mobileChat)
