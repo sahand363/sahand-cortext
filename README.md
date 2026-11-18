@@ -8,6 +8,22 @@ It supports many providers through one registry — AIPrime, Google Gemini, Anth
 
 ---
 
+## 📸 Screenshots
+
+**Models & providers** — every provider's models in one registry, each tested live and enabled or benched with one click.
+
+![Models & providers](docs/screenshots/models-providers.webp)
+
+**Skills** — knowledge the AI learned from web pages via `/learn`, with per-skill visibility (everyone, main chat, or a persona).
+
+![Skills](docs/screenshots/skills.webp)
+
+**CorText Chat for Android** — the companion app ([sahand-cortext-android](https://github.com/sahand363/sahand-cortext-android)), streaming replies from your hub over an encrypted connection.
+
+<p align="center"><img src="docs/screenshots/android-app.webp" alt="CorText Chat Android app" width="300"></p>
+
+---
+
 ## 🚀 Quick Installation
 
 ### One-Line Installer
