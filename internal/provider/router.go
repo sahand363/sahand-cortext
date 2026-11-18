@@ -233,6 +233,19 @@ func (r *Router) doCallStream(ctx context.Context, providerID, key, model string
 	var lastErr error
 	var totalLatency int64
 
+	// Once any chunk has reached the caller, a retry would stream the
+	// reply again from the start and the client would show it twice.
+	emitted := false
+	trackedChunk := onChunk
+	if onChunk != nil {
+		trackedChunk = func(s string) {
+			if s != "" {
+				emitted = true
+			}
+			onChunk(s)
+		}
+	}
+
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
 			backoff := time.Duration(math.Pow(2, float64(attempt))) * 500 * time.Millisecond
@@ -250,7 +263,7 @@ func (r *Router) doCallStream(ctx context.Context, providerID, key, model string
 			MaxTokens:    opts.MaxTokens,
 			Stream:       true,
 			DisableRetry: opts.DisableRetry,
-		}, onChunk)
+		}, trackedChunk)
 		elapsed := time.Since(start).Milliseconds()
 		totalLatency += elapsed
 
@@ -258,7 +271,7 @@ func (r *Router) doCallStream(ctx context.Context, providerID, key, model string
 			return resp.Content, elapsed, resp.Usage, true, nil
 		}
 		lastErr = ClassifyProviderError(callErr, elapsed)
-		if !IsRetryable(callErr) || ctx.Err() != nil {
+		if !IsRetryable(callErr) || ctx.Err() != nil || emitted {
 			return "", elapsed, Usage{}, true, lastErr
 		}
 	}

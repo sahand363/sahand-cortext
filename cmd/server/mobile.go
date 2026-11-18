@@ -30,6 +30,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sahand363/sahand-cortext/internal/mobile"
@@ -501,6 +502,7 @@ func (a *App) mobileChat(w http.ResponseWriter, r *http.Request) {
 // Each event is one line: data: <encrypted wire>\n\n — the app decrypts
 // the wire to get {"chunk": "..."} / {"done": true} / {"error": "..."}.
 type mobileSSEWriter struct {
+	mu    sync.Mutex // events and heartbeats come from different goroutines
 	w     http.ResponseWriter
 	token string
 }
@@ -522,10 +524,81 @@ func (s *mobileSSEWriter) event(v any) {
 	if err != nil {
 		return
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	fmt.Fprintf(s.w, "data: %s\n\n", wire)
 	if f, ok := s.w.(http.Flusher); ok {
 		f.Flush()
 	}
+}
+
+// ping writes an SSE comment line (": ping"). The app skips any line
+// that is not "data:", so it carries no content; it only keeps the
+// connection busy while the model thinks without streaming text, so a
+// proxy (Caddy, Cloudflare, a phone carrier's NAT) does not drop an
+// idle stream before the answer arrives.
+func (s *mobileSSEWriter) ping() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	fmt.Fprint(s.w, ": ping\n\n")
+	if f, ok := s.w.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// startHeartbeat pings every interval until the returned stop func is
+// called (or the request ends). stop waits for the pinger to exit, so
+// no ping is written after the handler returns.
+func (s *mobileSSEWriter) startHeartbeat(r *http.Request, interval time.Duration) (stop func()) {
+	done := make(chan struct{})
+	exited := make(chan struct{})
+	go func() {
+		defer close(exited)
+		t := time.NewTicker(interval)
+		defer t.Stop()
+		for {
+			select {
+			case <-t.C:
+				s.ping()
+			case <-done:
+				return
+			case <-r.Context().Done():
+				return
+			}
+		}
+	}()
+	var once sync.Once
+	return func() {
+		once.Do(func() { close(done) })
+		<-exited
+	}
+}
+
+// unstreamedRemainder returns the part of the final answer the app has
+// not received as chunks yet. The provider adapters can produce text
+// without streaming it — e.g. a model that answers in its reasoning
+// field (validateOrSalvageReasoning) or an upstream that sent one plain
+// JSON body inside the stream. Without this, the hub saved the answer
+// and sent {"done": true} with zero chunks: the app showed nothing
+// until the chat was reopened. Returns "" when everything was streamed
+// or when the streamed text is not a prefix of the answer (nothing
+// safe to append; the app re-syncs from history then).
+func unstreamedRemainder(streamed, answer string) string {
+	if answer == "" || streamed == answer {
+		return ""
+	}
+	if streamed == "" {
+		return answer
+	}
+	if strings.HasPrefix(answer, streamed) {
+		return answer[len(streamed):]
+	}
+	// The final answer is trimmed; the stream may have started with
+	// whitespace or a newline.
+	if trimmed := strings.TrimLeft(streamed, " \t\r\n"); strings.HasPrefix(answer, trimmed) {
+		return answer[len(trimmed):]
+	}
+	return ""
 }
 
 // POST /api/mobile/chat/stream — encrypted body {"session_id","message","provider?","model?","persona_id?"}.
@@ -615,12 +688,16 @@ func (a *App) mobileChatStream(w http.ResponseWriter, r *http.Request) {
 	// closed (buildChatPrompt), so the long model call holds no DB
 	// connection, and the final DB write happens after the stream ends.
 	sw := newMobileSSEWriter(w, a.mobileToken())
+	stopHeartbeat := sw.startHeartbeat(r, 15*time.Second)
+	var streamed strings.Builder
 	answer, elapsed, err := a.router.CallStream(r.Context(), t.normProvider, a.providerKey(t.normProvider), t.chosenModel, promptMessages, provider.CallOpts{}, func(chunk string) {
 		if chunk == "" {
 			return
 		}
+		streamed.WriteString(chunk)
 		sw.event(map[string]string{"chunk": chunk})
 	})
+	stopHeartbeat()
 	if err != nil {
 		a.saveTestRecord(t.normProvider, t.chosenModel, ModelTestRecord{Status: "failed", LatencyMs: elapsed, LastError: err.Error()})
 		sw.event(map[string]string{"error": fmt.Sprintf("[%s · %s] %s", t.providerName, t.chosenModel, err.Error())})
@@ -632,6 +709,11 @@ func (a *App) mobileChatStream(w http.ResponseWriter, r *http.Request) {
 	if err := a.finishChat(t, body.Message, answer, elapsed); err != nil {
 		sw.event(map[string]string{"error": "database error"})
 		return
+	}
+	// Deliver any text the provider produced without streaming it, so
+	// the app always ends with the same reply the DB holds.
+	if rest := unstreamedRemainder(streamed.String(), answer); rest != "" {
+		sw.event(map[string]string{"chunk": rest})
 	}
 	sw.event(map[string]bool{"done": true})
 }

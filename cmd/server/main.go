@@ -32,7 +32,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const AppVersion = "0.9.0"
+const AppVersion = "0.9.1"
 
 type App struct {
 	db             *sql.DB
