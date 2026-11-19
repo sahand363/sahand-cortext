@@ -137,7 +137,7 @@ func (o *OpenAICompatAdapter) chat(ctx context.Context, cfg ProviderConfig, req 
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		rawErr, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		return ChatResponse{}, fmt.Errorf("%s HTTP %d: %s", o.meta.Name, resp.StatusCode, ExtractAPIError(rawErr))
+		return ChatResponse{}, NewHTTPError(o.meta.Name, resp, rawErr)
 	}
 
 	contentType := strings.ToLower(resp.Header.Get("Content-Type"))

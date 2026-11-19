@@ -155,7 +155,7 @@ func (a *AnthropicCompatAdapter) chat(ctx context.Context, cfg ProviderConfig, r
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		rawErr, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		return ChatResponse{}, fmt.Errorf("%s HTTP %d: %s", a.meta.Name, resp.StatusCode, ExtractAPIError(rawErr))
+		return ChatResponse{}, NewHTTPError(a.meta.Name, resp, rawErr)
 	}
 
 	contentType := strings.ToLower(resp.Header.Get("Content-Type"))

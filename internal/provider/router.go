@@ -6,7 +6,6 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
-	"math"
 	"net"
 	"net/http"
 	"strings"
@@ -107,24 +106,10 @@ func (r *Router) doCall(ctx context.Context, providerID, key, model string, mess
 		return "", 0, Usage{}, false, fmt.Errorf("missing API key for %s", p.Metadata().Name)
 	}
 
-	maxRetries := 1
-	if opts.DisableRetry {
-		maxRetries = 0
-	}
-
 	var lastErr error
 	var totalLatency int64
 
-	for attempt := 0; attempt <= maxRetries; attempt++ {
-		if attempt > 0 {
-			backoff := time.Duration(math.Pow(2, float64(attempt))) * 500 * time.Millisecond
-			select {
-			case <-time.After(backoff):
-			case <-ctx.Done():
-				return "", 0, Usage{}, true, ctx.Err()
-			}
-		}
-
+	for attempt := 0; ; attempt++ {
 		start := time.Now()
 		stream := opts.Stream || (cfg.StreamOnRetry && attempt > 0)
 		resp, callErr := p.Chat(ctx, cfg, ChatRequest{
@@ -138,15 +123,65 @@ func (r *Router) doCall(ctx context.Context, providerID, key, model string, mess
 		totalLatency += elapsed
 
 		if callErr == nil {
+			ClearCooldown(providerID, model)
 			return resp.Content, elapsed, resp.Usage, true, nil
 		}
 		lastErr = ClassifyProviderError(callErr, elapsed)
-		if !IsRetryable(callErr) || ctx.Err() != nil {
+		if ctx.Err() != nil {
 			return "", elapsed, Usage{}, true, lastErr
 		}
+		wait, again := retryWait(attempt, callErr, opts)
+		if !again {
+			MarkCooldown(providerID, model, CooldownFor(callErr), lastErr.Error())
+			return "", totalLatency, Usage{}, true, lastErr
+		}
+		select {
+		case <-time.After(wait):
+		case <-ctx.Done():
+			return "", totalLatency, Usage{}, true, ctx.Err()
+		}
 	}
+}
 
-	return "", totalLatency, Usage{}, true, lastErr
+// retryWait decides whether a failed call is tried again on the same model,
+// and after how long. A model with a backup (FailFastOnRateLimit) is not
+// waited on for a 429: the caller parks it and moves to the backup.
+func retryWait(attempt int, err error, opts CallOpts) (time.Duration, bool) {
+	if opts.DisableRetry || !IsRetryable(err) {
+		return 0, false
+	}
+	switch {
+	case IsRateLimit(err):
+		if opts.FailFastOnRateLimit || attempt >= 1 {
+			return 0, false
+		}
+		wait := 5 * time.Second
+		if he, ok := AsHTTPError(err); ok {
+			if he.DailyQuota {
+				return 0, false
+			}
+			if he.RetryAfter > 0 {
+				wait = he.RetryAfter
+			}
+		}
+		if wait > 20*time.Second {
+			return 0, false // too long to hold a reply open; park it instead
+		}
+		return Jitter(wait), true
+	case IsOverloaded(err):
+		if attempt >= 2 {
+			return 0, false
+		}
+		if attempt == 0 {
+			return Jitter(2 * time.Second), true
+		}
+		return Jitter(6 * time.Second), true
+	default:
+		if attempt >= 1 {
+			return 0, false
+		}
+		return Jitter(time.Second), true
+	}
 }
 
 // recordUsage writes one usage_events row for a provider call. It is
@@ -225,11 +260,6 @@ func (r *Router) doCallStream(ctx context.Context, providerID, key, model string
 		return content, latency, usage, attempted, err
 	}
 
-	maxRetries := 1
-	if opts.DisableRetry {
-		maxRetries = 0
-	}
-
 	var lastErr error
 	var totalLatency int64
 
@@ -246,16 +276,7 @@ func (r *Router) doCallStream(ctx context.Context, providerID, key, model string
 		}
 	}
 
-	for attempt := 0; attempt <= maxRetries; attempt++ {
-		if attempt > 0 {
-			backoff := time.Duration(math.Pow(2, float64(attempt))) * 500 * time.Millisecond
-			select {
-			case <-time.After(backoff):
-			case <-ctx.Done():
-				return "", 0, Usage{}, true, ctx.Err()
-			}
-		}
-
+	for attempt := 0; ; attempt++ {
 		start := time.Now()
 		resp, callErr := streamer.ChatStream(ctx, cfg, ChatRequest{
 			Model:        model,
@@ -268,15 +289,24 @@ func (r *Router) doCallStream(ctx context.Context, providerID, key, model string
 		totalLatency += elapsed
 
 		if callErr == nil {
+			ClearCooldown(providerID, model)
 			return resp.Content, elapsed, resp.Usage, true, nil
 		}
 		lastErr = ClassifyProviderError(callErr, elapsed)
-		if !IsRetryable(callErr) || ctx.Err() != nil || emitted {
+		if ctx.Err() != nil || emitted {
 			return "", elapsed, Usage{}, true, lastErr
 		}
+		wait, again := retryWait(attempt, callErr, opts)
+		if !again {
+			MarkCooldown(providerID, model, CooldownFor(callErr), lastErr.Error())
+			return "", totalLatency, Usage{}, true, lastErr
+		}
+		select {
+		case <-time.After(wait):
+		case <-ctx.Done():
+			return "", totalLatency, Usage{}, true, ctx.Err()
+		}
 	}
-
-	return "", totalLatency, Usage{}, true, lastErr
 }
 
 func (r *Router) ListModels(ctx context.Context, providerID, keyOverride string) ([]DiscoveredModel, error) {

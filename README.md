@@ -1,4 +1,4 @@
-# Sahand-CorText · v0.9.1
+# Sahand-CorText · v0.9.2
 
 **A private, secure, single-user AI workspace hosted on your own Ubuntu server.**
 

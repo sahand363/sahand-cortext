@@ -730,14 +730,48 @@ func (e *CollaborationEngine) invokeWithFailover(
 	autoRetry := boolOpt(metaCfg.AutoRetry, true)
 	var errs []string
 	var prevErr string
+	var prev *Participant
+
+	// If every candidate is parked after a rate limit or overload, wait for
+	// the first one to come back rather than failing the whole turn.
+	if wait := soonestCooldown(candidates); wait > 0 {
+		if wait > maxCooldownWait {
+			wait = maxCooldownWait
+		}
+		_ = e.storage.RecordEvent(ctx, jobID, EventParticipantCooldown, phase, helper.WorkerID(),
+			fmt.Sprintf("⏸ All models for this step are cooling down after rate limits — waiting %ds for the first one to be ready.", int(wait.Seconds()+0.5)),
+			marshalPayload(map[string]any{"round": round, "wait_seconds": int(wait.Seconds() + 0.5)}))
+		if err := sleepCtx(ctx, wait); err != nil {
+			return StructuredModelResponse{}, "", 0, candidates[0], err
+		}
+	}
 
 	for idx, cand := range candidates {
 		if cancel, _ := e.checkCancelledOrPaused(ctx, jobID, helper); cancel {
 			return StructuredModelResponse{}, "", 0, cand, ErrJobCancelled
 		}
 
-		if idx > 0 {
-			prev := candidates[idx-1]
+		backupReady := anyReady(candidates[idx+1:])
+
+		// Skip a model that is still cooling down when a backup can take
+		// the turn now. This is not a failure, so it isn't counted as one.
+		if rem, why := provider.CooldownRemaining(cand.Provider, cand.Model); rem > 0 && backupReady {
+			_ = e.storage.RecordEvent(ctx, jobID, EventParticipantCooldown, phase, helper.WorkerID(),
+				fmt.Sprintf("⏸ %s/%s is cooling down (%ds left) — using backup.", cand.Provider, cand.Model, int(rem.Seconds()+0.5)),
+				marshalPayload(map[string]any{
+					"round":        round,
+					"role":         cand.Role,
+					"provider":     cand.Provider,
+					"model":        cand.Model,
+					"sort_order":   cand.SortOrder,
+					"wait_seconds": int(rem.Seconds() + 0.5),
+					"reason":       why,
+				}))
+			errs = append(errs, fmt.Sprintf("%s/%s: cooling down", cand.Provider, cand.Model))
+			continue
+		}
+
+		if prev != nil {
 			_ = e.storage.RecordEvent(ctx, jobID, EventParticipantFallback, phase, helper.WorkerID(),
 				fmt.Sprintf("✗ Model %s/%s failed (%s) — automatically passing job to backup %s/%s.", prev.Provider, prev.Model, prevErr, cand.Provider, cand.Model),
 				marshalPayload(map[string]any{
@@ -753,12 +787,17 @@ func (e *CollaborationEngine) invokeWithFailover(
 		}
 
 		msgs := promptBuilder(cand)
-		parsed, raw, lat, err := e.invokeParticipant(ctx, jobID, round, phase, cand, msgs, timeout, !autoRetry, helper)
+		parsed, raw, lat, err := e.invokeParticipant(ctx, jobID, round, phase, cand, msgs, timeout, !autoRetry, backupReady, helper)
 		if err == nil {
 			return parsed, raw, lat, cand, nil
 		}
+		if errors.Is(err, ErrJobCancelled) || errors.Is(err, context.Canceled) {
+			return StructuredModelResponse{}, "", 0, cand, err
+		}
 
 		prevErr = err.Error()
+		c := cand
+		prev = &c
 		_ = e.storage.RecordEvent(ctx, jobID, "participant_failed", phase, helper.WorkerID(),
 			fmt.Sprintf("✗ Model %s/%s failed (%s)", cand.Provider, cand.Model, prevErr),
 			marshalPayload(map[string]any{
@@ -774,6 +813,48 @@ func (e *CollaborationEngine) invokeWithFailover(
 	}
 
 	return StructuredModelResponse{}, "", 0, candidates[0], fmt.Errorf("all candidate models failed (%s)", strings.Join(errs, " | "))
+}
+
+// maxCooldownWait caps how long one step waits for a parked model.
+const maxCooldownWait = 2 * time.Minute
+
+// soonestCooldown is how long until the first candidate is ready again, or 0
+// when at least one candidate is ready now.
+func soonestCooldown(cands []Participant) time.Duration {
+	var best time.Duration = -1
+	for _, c := range cands {
+		rem, _ := provider.CooldownRemaining(c.Provider, c.Model)
+		if rem <= 0 {
+			return 0
+		}
+		if best < 0 || rem < best {
+			best = rem
+		}
+	}
+	if best < 0 {
+		return 0
+	}
+	return best
+}
+
+func anyReady(cands []Participant) bool {
+	for _, c := range cands {
+		if rem, _ := provider.CooldownRemaining(c.Provider, c.Model); rem <= 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func sleepCtx(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (e *CollaborationEngine) finalizeAtLimit(ctx context.Context, jobID string, round, totalCalls int, reason, latestWorkerResult, currentPlan string, helper ExecutionHelper) string {
@@ -801,6 +882,7 @@ func (e *CollaborationEngine) invokeParticipant(
 	messages []provider.Message,
 	timeout time.Duration,
 	disableRetry bool,
+	hasBackup bool,
 	helper ExecutionHelper,
 ) (StructuredModelResponse, string, int64, error) {
 	if cancel, _ := e.checkCancelledOrPaused(ctx, jobID, helper); cancel {
@@ -830,7 +912,8 @@ func (e *CollaborationEngine) invokeParticipant(
 	defer cancel()
 
 	rawReply, latency, err := e.router.Call(callCtx, participant.Provider, key, participant.Model, messages, provider.CallOpts{
-		DisableRetry: disableRetry,
+		DisableRetry:        disableRetry,
+		FailFastOnRateLimit: hasBackup,
 	})
 	if err != nil {
 		return StructuredModelResponse{}, "", latency, err

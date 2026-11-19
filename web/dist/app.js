@@ -1233,40 +1233,109 @@ function showApp() {
   $("app").classList.remove("hidden");
 }
 
+// Show the saved page's shell at once, before any network work, so a tab
+// that Chrome discarded and reloads never flashes the first page.
+function showPageShell(name) {
+  if (!name || !pageNames[name] || !$("page-" + name)) return;
+  document.querySelectorAll(".page").forEach(p => p.classList.add("hidden"));
+  $("page-" + name).classList.remove("hidden");
+  document.querySelectorAll(".nav-link").forEach(b => b.classList.toggle("active", b.dataset.page === name));
+  if ($("breadcrumb-page")) $("breadcrumb-page").textContent = pageNames[name];
+  if (name === "orchestration" && activeOrchJobId) {
+    $("orch-builder-panel")?.classList.add("hidden");
+    $("orch-monitor-panel")?.classList.remove("hidden");
+  }
+}
+
+/* Per-page scroll position, so coming back lands where the user left off. */
+const SCROLL_KEY = "cortext_scroll_positions";
+let scrollRestoring = true; // held until the boot restore finishes
+function scrollKeyFor(page) {
+  if (page === "orchestration" && activeOrchJobId) return "orchestration:" + activeOrchJobId;
+  return page || "";
+}
+function readScrollMap() {
+  try { return JSON.parse(localStorage.getItem(SCROLL_KEY) || "{}") || {}; } catch { return {}; }
+}
+function saveScrollPosition() {
+  if (scrollRestoring) return;
+  const page = localStorage.getItem(DEVICE_STATE_KEYS.page);
+  if (!page || page === "chat") return; // chat keeps its own scroll-to-bottom behaviour
+  const m = readScrollMap();
+  m[scrollKeyFor(page)] = Math.round(window.scrollY || document.documentElement.scrollTop || 0);
+  try { localStorage.setItem(SCROLL_KEY, JSON.stringify(m)); } catch {}
+}
+function restoreScrollPosition(page) {
+  const y = (page && page !== "chat") ? readScrollMap()[scrollKeyFor(page)] : 0;
+  if (!y) { scrollRestoring = false; return; }
+  scrollRestoring = true;
+  // Content may still be growing; retry a few times while it lays out.
+  let tries = 0;
+  const step = () => {
+    window.scrollTo(0, y);
+    tries++;
+    if (Math.abs((window.scrollY || 0) - y) > 4 && tries < 20) {
+      setTimeout(step, 100);
+    } else {
+      scrollRestoring = false;
+    }
+  };
+  requestAnimationFrame(step);
+}
+let scrollSaveTimer = null;
+window.addEventListener("scroll", () => {
+  clearTimeout(scrollSaveTimer);
+  scrollSaveTimer = setTimeout(saveScrollPosition, 250);
+}, { passive: true });
+window.addEventListener("pagehide", saveScrollPosition);
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden") saveScrollPosition();
+});
+
 async function checkAuth() {
   // Read the last page BEFORE any async work: loading data can switch pages,
   // and switchPage saves to localStorage, which would otherwise overwrite
   // the page the user was on with "chat" before the restore below reads it.
   const savedPageAtLoad = localStorage.getItem(DEVICE_STATE_KEYS.page);
+  showPageShell(savedPageAtLoad);
+
+  let s;
   try {
-    const s = await api("/api/status");
-    showApp();
-    applyStatus(s);
-
-    const savedProv = localStorage.getItem(DEVICE_STATE_KEYS.selectedProvider);
-    if (savedProv && providerMap[savedProv]) {
-      selectedProvider = savedProv;
-    }
-
-    await loadSessions();
-    await loadBotSessions();
-    await loadAllConfiguredModels();
-    await loadOrchJobsList();
-
-    if (!s.any_configured) {
-      $("setup-banner")?.classList.remove("hidden");
-      showSetupNudge();
-    }
-
-    const savedPage = savedPageAtLoad;
-    if (savedPage && pageNames[savedPage]) {
-      switchPage(savedPage);
-    } else {
-      restoreChatLastState();
-    }
+    s = await api("/api/status");
   } catch {
+    scrollRestoring = false;
     showLogin();
+    return;
   }
+  showApp();
+  applyStatus(s);
+
+  const savedProv = localStorage.getItem(DEVICE_STATE_KEYS.selectedProvider);
+  if (savedProv && providerMap[savedProv]) {
+    selectedProvider = savedProv;
+  }
+
+  // Load in parallel, and never treat a failed list as a sign-out: only a
+  // 401 (handled inside api()) means the session is gone.
+  await Promise.allSettled([
+    loadSessions(),
+    loadBotSessions(),
+    loadAllConfiguredModels(),
+    loadOrchJobsList()
+  ]);
+
+  if (!s.any_configured) {
+    $("setup-banner")?.classList.remove("hidden");
+    showSetupNudge();
+  }
+
+  const savedPage = savedPageAtLoad;
+  if (savedPage && pageNames[savedPage]) {
+    await switchPage(savedPage);
+  } else {
+    await restoreChatLastState();
+  }
+  restoreScrollPosition(savedPage);
 }
 
 function applyStatus(s) {
@@ -2529,7 +2598,8 @@ function switchSettingsTab(tabId) {
 
 document.querySelectorAll(".settings-tab").forEach(b => b.onclick = () => switchSettingsTab(b.dataset.tab));
 
-function switchPage(name, autoRestoreChat = true) {
+async function switchPage(name, autoRestoreChat = true) {
+  if (localStorage.getItem(DEVICE_STATE_KEYS.page) !== name) saveScrollPosition();
   try { localStorage.setItem(DEVICE_STATE_KEYS.page, name); } catch {}
   document.querySelectorAll(".page").forEach(p => p.classList.add("hidden"));
   $("page-" + name).classList.remove("hidden");
@@ -2558,7 +2628,7 @@ function switchPage(name, autoRestoreChat = true) {
     if (!editingCustomProviderId) switchProviderTab(selectedProvider);
   }
   if (name === "orchestration") {
-    initOrchestrationPage();
+    await initOrchestrationPage();
   } else {
     stopOrchPolling();
   }
@@ -4524,6 +4594,10 @@ function buildDetailedTimelineNarrative(ev) {
       return `${roundPrefix}Worker #${(p.sort_order ?? 1) + 1} (${provName} · ${p.model}) finished generating the project files in ${((p.latency_ms || 0) / 1000).toFixed(1)}s — passing deliverable for inspection.`;
     case "participant_failed":
       return `${roundPrefix}✗ ${(p.role || "Model").toUpperCase()} (${provName} · ${p.model}) failed with error: ${p.error || ev.message}`;
+    case "participant_cooldown":
+      return p.model
+        ? `${roundPrefix}⏸ ${(p.role || "Model").toUpperCase()} (${provName} · ${p.model}) is cooling down after a rate limit (${p.wait_seconds || "?"}s left) — backup takes this turn.`
+        : `${roundPrefix}⏸ All models for this step are cooling down — waiting ${p.wait_seconds || "?"}s for the first one to be ready.`;
     case "participant_fallback":
       return `${roundPrefix}⚡ Handing over job: ${fromProv} · ${p.from_model} failed (${p.error || "error"}) → passing turn to backup model ${toProv} · ${p.to_model}…`;
     case "audit_started":
@@ -4704,6 +4778,7 @@ function formatEventTypeLabel(evtType, phase) {
     revision_completed: "Revised",
     participant_failed: "Model Failed",
     participant_fallback: "Failover Switch",
+    participant_cooldown: "Cooling Down",
     participants_updated: "Team Updated",
     user_revision_requested: "User Revision",
     audit_started: "Auditing",

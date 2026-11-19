@@ -1,6 +1,8 @@
 package orchestration
 
 import (
+	"github.com/sahand363/sahand-cortext/internal/provider"
+
 	"context"
 	"errors"
 	"fmt"
@@ -212,6 +214,13 @@ func (p *WorkerPool) executeWithProtection(rootCtx context.Context, workerID str
 		backoff := time.Duration(math.Pow(2, float64(job.RetryCount))) * p.retryBackoff
 		if backoff <= 0 {
 			backoff = 2 * time.Second
+		}
+		// Rate limits and overloads need real time to clear; a 2s retry
+		// just hits the same wall again.
+		if provider.IsRateLimit(err) || provider.IsOverloaded(err) {
+			if backoff < 30*time.Second {
+				backoff = 30 * time.Second
+			}
 		}
 		_, _ = p.storage.FailOrScheduleRetry(context.Background(), job.ID, workerID, err.Error(), isRetryable, backoff)
 		return

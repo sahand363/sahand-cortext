@@ -31,22 +31,22 @@ func ClassifyProviderError(err error, elapsedMs int64) error {
 		return fmt.Errorf("TIMEOUT after %.1fs (model took too long to finish generating)", sec)
 	}
 	if strings.Contains(msg, "connection reset by peer") || strings.Contains(msg, "broken pipe") || strings.Contains(msg, "unexpected eof") {
-		return fmt.Errorf("CONNECTION RESET after %.1fs (upstream proxy closed connection): %v", sec, err)
+		return fmt.Errorf("CONNECTION RESET after %.1fs (upstream proxy closed connection): %w", sec, err)
 	}
 	if strings.Contains(msg, "http 429") {
-		return fmt.Errorf("RATE LIMIT (HTTP 429 — provider throttled requests): %v", err)
+		return fmt.Errorf("RATE LIMIT (HTTP 429 — provider throttled requests): %w", err)
 	}
 	if strings.Contains(msg, "http 401") || strings.Contains(msg, "http 402") || strings.Contains(msg, "http 403") {
-		return fmt.Errorf("AUTH / WALLET / QUOTA ERROR: %v", err)
+		return fmt.Errorf("AUTH / WALLET / QUOTA ERROR: %w", err)
 	}
 	if strings.Contains(msg, "http 500") || strings.Contains(msg, "http 502") || strings.Contains(msg, "http 503") || strings.Contains(msg, "http 504") {
-		return fmt.Errorf("PROVIDER OVERLOADED (upstream server error): %v", err)
+		return fmt.Errorf("PROVIDER OVERLOADED (upstream server error): %w", err)
 	}
 	if strings.Contains(msg, "exhausted output tokens during internal reasoning") {
-		return fmt.Errorf("REASONING TRUNCATED after %.1fs: %v", sec, err)
+		return fmt.Errorf("REASONING TRUNCATED after %.1fs: %w", sec, err)
 	}
 	if strings.Contains(msg, "empty content") || strings.Contains(msg, "empty response") {
-		return fmt.Errorf("EMPTY RESPONSE (model returned 0 tokens): %v", err)
+		return fmt.Errorf("EMPTY RESPONSE (model returned 0 tokens): %w", err)
 	}
 	return err
 }

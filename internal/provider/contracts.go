@@ -14,6 +14,9 @@ type CallOpts struct {
 	// SkipUsage records no usage_events row for this call (used by
 	// the model-test endpoints, which are not chat completions).
 	SkipUsage bool
+	// FailFastOnRateLimit returns a 429 at once instead of waiting to
+	// retry, for callers (orchestration) that have a backup model ready.
+	FailFastOnRateLimit bool
 }
 
 type ChatRequest struct {

@@ -53,6 +53,7 @@ const (
 	EventRevisionRequested   EventType = "revision_requested"
 	EventRevisionCompleted   EventType = "revision_completed"
 	EventParticipantFallback EventType = "participant_fallback"
+	EventParticipantCooldown EventType = "participant_cooldown"
 	EventUserRevision        EventType = "user_revision_requested"
 	EventAuditStarted        EventType = "audit_started"
 	EventAuditCompleted      EventType = "audit_completed"

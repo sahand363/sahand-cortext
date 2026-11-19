@@ -140,7 +140,7 @@ func (g *GeminiAdapter) Chat(ctx context.Context, cfg ProviderConfig, req ChatRe
 
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return ChatResponse{}, fmt.Errorf("Gemini HTTP %d: %s", resp.StatusCode, ExtractAPIError(raw))
+		return ChatResponse{}, NewHTTPError("Gemini", resp, raw)
 	}
 
 	var parsed struct {
