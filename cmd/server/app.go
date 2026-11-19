@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sahand363/sahand-cortext/internal/channel"
 	"github.com/sahand363/sahand-cortext/internal/memory"
 	"github.com/sahand363/sahand-cortext/internal/orchestration"
 	"github.com/sahand363/sahand-cortext/internal/persona"
@@ -39,6 +40,7 @@ type App struct {
 	orchEngine          *orchestration.CollaborationEngine
 	orchPool            *orchestration.WorkerPool
 	loginLimit          *loginLimiter
+	channels            *channel.Service
 }
 
 type Session struct {
@@ -175,6 +177,11 @@ func (a *App) initDB() error {
 	}
 	if err := a.memoryStore.InitSchema(); err != nil {
 		return err
+	}
+	if a.channels != nil {
+		if err := a.channels.Store.InitSchema(); err != nil {
+			return err
+		}
 	}
 	if err := a.orchStorage.InitSchema(); err != nil {
 		return err

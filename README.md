@@ -1,4 +1,4 @@
-# Sahand-CorText · v0.9.6
+# Sahand-CorText · v0.9.7
 
 **A private, secure, single-user AI workspace hosted on your own Ubuntu server.**
 
@@ -151,6 +151,12 @@ Long-polling Telegram bridge: each bot has its own persona, model, and skills. C
 **Remembers people.** Every few messages the bot extracts durable facts about the person it's talking to and keeps them, encrypted, in that chat's own memory, so it knows them next time. Each person can see what it remembers with `/memory` and erase it with `/forget`. `/new` starts a fresh conversation but keeps the memory.
 
 Note: the hub has to decrypt a chat to reply, so someone with root on the server and the key file could still change the code to read chats. Moving the server or restoring a backup without the key file starts Telegram chats fresh.
+
+### 📣 Telegram Channels
+Write posts for your Telegram channel in a persona's voice. Give a subject and notes in the **Channels** tab and get a draft. Edit it, rewrite it with feedback, then post it from the hub, or send it to your Telegram DM and approve it there with **Post**, **Revise** or **Discard** buttons.
+- **Setup:** create a separate bot with @BotFather (not a persona's bot), add it to the channel as an admin with *Post messages*, then paste its token and the channel link. Open the bot from the link the hub shows to pair your Telegram account for approvals. Only you can approve.
+- **Style:** *Learn style* reads the channel's public posts (`t.me/s/<name>`) plus any samples you paste, and writes a style guide you can edit. Posts you publish, posts you write by hand in the channel, and your edits to drafts all feed back into later drafts.
+- The bot token is stored encrypted, like API keys.
 
 ### 👤 Personas & Voice Trainer
 Personas with their own system prompt, voice, and allowed models, usable in the web chat and in Telegram bots.

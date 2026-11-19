@@ -65,6 +65,7 @@ const pageNames = {
   orchestration: "AI orchestration",
   skills: "Skills",
   personas: "Personas",
+  channels: "Channels",
   memory: "Memories",
   mobile: "Mobile App",
   backup: "Backup",
@@ -2614,6 +2615,7 @@ async function switchPage(name, autoRestoreChat = true) {
   if (name === "sessions") loadBotSessions();
   if (name === "skills") loadSkills();
   if (name === "personas") loadPersonasPage();
+  if (name === "channels") loadChannelsPage();
   if (name === "memory") loadMemories();
   if (name === "usage") loadUsage();
   if (name === "mobile") loadMobile();
@@ -4822,3 +4824,269 @@ document.addEventListener("keydown", e => {
 });
 
 checkAuth();
+
+
+/* ============================================================================
+   CHANNELS (Telegram channel studio)
+   ============================================================================ */
+
+const CHANNEL_KEY = "cortext_active_channel";
+let channelsCache = [];
+let activeChannelId = localStorage.getItem(CHANNEL_KEY) || "";
+let editingChannelId = null;
+
+const postStatusLabel = {
+  draft: "Draft", pending: "Waiting in Telegram", posted: "Posted",
+  discarded: "Discarded", removed: "Removed from channel"
+};
+
+async function loadChannelsPage() {
+  try {
+    const d = await api("/api/channels");
+    channelsCache = d.channels || [];
+  } catch (e) { toast(e.message); return; }
+  const picker = $("channel-picker");
+  if (!channelsCache.some(c => c.id === activeChannelId)) activeChannelId = channelsCache[0] ? channelsCache[0].id : "";
+  picker.innerHTML = channelsCache.map(c => `<option value="${escapeHtml(c.id)}">${escapeHtml(c.name)}</option>`).join("");
+  picker.value = activeChannelId;
+  picker.classList.toggle("hidden", channelsCache.length < 2);
+  $("edit-channel-btn").classList.toggle("hidden", !activeChannelId);
+  $("channel-empty").classList.toggle("hidden", channelsCache.length > 0 || !$("channel-form").classList.contains("hidden"));
+  $("channel-body").classList.toggle("hidden", !activeChannelId);
+  if (activeChannelId) await loadActiveChannel();
+}
+
+async function loadActiveChannel() {
+  const id = activeChannelId;
+  $("channel-status").innerHTML = "<span class=\"muted-note\">Checking the bot and channel…</span>";
+  try {
+    const d = await api("/api/channels/" + encodeURIComponent(id));
+    if (id !== activeChannelId) return;
+    renderChannelStatus(d.channel, d.check);
+    renderChannelStyle(d.channel);
+  } catch (e) { $("channel-status").innerHTML = `<span class="muted-note">${escapeHtml(e.message)}</span>`; }
+  await loadChannelPosts();
+}
+
+function channelCheckRow(ok, text) {
+  return `<div style="margin:3px 0">${ok ? "✅" : "⬜"} ${text}</div>`;
+}
+
+function renderChannelStatus(c, chk) {
+  chk = chk || {};
+  const bot = c.bot_username ? "@" + escapeHtml(c.bot_username) : "the bot";
+  const startLink = c.bot_username ? `https://t.me/${encodeURIComponent(c.bot_username)}?start=${encodeURIComponent(c.pair_code)}` : "";
+  let html = `<div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap"><b>${escapeHtml(c.name)}</b><span class="muted-note">${escapeHtml(c.chat_ref)} · ${bot}</span></div>`;
+  html += channelCheckRow(!!chk.bot_username, "Bot token works");
+  html += channelCheckRow(chk.is_admin, "Bot is an admin of " + escapeHtml(chk.channel_title || c.chat_ref));
+  html += channelCheckRow(chk.can_post, "Bot can post messages");
+  if (c.owner_id) {
+    html += channelCheckRow(true, "Approvals go to " + escapeHtml(c.owner_name || "you") + ` <button class="btn btn-quiet btn-small" onclick="unpairChannel()">Unpair</button>`);
+  } else {
+    html += channelCheckRow(false, `Approvals in Telegram: ${startLink ? `<a href="${startLink}" target="_blank" rel="noopener">open ${bot}</a> and press Start` : "send"} (or send <code>/start ${escapeHtml(c.pair_code)}</code>)`);
+  }
+  if (chk.problem) html += `<div class="muted-note" style="margin-top:6px">👉 ${escapeHtml(chk.problem)}</div>`;
+  $("channel-status").innerHTML = html;
+}
+
+function renderChannelStyle(c) {
+  $("channel-style-guide").value = c.style_guide || "";
+  const n = (c.examples || []).length;
+  $("channel-style-summary").textContent = c.style_guide ? `· learned, ${n} example post${n === 1 ? "" : "s"}` : `· not learned yet${n ? `, ${n} example post${n === 1 ? "" : "s"}` : ""}`;
+}
+
+async function loadChannelPosts() {
+  const el = $("channel-posts");
+  try {
+    const d = await api(`/api/channels/${encodeURIComponent(activeChannelId)}/posts`);
+    const posts = d.posts || [];
+    if (!posts.length) { el.innerHTML = "<p class=\"muted-note\">No drafts yet. Write your first one above.</p>"; return; }
+    el.innerHTML = posts.map(renderChannelPost).join("");
+  } catch (e) { el.innerHTML = `<p class="muted-note">${escapeHtml(e.message)}</p>`; }
+}
+
+function channelPublicLink(post) {
+  const c = channelsCache.find(x => x.id === activeChannelId);
+  if (!c || !post.tg_message_id || !c.chat_ref.startsWith("@")) return "";
+  return `https://t.me/${encodeURIComponent(c.chat_ref.slice(1))}/${post.tg_message_id}`;
+}
+
+function renderChannelPost(p) {
+  const id = escapeHtml(p.id);
+  const live = p.status === "draft" || p.status === "pending" || p.status === "discarded";
+  const link = channelPublicLink(p);
+  let tools = "";
+  if (live) {
+    tools = `
+      <button class="btn btn-quiet btn-small" onclick="saveChannelDraft('${id}')">Save edit</button>
+      <button class="btn btn-quiet btn-small" onclick="regenerateChannelPost('${id}')">↻ Rewrite</button>
+      <button class="btn btn-quiet btn-small" onclick="channelPostAction('${id}','approve')">📨 ${p.status === "pending" ? "Resend" : "Send"} to Telegram</button>
+      <button class="btn btn-primary btn-small" onclick="publishChannelPost('${id}')">Post now</button>
+      ${p.status !== "discarded" ? `<button class="btn btn-quiet btn-small" onclick="channelPostAction('${id}','discard')">Discard</button>` : ""}`;
+  } else if (p.status === "posted") {
+    tools = `${link ? `<a class="btn btn-quiet btn-small" href="${link}" target="_blank" rel="noopener">Open post ↗</a>` : ""}
+      <button class="btn btn-quiet btn-small" onclick="unpublishChannelPost('${id}')">Remove from channel</button>`;
+  }
+  tools += `<button class="btn btn-quiet btn-small" onclick="deleteChannelPost('${id}')">Delete</button>`;
+  const body = live
+    ? `<textarea id="cpost-${id}" dir="auto" rows="${Math.min(14, Math.max(4, (p.draft.match(/\n/g) || []).length + 3))}" class="form-control">${escapeHtml(p.draft)}</textarea>`
+    : `<div dir="auto" style="white-space:pre-wrap">${escapeHtml(p.draft)}</div>`;
+  return `
+    <div class="session-card" style="${p.status === "discarded" || p.status === "removed" ? "opacity:.6" : ""}">
+      <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap">
+        <b dir="auto">${escapeHtml(p.idea)}</b>
+        <span class="status-pill ${p.status === "posted" ? "connected" : ""}">${escapeHtml(postStatusLabel[p.status] || p.status)}</span>
+      </div>
+      ${body}
+      ${p.error ? `<div class="muted-note">⚠️ ${escapeHtml(p.error)}</div>` : ""}
+      <span>${escapeHtml(p.posted_at ? "Posted " + p.posted_at + " UTC" : "Created " + (p.created_at || "") + " UTC")}</span>
+      <div class="session-card-tools" style="flex-wrap:wrap">${tools}</div>
+    </div>`;
+}
+
+async function channelPostAction(id, action, body, busyMsg) {
+  if (busyMsg) toast(busyMsg);
+  try {
+    await api(`/api/channel-posts/${encodeURIComponent(id)}/${action}`, { method: "POST", body: JSON.stringify(body || {}) });
+    if (action === "approve") toast("Sent to your Telegram for approval");
+    if (action === "publish") toast("Posted to the channel ✅");
+  } catch (e) { toast(e.message); }
+  await loadChannelPosts();
+}
+
+async function saveChannelDraft(id, quiet) {
+  const ta = $("cpost-" + id);
+  if (!ta) return true;
+  try {
+    await api(`/api/channel-posts/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify({ draft: ta.value }) });
+    if (!quiet) toast("Saved");
+    return true;
+  } catch (e) { toast(e.message); return false; }
+}
+
+async function regenerateChannelPost(id) {
+  const fb = prompt("What should change? (leave empty for a fresh version)", "");
+  if (fb === null) return;
+  await channelPostAction(id, "regenerate", { feedback: fb }, "Rewriting…");
+}
+
+async function publishChannelPost(id) {
+  if (!confirm("Post this to the channel now?")) return;
+  if (!(await saveChannelDraft(id, true))) return;
+  await channelPostAction(id, "publish", {}, "Posting…");
+}
+
+async function unpublishChannelPost(id) {
+  if (!confirm("Delete this post from the channel?")) return;
+  await channelPostAction(id, "unpublish");
+}
+
+async function deleteChannelPost(id) {
+  if (!confirm("Delete this draft from the hub? (It stays on the channel if it was posted.)")) return;
+  try { await api(`/api/channel-posts/${encodeURIComponent(id)}`, { method: "DELETE" }); } catch (e) { toast(e.message); }
+  await loadChannelPosts();
+}
+
+async function unpairChannel() {
+  if (!confirm("Stop sending approvals to this Telegram account?")) return;
+  try { await api(`/api/channels/${encodeURIComponent(activeChannelId)}/unpair`, { method: "POST", body: "{}" }); } catch (e) { toast(e.message); }
+  await loadActiveChannel();
+}
+
+async function openChannelForm(channel) {
+  editingChannelId = channel ? channel.id : null;
+  $("channel-form-title").textContent = channel ? "Channel setup" : "New channel";
+  $("channel-name").value = channel ? channel.name : "";
+  $("channel-ref").value = channel ? channel.chat_ref : "";
+  $("channel-token").value = "";
+  $("channel-token").placeholder = channel && channel.has_token ? "Saved. Paste a new one to replace it" : "123456:ABC…";
+  $("channel-instructions").value = channel ? channel.instructions || "" : "";
+  const personas = await getSkillPersonas();
+  $("channel-persona").innerHTML = `<option value="">Main chat model (no persona)</option>` +
+    personas.map(p => `<option value="${escapeHtml(p.id)}">${escapeHtml(p.name)}</option>`).join("");
+  $("channel-persona").value = channel ? channel.persona_id || "" : "";
+  $("delete-channel-btn").classList.toggle("hidden", !channel);
+  $("channel-form").classList.remove("hidden");
+  $("channel-empty").classList.add("hidden");
+}
+
+if ($("new-channel-btn")) {
+  $("new-channel-btn").onclick = () => openChannelForm(null);
+  $("edit-channel-btn").onclick = () => openChannelForm(channelsCache.find(c => c.id === activeChannelId));
+  $("cancel-channel-btn").onclick = () => { $("channel-form").classList.add("hidden"); loadChannelsPage(); };
+  $("channel-picker").onchange = (e) => {
+    activeChannelId = e.target.value;
+    try { localStorage.setItem(CHANNEL_KEY, activeChannelId); } catch {}
+    loadActiveChannel();
+  };
+  $("channel-form").onsubmit = async (e) => {
+    e.preventDefault();
+    const btn = $("save-channel-btn");
+    btn.disabled = true;
+    const existing = channelsCache.find(c => c.id === editingChannelId);
+    const body = {
+      name: $("channel-name").value, chat_ref: $("channel-ref").value, persona_id: $("channel-persona").value,
+      bot_token: $("channel-token").value, instructions: $("channel-instructions").value,
+      style_guide: existing ? existing.style_guide : undefined
+    };
+    try {
+      const d = editingChannelId
+        ? await api("/api/channels/" + encodeURIComponent(editingChannelId), { method: "PUT", body: JSON.stringify(body) })
+        : await api("/api/channels", { method: "POST", body: JSON.stringify(body) });
+      activeChannelId = d.channel.id;
+      try { localStorage.setItem(CHANNEL_KEY, activeChannelId); } catch {}
+      $("channel-token").value = "";
+      $("channel-form").classList.add("hidden");
+      toast("Channel saved");
+      await loadChannelsPage();
+    } catch (err) { toast(err.message); }
+    btn.disabled = false;
+  };
+  $("delete-channel-btn").onclick = async () => {
+    if (!confirm("Delete this channel and all its drafts from the hub? Posts already on Telegram stay.")) return;
+    try { await api("/api/channels/" + encodeURIComponent(editingChannelId), { method: "DELETE" }); } catch (e) { toast(e.message); return; }
+    $("channel-form").classList.add("hidden");
+    activeChannelId = "";
+    await loadChannelsPage();
+  };
+  $("save-channel-style-btn").onclick = async () => {
+    const c = channelsCache.find(x => x.id === activeChannelId);
+    if (!c) return;
+    try {
+      await api("/api/channels/" + encodeURIComponent(c.id), { method: "PUT", body: JSON.stringify({
+        name: c.name, chat_ref: c.chat_ref, persona_id: c.persona_id, instructions: c.instructions,
+        style_guide: $("channel-style-guide").value }) });
+      toast("Style guide saved");
+      await loadChannelsPage();
+    } catch (e) { toast(e.message); }
+  };
+  $("learn-channel-style-btn").onclick = async () => {
+    const btn = $("learn-channel-style-btn");
+    const samples = $("channel-samples").value.split(/\n\s*---+\s*\n/).map(s => s.trim()).filter(Boolean);
+    btn.disabled = true;
+    $("channel-learn-status").textContent = "Reading posts and learning the style… (up to a minute)";
+    try {
+      const d = await api(`/api/channels/${encodeURIComponent(activeChannelId)}/learn`, { method: "POST", body: JSON.stringify({ samples }) });
+      $("channel-learn-status").textContent = `Learned from ${d.learned_from} post${d.learned_from === 1 ? "" : "s"}.`;
+      $("channel-samples").value = "";
+      renderChannelStyle(d.channel);
+      const i = channelsCache.findIndex(x => x.id === d.channel.id);
+      if (i >= 0) channelsCache[i] = d.channel;
+    } catch (e) { $("channel-learn-status").textContent = e.message; }
+    btn.disabled = false;
+  };
+  $("write-channel-post-btn").onclick = async () => {
+    const idea = $("channel-idea").value.trim();
+    if (!idea) { toast("Write what the post is about"); return; }
+    const btn = $("write-channel-post-btn");
+    btn.disabled = true;
+    $("channel-write-status").textContent = "Writing…";
+    try {
+      await api(`/api/channels/${encodeURIComponent(activeChannelId)}/posts`, { method: "POST", body: JSON.stringify({ idea, notes: $("channel-notes").value }) });
+      $("channel-idea").value = ""; $("channel-notes").value = "";
+      $("channel-write-status").textContent = "";
+      await loadChannelPosts();
+    } catch (e) { $("channel-write-status").textContent = e.message; }
+    btn.disabled = false;
+  };
+}

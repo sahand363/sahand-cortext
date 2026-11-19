@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/sahand363/sahand-cortext/internal/channel"
 	"github.com/sahand363/sahand-cortext/internal/memory"
 	"github.com/sahand363/sahand-cortext/internal/orchestration"
 	"github.com/sahand363/sahand-cortext/internal/persona"
@@ -23,7 +24,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const AppVersion = "0.9.6"
+const AppVersion = "0.9.7"
 
 func main() {
 	if len(os.Args) > 1 && (os.Args[1] == "version" || os.Args[1] == "--version") {
@@ -80,6 +81,7 @@ func main() {
 	bridgeCtx, bridgeCancel := context.WithCancel(context.Background())
 	tgBridge.StartSync(bridgeCtx)
 	app.startMemoryExtractor()
+	app.channels = channel.NewService(channel.NewStore(db), personaStore, router, app.providerKey, tgBridge.ResolveProviderAndModel)
 
 	collabEngine := orchestration.NewCollaborationEngine(
 		orchStorage,
@@ -99,6 +101,8 @@ func main() {
 		log.Fatal(e)
 	}
 
+	app.channels.Start(bridgeCtx)
+
 	workerCtx, workerCancel := context.WithCancel(context.Background())
 	orchPool.Start(workerCtx)
 
@@ -111,6 +115,9 @@ func main() {
 	mux.HandleFunc("/api/personas", app.auth(app.handlePersonas))
 	mux.HandleFunc("/api/personas/train", app.auth(app.handleTrainPersona))
 	mux.HandleFunc("/api/personas/", app.auth(app.handlePersonaByID))
+	mux.HandleFunc("/api/channels", app.auth(app.handleChannels))
+	mux.HandleFunc("/api/channels/", app.auth(app.handleChannelByID))
+	mux.HandleFunc("/api/channel-posts/", app.auth(app.handleChannelPost))
 	mux.HandleFunc("/api/skills", app.auth(app.handleSkills))
 	mux.HandleFunc("/api/skills/", app.auth(app.handleSkillByID))
 	mux.HandleFunc("/api/memories", app.auth(app.handleMemories))

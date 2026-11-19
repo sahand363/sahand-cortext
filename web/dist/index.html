@@ -44,6 +44,7 @@
       <button class="nav-link" data-page="orchestration"><span class="nav-icon">⌘</span>AI orchestration <span class="nav-count" id="orch-count">00</span></button>
       <button class="nav-link" data-page="skills"><span class="nav-icon">✦</span>Skills</button>
       <button class="nav-link" data-page="personas"><span class="nav-icon">🤖</span>Personas</button>
+      <button class="nav-link" data-page="channels"><span class="nav-icon">📣</span>Channels</button>
       <button class="nav-link" data-page="memory"><span class="nav-icon">🧠</span>Memories</button>
       <button class="nav-link" data-page="mobile"><span class="nav-icon">📱</span>Mobile App</button>
       <button class="nav-link" data-page="backup"><span class="nav-icon">💾</span>Backup</button>
@@ -470,6 +471,72 @@
               <div id="orch-jobs-list" class="orch-jobs-list"></div>
             </div>
           </aside>
+        </div>
+      </section>
+
+      <section id="page-channels" class="page module-page hidden">
+        <div class="page-heading">
+          <div>
+            <div class="eyebrow">TELEGRAM CHANNEL STUDIO</div>
+            <h1>Channels</h1>
+            <p>Give an idea, get a post in your channel's voice. Check it here or in your Telegram DM, then publish.</p>
+          </div>
+          <div style="display:flex;gap:8px;align-items:center">
+            <select id="channel-picker" class="form-control" style="min-width:160px"></select>
+            <button class="btn btn-quiet btn-small" id="edit-channel-btn">⚙ Setup</button>
+            <button class="btn btn-primary btn-small" id="new-channel-btn">＋ New channel</button>
+          </div>
+        </div>
+
+        <form id="channel-form" class="settings-panel hidden" style="margin-bottom:12px" autocomplete="off">
+          <div class="settings-section-head" style="padding-bottom:12px;margin-bottom:14px">
+            <div>
+              <h2 id="channel-form-title">New channel</h2>
+              <p>1) Create a bot with <b>@BotFather</b> (use a new bot, not a persona's). 2) Add it to your channel as an admin with <i>Post messages</i>. 3) Fill this in.</p>
+            </div>
+            <button type="button" id="cancel-channel-btn" class="btn btn-quiet btn-small">Cancel</button>
+          </div>
+          <div class="form-grid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px">
+            <label>Name<input id="channel-name" class="form-control" placeholder="e.g. AI CAPA"></label>
+            <label>Channel link or @username<input id="channel-ref" class="form-control" placeholder="t.me/yourchannel"></label>
+            <label>Persona<select id="channel-persona" class="form-control"></select></label>
+            <label>Bot token<input id="channel-token" type="password" class="form-control" placeholder="123456:ABC…"></label>
+          </div>
+          <label style="display:block;margin-top:10px">Standing instructions (optional)
+            <textarea id="channel-instructions" dir="auto" rows="3" class="form-control" placeholder="e.g. Write in Persian, keep posts under 150 words, end with a question to the reader."></textarea>
+          </label>
+          <div style="display:flex;gap:8px;margin-top:12px;justify-content:space-between;flex-wrap:wrap">
+            <button type="button" id="delete-channel-btn" class="btn btn-quiet btn-small hidden">Delete channel</button>
+            <button type="submit" class="btn btn-primary btn-small" id="save-channel-btn">Save channel <span>↗</span></button>
+          </div>
+        </form>
+
+        <div id="channel-empty" class="muted-note hidden">No channels yet. Press “＋ New channel” to connect one.</div>
+
+        <div id="channel-body" class="hidden">
+          <div id="channel-status" class="settings-panel" style="margin-bottom:12px"></div>
+
+          <details class="settings-panel" id="channel-style-panel" style="margin-bottom:12px">
+            <summary><b>Style</b> <span class="muted-note" id="channel-style-summary"></span></summary>
+            <div class="muted-note" style="margin:8px 0">Learned from your channel's public posts, posts you publish here, and samples you paste. Your edits to drafts teach it too.</div>
+            <textarea id="channel-style-guide" dir="auto" rows="8" class="form-control" placeholder="No style guide yet. Press “Learn style”."></textarea>
+            <div style="display:flex;gap:8px;margin:8px 0;flex-wrap:wrap">
+              <button class="btn btn-quiet btn-small" id="save-channel-style-btn">Save guide</button>
+            </div>
+            <label class="muted-note">Paste sample posts (yours or ones you like), separated by a line with ---
+              <textarea id="channel-samples" dir="auto" rows="5" class="form-control" placeholder="First post…&#10;---&#10;Second post…"></textarea>
+            </label>
+            <div style="margin-top:8px"><button class="btn btn-small" id="learn-channel-style-btn">🧠 Learn style</button> <span class="muted-note" id="channel-learn-status"></span></div>
+          </details>
+
+          <div class="settings-panel" style="margin-bottom:12px">
+            <b>New post</b>
+            <input id="channel-idea" dir="auto" class="form-control" style="margin-top:8px" placeholder="Subject: what is this post about?">
+            <textarea id="channel-notes" dir="auto" rows="4" class="form-control" style="margin-top:8px" placeholder="Notes: key points, facts, links, the angle you want…"></textarea>
+            <div style="margin-top:8px;display:flex;gap:8px;align-items:center"><button class="btn btn-primary btn-small" id="write-channel-post-btn">✍️ Write draft</button><span class="muted-note" id="channel-write-status"></span></div>
+          </div>
+
+          <div id="channel-posts" class="sessions-grid"></div>
         </div>
       </section>
 

@@ -291,6 +291,11 @@ func sendTelegramMessage(client *http.Client, apiBase string, chatID int64, text
 	_, _ = client.Post(url, "application/json", bytes.NewReader(payload))
 }
 
+// ResolveProviderAndModel picks the provider and model a persona answers with.
+func (b *BridgeManager) ResolveProviderAndModel(p *persona.Persona) (string, string, error) {
+	return b.resolveProviderAndModel(p)
+}
+
 func (b *BridgeManager) resolveProviderAndModel(p *persona.Persona) (string, string, error) {
 	prov := p.DefaultProvider
 	if prov == "" {
