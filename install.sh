@@ -66,10 +66,19 @@ fi
 step 60 "Installing application binary"
 mkdir -p /usr/local/bin
 rm -f "${BIN}.tmp"
-if curl -fL --http1.1 --retry 5 --retry-delay 2 --retry-all-errors --connect-timeout 15 --progress-bar "$RELEASE_URL" -o "${BIN}.tmp"; then
-  chmod +x "${BIN}.tmp"
-  mv -f "${BIN}.tmp" "$BIN"
-  echo -e "${G}✓ Pre-built binary downloaded and installed.${N}"
+SUMS_URL="https://github.com/sahand363/sahand-cortext/releases/latest/download/SHA256SUMS"
+verified_download(){
+  local tmp; tmp=$(mktemp -d)
+  curl -fL --http1.1 --retry 5 --retry-delay 2 --retry-all-errors --connect-timeout 15 --progress-bar "$RELEASE_URL" -o "$tmp/$BIN_ASSET" || { rm -rf "$tmp"; return 1; }
+  curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors --connect-timeout 15 "$SUMS_URL" -o "$tmp/SHA256SUMS" || { rm -rf "$tmp"; return 1; }
+  if ! (cd "$tmp" && grep " ${BIN_ASSET}\$" SHA256SUMS | sha256sum -c --status -); then
+    echo -e "${R}Checksum mismatch on the downloaded binary; not installing it.${N}"; rm -rf "$tmp"; return 1
+  fi
+  install -m 755 "$tmp/$BIN_ASSET" "${BIN}.tmp" && mv -f "${BIN}.tmp" "$BIN"
+  rm -rf "$tmp"
+}
+if verified_download; then
+  echo -e "${G}✓ Pre-built binary downloaded, checksum verified and installed.${N}"
 else
   rm -f "${BIN}.tmp"
   echo -e "${Y}Release download interrupted. Building binary with Go 1.23...${N}"
@@ -84,7 +93,7 @@ else
   fi
   export PATH="/usr/local/go/bin:$PATH"
   cd "$DIR"
-  /usr/local/go/bin/go mod tidy
+  /usr/local/go/bin/go mod download
   CGO_ENABLED=0 /usr/local/go/bin/go build -trimpath -ldflags="-s -w" -o "${BIN}.tmp" ./cmd/server
   chmod +x "${BIN}.tmp"
   mv -f "${BIN}.tmp" "$BIN"

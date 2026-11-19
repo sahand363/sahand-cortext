@@ -1,4 +1,4 @@
-# Sahand-CorText · v0.9.4
+# Sahand-CorText · v0.9.5
 
 **A private, secure, single-user AI workspace hosted on your own Ubuntu server.**
 
@@ -61,13 +61,14 @@ sudo cortext
 
 | Option | Description |
 |---|---|
-| **1. Update Sahand-CorText** | Installs the latest application binary and web interface assets without repeating the full installation process. |
-| **2. Show Panel Address** | Displays your local and remote panel URLs. |
-| **3. Change Credentials** | Securely updates your administrator username and password. |
-| **4. Configure / Renew SSL** | Installs Caddy, provisions Let's Encrypt certificates, and configures HTTPS and secure cookie flags. |
-| **5. Restart Service** | Restarts the background application service. |
-| **6. View Live Logs** | Streams real-time application logs using `journalctl`. |
-| **7. Uninstall** | Removes application binaries, system services, and optionally database files. |
+| **1. Update Sahand-CorText** | Installs the latest binary and web files. The binary is checked against the release's `SHA256SUMS` before install, the previous version is kept for rollback, and if the new version doesn't start, the old one is restored automatically. |
+| **2. Roll Back** | Restores the version you had before the last update (binary and web files). Also `sudo cortext rollback`. Your data, settings and chats are kept. Run it again to go forward. |
+| **3. Show Panel Address** | Displays your local and remote panel URLs. |
+| **4. Change Credentials** | Securely updates your administrator username and password. |
+| **5. Configure / Renew SSL** | Installs Caddy, provisions Let's Encrypt certificates, and configures HTTPS and secure cookie flags. |
+| **6. Restart Service** | Restarts the background application service. |
+| **7. View Live Logs** | Streams real-time application logs using `journalctl`. |
+| **8. Uninstall** | Removes application binaries, system services, and optionally database files. |
 
 **Quick Update Command**
 

@@ -32,7 +32,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const AppVersion = "0.9.4"
+const AppVersion = "0.9.5"
 
 type App struct {
 	db             *sql.DB
@@ -2622,6 +2622,10 @@ func startWatchdogHeartbeat(db *sql.DB) {
 }
 
 func main() {
+	if len(os.Args) > 1 && (os.Args[1] == "version" || os.Args[1] == "--version") {
+		fmt.Println(AppVersion)
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "hash-password" {
 		if len(os.Args) < 3 {
 			fmt.Fprintln(os.Stderr, "usage: sahand-cortext hash-password <password>")

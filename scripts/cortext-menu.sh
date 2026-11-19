@@ -44,6 +44,7 @@ header(){
     echo -e "  ${G}✓ INSTALLATION COMPLETE — SAHAND-CORTEXT IS RUNNING${N}"
   fi
   echo -e "  ${Y}PANEL LINK :${N} ${C}$(panel_url)${N}"
+  echo -e "  ${Y}VERSION    :${N} v$(version_of "$DIR")$( [[ -d "${DIR}.prev" ]] && echo "   (rollback to v$(version_of "${DIR}.prev") available)")"
   echo -e "  ${Y}STATUS     :${N} $(systemctl is-active "$APP" 2>/dev/null || echo unknown)   |   ${Y}QUICK UPDATE :${N} sudo cortext update"
   echo -e "${G}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${N}"
   echo -e "${C}"
@@ -60,8 +61,98 @@ EOF
   echo
 }
 
+SUMS_URL="https://github.com/sahand363/sahand-cortext/releases/latest/download/SHA256SUMS"
+
+# Version of an installed copy, read from its source tree (never by running
+# the binary: old binaries ignore "version" and would start a second server).
+version_of(){ grep -m1 'const AppVersion' "$1/cmd/server/main.go" 2>/dev/null | cut -d'"' -f2 || true; }
+
+# Wait up to ~20s for the service to be active and answer HTTP.
+health_ok(){
+  local addr port i
+  addr=$(getv HUB_ADDR); port="${addr##*:}"; port="${port:-8787}"
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    sleep 2
+    systemctl is-active --quiet "$APP" && curl -fsS -o /dev/null --max-time 3 "http://127.0.0.1:${port}/" && return 0
+  done
+  return 1
+}
+
+# Keep the currently installed version so it can be restored.
+snapshot_current(){
+  [[ -x "$BIN" && -d "$DIR" ]] || return 0
+  cp -a "$BIN" "${BIN}.prev"
+  rm -rf "${DIR}.prev"
+  cp -a "$DIR" "${DIR}.prev"
+  echo -e "${G}✓ Saved current version (v$(version_of "${DIR}.prev")) for rollback.${N}"
+}
+
+# Download the release binary and install it only if its SHA-256 matches
+# the published SHA256SUMS. Returns 1 on any download or checksum problem.
+install_verified_binary(){
+  local tmp; tmp=$(mktemp -d)
+  if ! curl -fL --http1.1 --retry 5 --retry-delay 2 --retry-all-errors --connect-timeout 15 --progress-bar "$RELEASE_URL" -o "$tmp/$BIN_ASSET" \
+     || ! curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors --connect-timeout 15 "$SUMS_URL" -o "$tmp/SHA256SUMS"; then
+    rm -rf "$tmp"; echo -e "${Y}Release download failed.${N}"; return 1
+  fi
+  if ! (cd "$tmp" && grep " ${BIN_ASSET}\$" SHA256SUMS | sha256sum -c --status -); then
+    rm -rf "$tmp"; echo -e "${R}Checksum mismatch: the downloaded binary is corrupt or was tampered with. Not installing it.${N}"; return 1
+  fi
+  install -m 755 "$tmp/$BIN_ASSET" "${BIN}.tmp" && mv -f "${BIN}.tmp" "$BIN"
+  rm -rf "$tmp"
+  echo -e "${G}✓ Binary downloaded and checksum verified.${N}"
+}
+
+build_from_source(){
+  echo -e "${Y}Building locally with Go 1.23 from the pinned sources...${N}"
+  if ! /usr/local/go/bin/go version 2>/dev/null | grep -Eq 'go1\.(23|24|25)'; then
+    arch=$(dpkg --print-architecture)
+    case "$arch" in amd64) ga=amd64;; arm64) ga=arm64;; *) exit 1;; esac
+    curl -fL --http1.1 --retry 5 --retry-delay 2 --retry-all-errors --progress-bar "https://go.dev/dl/go1.23.12.linux-${ga}.tar.gz" -o /tmp/go.tgz
+    rm -rf /usr/local/go && tar -C /usr/local -xzf /tmp/go.tgz && rm -f /tmp/go.tgz
+  fi
+  (cd "$DIR" && /usr/local/go/bin/go mod download && CGO_ENABLED=0 /usr/local/go/bin/go build -trimpath -ldflags="-s -w" -o "${BIN}.tmp" ./cmd/server)
+  chmod +x "${BIN}.tmp"
+  mv -f "${BIN}.tmp" "$BIN"
+}
+
+# Swap the installed version with the saved one. Running it twice returns
+# to where you started.
+swap_with_prev(){
+  mv -f "$BIN" "${BIN}.swap" && mv -f "${BIN}.prev" "$BIN" && mv -f "${BIN}.swap" "${BIN}.prev"
+  rm -rf "${DIR}.swap"
+  mv "$DIR" "${DIR}.swap" && mv "${DIR}.prev" "$DIR" && mv "${DIR}.swap" "${DIR}.prev"
+  install -m 755 "$DIR/scripts/cortext-menu.sh" /usr/local/bin/cortext
+  systemctl restart "$APP"
+}
+
+rollback_app(){
+  if [[ ! -x "${BIN}.prev" || ! -d "${DIR}.prev" ]]; then
+    echo -e "${Y}No previous version is saved yet. One is kept automatically on every update.${N}"
+    return 1
+  fi
+  local cur prev; cur=$(version_of "$DIR"); prev=$(version_of "${DIR}.prev")
+  if [[ "${1:-}" != "--yes" ]]; then
+    echo -e "Installed: ${C}v${cur:-?}${N}   Saved: ${C}v${prev:-?}${N}"
+    echo -e "${Y}Your data, settings and chats are kept. Features added after v${prev:-?} stop working until you update again.${N}"
+    read -rp "Roll back to v${prev:-?}? [y/N]: " ok </dev/tty
+    [[ "$ok" =~ ^[Yy]$ ]] || { echo "Cancelled."; return 0; }
+  fi
+  echo -e "${C}Restoring v${prev:-?}...${N}"
+  swap_with_prev
+  if health_ok; then
+    echo -e "${G}✓ Rolled back to v${prev:-?}. v${cur:-?} is kept, so 'sudo cortext update' moves you forward again.${N}"
+  else
+    echo -e "${R}v${prev:-?} isn't answering either. Check the logs: journalctl -u $APP -n 50${N}"
+    return 1
+  fi
+}
+
 update_app(){
-  echo -e "\n${C}[1/3] Pulling latest web interface and scripts from GitHub...${N}"
+  echo -e "\n${C}[1/4] Saving the current version for rollback...${N}"
+  snapshot_current
+
+  echo -e "${C}[2/4] Pulling latest web interface and scripts from GitHub...${N}"
   if [[ -d "$DIR/.git" ]]; then
     git -C "$DIR" fetch --depth 1 origin main
     git -C "$DIR" reset --hard origin/main
@@ -70,27 +161,8 @@ update_app(){
     git clone --depth 1 https://github.com/sahand363/sahand-cortext.git "$DIR"
   fi
 
-  echo -e "${C}[2/3] Downloading latest pre-built server binary...${N}"
-  rm -f "${BIN}.tmp"
-  if curl -fL --http1.1 --retry 5 --retry-delay 2 --retry-all-errors --connect-timeout 15 --progress-bar "$RELEASE_URL" -o "${BIN}.tmp"; then
-    chmod +x "${BIN}.tmp"
-    mv -f "${BIN}.tmp" "$BIN"
-    echo -e "${G}✓ Binary updated.${N}"
-  else
-    rm -f "${BIN}.tmp"
-    echo -e "${Y}Release download interrupted. Building locally with Go 1.23...${N}"
-    if ! /usr/local/go/bin/go version 2>/dev/null | grep -Eq 'go1\.(23|24|25)'; then
-      arch=$(dpkg --print-architecture)
-      case "$arch" in amd64) ga=amd64;; arm64) ga=arm64;; *) exit 1;; esac
-      curl -fL --http1.1 --retry 5 --retry-delay 2 --retry-all-errors --progress-bar "https://go.dev/dl/go1.23.12.linux-${ga}.tar.gz" -o /tmp/go.tgz
-      rm -rf /usr/local/go && tar -C /usr/local -xzf /tmp/go.tgz && rm -f /tmp/go.tgz
-    fi
-    cd "$DIR"
-    /usr/local/go/bin/go mod tidy
-    CGO_ENABLED=0 /usr/local/go/bin/go build -trimpath -ldflags="-s -w" -o "${BIN}.tmp" ./cmd/server
-    chmod +x "${BIN}.tmp"
-    mv -f "${BIN}.tmp" "$BIN"
-  fi
+  echo -e "${C}[3/4] Downloading latest pre-built server binary...${N}"
+  install_verified_binary || build_from_source
 
   chmod +x "$BIN"
   # Ensure the API-key encryption key exists (kept in the env file, outside the
@@ -102,7 +174,7 @@ update_app(){
     unset enc_key
     echo -e "${G}✓ API-key encryption key generated.${N}"
   fi
-  echo -e "${C}[3/3] Restarting service...${N}"
+  echo -e "${C}[4/4] Restarting service...${N}"
   install -m 755 "$DIR/scripts/cortext-menu.sh" /usr/local/bin/cortext
   # Ensure the watchdog is enabled so a hung (not just crashed) service is
   # restarted by systemd. Idempotent; only adds the line if it is missing.
@@ -111,17 +183,18 @@ update_app(){
   fi
   systemctl daemon-reload
   systemctl restart "$APP"
-  # Verify the service actually came back up and answers HTTP. A process can
-  # be "active" while hung, so check the panel itself, not just systemd.
-  sleep 5
-  addr=$(getv HUB_ADDR); port="${addr##*:}"; port="${port:-8787}"
-  if ! systemctl is-active --quiet "$APP" || ! curl -fsS -o /dev/null --max-time 5 "http://127.0.0.1:${port}/"; then
-    echo -e "${R}Service did not come back up after the update.${N}"
-    systemctl status "$APP" --no-pager | head -n 20 || true
-    journalctl -u "$APP" -n 30 --no-pager || true
-    echo -e "${Y}The update itself finished; only the restart failed. Try: sudo systemctl restart $APP${N}"
+  # Verify the panel itself answers; a process can be "active" while hung.
+  if health_ok; then
+    echo -e "\n${G}✓ Sahand-CorText v$(version_of "$DIR") is running! Panel: $(panel_url)${N}"
+    return 0
+  fi
+  echo -e "${R}The new version did not come up.${N}"
+  journalctl -u "$APP" -n 30 --no-pager || true
+  if [[ -x "${BIN}.prev" && -d "${DIR}.prev" ]]; then
+    echo -e "${Y}Restoring the previous version automatically...${N}"
+    rollback_app --yes || true
   else
-    echo -e "\n${G}✓ Sahand-CorText updated and restarted! Panel: $(panel_url)${N}"
+    echo -e "${Y}No previous version to restore. Try: sudo systemctl restart $APP${N}"
   fi
 }
 
@@ -183,8 +256,8 @@ uninstall_app(){
   read -rp "Type REMOVE to confirm: " confirm </dev/tty
   [[ "$confirm" == REMOVE ]] || { echo "Cancelled."; pause; return; }
   systemctl disable --now "$APP" 2>/dev/null || true
-  rm -f "$SERVICE" "$BIN" /usr/local/bin/cortext "$ENV_FILE"
-  rm -rf "$DIR" /root/.cache/go-build /root/go /tmp/go.tgz
+  rm -f "$SERVICE" "$BIN" "${BIN}.prev" /usr/local/bin/cortext "$ENV_FILE"
+  rm -rf "$DIR" "${DIR}.prev" /root/.cache/go-build /root/go /tmp/go.tgz
   systemctl daemon-reload
   read -rp "Also delete database and conversation history at $DATA? [y/N]: " db </dev/tty
   [[ "$db" =~ ^[Yy]$ ]] && rm -rf "$DATA"
@@ -196,29 +269,35 @@ if [[ "${1:-}" == "update" || "${1:-}" == "--update" ]]; then
   update_app
   exit 0
 fi
+if [[ "${1:-}" == "rollback" || "${1:-}" == "--rollback" ]]; then
+  rollback_app
+  exit $?
+fi
 
 while true; do
   header
   INSTALLED_NOW=0
   cat <<EOF
   1) Update Sahand-CorText (Fast Update)
-  2) Show panel address
-  3) Change username and password
-  4) Configure / renew SSL (HTTPS)
-  5) Restart service
-  6) View live logs
-  7) Uninstall Sahand-CorText
+  2) Roll back to previous version
+  3) Show panel address
+  4) Change username and password
+  5) Configure / renew SSL (HTTPS)
+  6) Restart service
+  7) View live logs
+  8) Uninstall Sahand-CorText
   0) Exit
 EOF
   read -rp $'\nSelect an option: ' choice </dev/tty
   case "$choice" in
     1) update_app; pause ;;
-    2) echo -e "\nPanel URL: ${C}$(panel_url)${N}"; pause ;;
-    3) change_login ;;
-    4) ssl_setup ;;
-    5) systemctl restart "$APP"; systemctl --no-pager --full status "$APP"; pause ;;
-    6) journalctl -u "$APP" -f ;;
-    7) uninstall_app ;;
+    2) rollback_app || true; pause ;;
+    3) echo -e "\nPanel URL: ${C}$(panel_url)${N}"; pause ;;
+    4) change_login ;;
+    5) ssl_setup ;;
+    6) systemctl restart "$APP"; systemctl --no-pager --full status "$APP"; pause ;;
+    7) journalctl -u "$APP" -f ;;
+    8) uninstall_app ;;
     0) exit 0 ;;
     *) echo "Invalid option."; sleep 1 ;;
   esac

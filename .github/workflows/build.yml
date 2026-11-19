@@ -23,9 +23,10 @@ jobs:
           bash -n install.sh
           bash -n scripts/cortext-menu.sh
 
-      - name: Download Go dependencies and generate checksums
+      - name: Download and verify pinned Go dependencies
         run: |
-          go mod tidy
+          go mod download
+          go mod verify
 
       - name: Run automated tests
         run: |
@@ -41,9 +42,21 @@ jobs:
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o dist/cortext-relay ./cmd/relay
           CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o dist/cortext-relay-arm64 ./cmd/relay
 
-      - name: Publish pre-built release
+      - name: Checksums
+        run: |
+          cd dist && sha256sum sahand-cortext sahand-cortext-arm64 cortext-relay cortext-relay-arm64 > SHA256SUMS && cat SHA256SUMS
+
+      - name: Publish releases (numbered + latest)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          VER=$(grep -m1 'const AppVersion' cmd/server/main.go | cut -d'"' -f2)
+          FILES="dist/sahand-cortext dist/sahand-cortext-arm64 dist/cortext-relay dist/cortext-relay-arm64 dist/SHA256SUMS"
+          NOTES="Automated build from commit $GITHUB_SHA"
+          # Numbered release: kept forever so any version can be reinstalled.
+          # Re-pushing the same version replaces its files.
+          gh release delete "v$VER" --yes --cleanup-tag 2>/dev/null || true
+          gh release create "v$VER" $FILES --target "$GITHUB_SHA" --title "Sahand-CorText v$VER" --notes "$NOTES"
+          # Rolling "latest" release that the installer and updater download.
           gh release delete latest --yes --cleanup-tag 2>/dev/null || true
-          gh release create latest dist/sahand-cortext dist/sahand-cortext-arm64 dist/cortext-relay dist/cortext-relay-arm64 --title "Sahand-CorText (Latest)" --notes "Automated build from commit $GITHUB_SHA"
+          gh release create latest $FILES --target "$GITHUB_SHA" --title "Sahand-CorText (Latest, v$VER)" --notes "$NOTES" --latest
