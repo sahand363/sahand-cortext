@@ -482,8 +482,8 @@
             <p>Give an idea, get a post in your channel's voice. Check it here or in your Telegram DM, then publish.</p>
           </div>
           <div style="display:flex;gap:8px;align-items:center">
-            <select id="channel-picker" class="form-control" style="min-width:160px"></select>
-            <button class="btn btn-quiet btn-small" id="edit-channel-btn">⚙ Setup</button>
+            <select id="channel-picker" class="form-control hidden" style="min-width:160px"></select>
+            <button class="btn btn-quiet btn-small hidden" id="edit-channel-btn">⚙ Setup</button>
             <button class="btn btn-primary btn-small" id="new-channel-btn">＋ New channel</button>
           </div>
         </div>
@@ -511,10 +511,20 @@
           </div>
         </form>
 
-        <div id="channel-empty" class="muted-note hidden">No channels yet. Press “＋ New channel” to connect one.</div>
+        <div id="channel-empty" class="muted-note">Loading channels…</div>
 
         <div id="channel-body" class="hidden">
           <div id="channel-status" class="settings-panel" style="margin-bottom:12px"></div>
+
+          <div class="settings-panel" style="margin-bottom:12px;border-color:var(--accent-border)">
+            <b>✍️ What should the bot post?</b>
+            <div class="muted-note" style="margin-top:4px">Write the subject and your notes. The bot turns them into a post in your channel's style. You review it before anything is published.</div>
+            <input id="channel-idea" dir="auto" class="form-control" style="margin-top:8px" placeholder="Subject, e.g. “Gemini 3 is out: what changes for us”">
+            <textarea id="channel-notes" dir="auto" rows="4" class="form-control" style="margin-top:8px" placeholder="Notes: key points, facts, links, the angle you want…"></textarea>
+            <div style="margin-top:8px;display:flex;gap:8px;align-items:center"><button class="btn btn-primary btn-small" id="write-channel-post-btn">Write draft</button><span class="muted-note" id="channel-write-status"></span></div>
+          </div>
+
+          <div id="channel-posts" class="sessions-grid" style="margin-bottom:12px"></div>
 
           <details class="settings-panel" id="channel-style-panel" style="margin-bottom:12px">
             <summary><b>Style</b> <span class="muted-note" id="channel-style-summary"></span></summary>
@@ -529,12 +539,6 @@
             <div style="margin-top:8px"><button class="btn btn-small" id="learn-channel-style-btn">🧠 Learn style</button> <span class="muted-note" id="channel-learn-status"></span></div>
           </details>
 
-          <div class="settings-panel" style="margin-bottom:12px">
-            <b>New post</b>
-            <input id="channel-idea" dir="auto" class="form-control" style="margin-top:8px" placeholder="Subject: what is this post about?">
-            <textarea id="channel-notes" dir="auto" rows="4" class="form-control" style="margin-top:8px" placeholder="Notes: key points, facts, links, the angle you want…"></textarea>
-            <div style="margin-top:8px;display:flex;gap:8px;align-items:center"><button class="btn btn-primary btn-small" id="write-channel-post-btn">✍️ Write draft</button><span class="muted-note" id="channel-write-status"></span></div>
-          </div>
 
           <div id="channel-posts" class="sessions-grid"></div>
         </div>
@@ -1109,7 +1113,7 @@ Sahand: آره ردیفه الان دارم تستش میکنم 🚀"></textarea
         </div>
       </section>
     </div>
-    <footer><span>SAHAND-CORTEXT</span><i>·</i> PRIVATE MULTI-PROVIDER AI WORKSPACE <b>v0.9.0</b></footer>
+    <footer><span>SAHAND-CORTEXT</span><i>·</i> PRIVATE MULTI-PROVIDER AI WORKSPACE <b id="app-version"></b></footer>
   </main>
 </div>
 <div id="toast" class="toast"></div>

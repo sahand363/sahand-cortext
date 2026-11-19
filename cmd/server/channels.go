@@ -149,7 +149,7 @@ func (a *App) handleChannelByID(w http.ResponseWriter, r *http.Request) {
 	}
 	switch {
 	case sub == "" && r.Method == http.MethodGet:
-		cctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+		cctx, cancel := context.WithTimeout(ctx, 12*time.Second)
 		defer cancel()
 		jsonOut(w, 200, map[string]any{"channel": c, "check": a.channels.Check(cctx, c)})
 

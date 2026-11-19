@@ -1340,6 +1340,7 @@ async function checkAuth() {
 }
 
 function applyStatus(s) {
+  if (s.version && $("app-version")) $("app-version").textContent = "v" + s.version;
   if (Array.isArray(s.providers_list)) {
     hydrateProvidersFromRegistry(s.providers_list);
   } else if (s.providers) {
@@ -4841,31 +4842,47 @@ const postStatusLabel = {
 };
 
 async function loadChannelsPage() {
+  const empty = $("channel-empty");
   try {
     const d = await api("/api/channels");
     channelsCache = d.channels || [];
-  } catch (e) { toast(e.message); return; }
+  } catch (e) {
+    // Say what failed on the page itself; a toast is easy to miss.
+    $("channel-body").classList.add("hidden");
+    empty.classList.remove("hidden");
+    empty.innerHTML = `Couldn't load your channels: ${escapeHtml(e.message)} <button class="btn btn-quiet btn-small" onclick="loadChannelsPage()">Retry</button>`;
+    return;
+  }
   const picker = $("channel-picker");
   if (!channelsCache.some(c => c.id === activeChannelId)) activeChannelId = channelsCache[0] ? channelsCache[0].id : "";
+  try { localStorage.setItem(CHANNEL_KEY, activeChannelId); } catch {}
   picker.innerHTML = channelsCache.map(c => `<option value="${escapeHtml(c.id)}">${escapeHtml(c.name)}</option>`).join("");
   picker.value = activeChannelId;
   picker.classList.toggle("hidden", channelsCache.length < 2);
   $("edit-channel-btn").classList.toggle("hidden", !activeChannelId);
-  $("channel-empty").classList.toggle("hidden", channelsCache.length > 0 || !$("channel-form").classList.contains("hidden"));
+  empty.textContent = "No channels yet. Press “＋ New channel” to connect one.";
+  empty.classList.toggle("hidden", channelsCache.length > 0 || !$("channel-form").classList.contains("hidden"));
   $("channel-body").classList.toggle("hidden", !activeChannelId);
   if (activeChannelId) await loadActiveChannel();
 }
 
 async function loadActiveChannel() {
   const id = activeChannelId;
-  $("channel-status").innerHTML = "<span class=\"muted-note\">Checking the bot and channel…</span>";
-  try {
-    const d = await api("/api/channels/" + encodeURIComponent(id));
+  const c = channelsCache.find(x => x.id === id);
+  if (!c) return;
+  // Draw everything from what we already have, then check Telegram in the
+  // background: a slow Telegram must never leave the page empty.
+  renderChannelStatus(c, null);
+  renderChannelStyle(c);
+  const check = api("/api/channels/" + encodeURIComponent(id)).then(d => {
     if (id !== activeChannelId) return;
+    const i = channelsCache.findIndex(x => x.id === id);
+    if (i >= 0) channelsCache[i] = d.channel;
     renderChannelStatus(d.channel, d.check);
-    renderChannelStyle(d.channel);
-  } catch (e) { $("channel-status").innerHTML = `<span class="muted-note">${escapeHtml(e.message)}</span>`; }
-  await loadChannelPosts();
+  }).catch(e => {
+    if (id === activeChannelId) renderChannelStatus(c, { problem: "Couldn't check the bot: " + e.message });
+  });
+  await Promise.all([check, loadChannelPosts()]);
 }
 
 function channelCheckRow(ok, text) {
@@ -4873,6 +4890,7 @@ function channelCheckRow(ok, text) {
 }
 
 function renderChannelStatus(c, chk) {
+  const checking = !chk;
   chk = chk || {};
   const bot = c.bot_username ? "@" + escapeHtml(c.bot_username) : "the bot";
   const startLink = c.bot_username ? `https://t.me/${encodeURIComponent(c.bot_username)}?start=${encodeURIComponent(c.pair_code)}` : "";
@@ -4885,7 +4903,9 @@ function renderChannelStatus(c, chk) {
   } else {
     html += channelCheckRow(false, `Approvals in Telegram: ${startLink ? `<a href="${startLink}" target="_blank" rel="noopener">open ${bot}</a> and press Start` : "send"} (or send <code>/start ${escapeHtml(c.pair_code)}</code>)`);
   }
-  if (chk.problem) html += `<div class="muted-note" style="margin-top:6px">👉 ${escapeHtml(chk.problem)}</div>`;
+  if (checking) html += `<div class="muted-note" style="margin-top:6px">Checking the bot with Telegram…</div>`;
+  else if (chk.problem) html += `<div class="muted-note" style="margin-top:6px">👉 ${escapeHtml(chk.problem)}</div>`;
+  else html += `<div class="muted-note" style="margin-top:6px">✅ Ready. Write a post below.</div>`;
   $("channel-status").innerHTML = html;
 }
 
@@ -4900,7 +4920,7 @@ async function loadChannelPosts() {
   try {
     const d = await api(`/api/channels/${encodeURIComponent(activeChannelId)}/posts`);
     const posts = d.posts || [];
-    if (!posts.length) { el.innerHTML = "<p class=\"muted-note\">No drafts yet. Write your first one above.</p>"; return; }
+    if (!posts.length) { el.innerHTML = ""; return; }
     el.innerHTML = posts.map(renderChannelPost).join("");
   } catch (e) { el.innerHTML = `<p class="muted-note">${escapeHtml(e.message)}</p>`; }
 }
