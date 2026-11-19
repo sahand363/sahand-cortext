@@ -405,11 +405,12 @@ func (a *App) mobilePersonas(w http.ResponseWriter, r *http.Request) {
 }
 
 // mobileSessionByID handles the /api/mobile/sessions/{id} subtree:
-//   POST /api/mobile/sessions/{id}/pin — encrypted body {"pinned": bool}.
-//     Sets the pinned flag and replies (encrypted) with the updated session.
-//   DELETE /api/mobile/sessions/{id} — encrypted body {} (the token check).
-//     Deletes the chat (its session row + its messages) and replies
-//     (encrypted) {"ok": true}.
+//
+//	POST /api/mobile/sessions/{id}/pin — encrypted body {"pinned": bool}.
+//	  Sets the pinned flag and replies (encrypted) with the updated session.
+//	DELETE /api/mobile/sessions/{id} — encrypted body {} (the token check).
+//	  Deletes the chat (its session row + its messages) and replies
+//	  (encrypted) {"ok": true}.
 func (a *App) mobileSessionByID(w http.ResponseWriter, r *http.Request) {
 	rest := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/mobile/sessions/"), "/")
 	parts := strings.Split(rest, "/")
@@ -848,7 +849,8 @@ func (a *App) mobileStatus(w http.ResponseWriter, r *http.Request) {
 
 // POST /api/mobile/settings — web-UI auth only. Body (plain JSON):
 // {"enabled": bool, "relay_ip": "...", "relay_port": 8080,
-//  "regenerate_token": bool}. Replies with the status shape.
+//
+//	"regenerate_token": bool}. Replies with the status shape.
 func (a *App) mobileSettings(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", 405)
