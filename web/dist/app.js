@@ -60,11 +60,8 @@ const contribPalette = [
 
 const pageNames = {
   chat: "Chat",
-  sessions: "Bot Sessions",
-  models: "Models & providers",
   orchestration: "AI orchestration",
   skills: "Skills",
-  personas: "Personas",
   channels: "Channels",
   memory: "Memories",
   mobile: "Mobile App",
@@ -1331,7 +1328,7 @@ async function checkAuth() {
   }
 
   const savedPage = savedPageAtLoad;
-  if (savedPage && pageNames[savedPage]) {
+  if (savedPage && (pageNames[savedPage] || MOVED_PAGES[savedPage])) {
     await switchPage(savedPage);
   } else {
     await restoreChatLastState();
@@ -1458,9 +1455,9 @@ function switchProviderTab(provider) {
       : `Enter custom ${meta.name} model ID`;
   }
 
-  $("models-feature-logo").textContent = meta.icon || "⚡";
-  $("models-feature-title").textContent = meta.name;
-  $("models-feature-desc").textContent = meta.description || "";
+  if ($("models-feature-logo")) $("models-feature-logo").textContent = meta.icon || "⚡";
+  if ($("models-feature-title")) $("models-feature-title").textContent = meta.name;
+  if ($("models-feature-desc")) $("models-feature-desc").textContent = meta.description || "";
 
   const showFreeToggle = !!meta.supports_free_badge;
   $("settings-free-filter-wrap")?.classList.toggle("hidden", !showFreeToggle);
@@ -2600,7 +2597,14 @@ function switchSettingsTab(tabId) {
 
 document.querySelectorAll(".settings-tab").forEach(b => b.onclick = () => switchSettingsTab(b.dataset.tab));
 
+// Pages removed from the sidebar in v0.9.9 live in Settings now. Old links,
+// saved "last page" values and bookmarks land on their Settings tab.
+const MOVED_PAGES = { models: ["settings", "provider-settings"], personas: ["settings", "personas-settings"], sessions: ["chat", null] };
+
 async function switchPage(name, autoRestoreChat = true) {
+  let movedTab = null;
+  if (MOVED_PAGES[name]) { movedTab = MOVED_PAGES[name][1]; name = MOVED_PAGES[name][0]; }
+  if (!$("page-" + name)) name = "chat";
   if (localStorage.getItem(DEVICE_STATE_KEYS.page) !== name) saveScrollPosition();
   try { localStorage.setItem(DEVICE_STATE_KEYS.page, name); } catch {}
   document.querySelectorAll(".page").forEach(p => p.classList.add("hidden"));
@@ -2613,18 +2617,18 @@ async function switchPage(name, autoRestoreChat = true) {
     restoreChatLastState();
   }
   if (name === "chat") renderChatModelScopeSettings();
-  if (name === "sessions") loadBotSessions();
   if (name === "skills") loadSkills();
-  if (name === "personas") loadPersonasPage();
   if (name === "channels") loadChannelsPage();
   if (name === "memory") loadMemories();
   if (name === "usage") loadUsage();
   if (name === "mobile") loadMobile();
-  if (name === "settings" || name === "models") {
+  if (name === "settings") {
     refreshStatus();
     if (name === "settings") {
       const savedSettingsTab = localStorage.getItem(DEVICE_STATE_KEYS.settingsTab);
-      if (savedSettingsTab && $(savedSettingsTab)) {
+      if (movedTab && $(movedTab)) {
+        switchSettingsTab(movedTab);
+      } else if (savedSettingsTab && $(savedSettingsTab)) {
         switchSettingsTab(savedSettingsTab);
       }
     }
@@ -2850,7 +2854,7 @@ function renderChatModelScopeSettings() {
   if (totalAvailable === 0) {
     const empty = document.createElement("div");
     empty.className = "muted-note";
-    empty.textContent = "No globally enabled models loaded yet. Connect a provider and enable models in Models & providers first.";
+    empty.textContent = "No globally enabled models loaded yet. Connect a provider and enable models in Settings → AI providers first.";
     listEl.appendChild(empty);
   } else if (summaryEl) {
     summaryEl.textContent = `${chatModelScope.allowed_models.length} of ${totalAvailable} enabled models selected for Main Chat`;
@@ -3247,9 +3251,9 @@ if ($("custom-model-form")) {
 }
 
 $("reload-models-btn").onclick = () => loadProviderModels(selectedProvider, true);
-$("refresh-models-page").onclick = () => loadProviderModels(selectedProvider, true);
+if ($("refresh-models-page")) $("refresh-models-page").onclick = () => loadProviderModels(selectedProvider, true);
 $("test-all-models-btn").onclick = () => testShownModels();
-$("test-all-models-page").onclick = () => testShownModels();
+if ($("test-all-models-page")) $("test-all-models-page").onclick = () => testShownModels();
 if ($("check-all-models-btn")) $("check-all-models-btn").onclick = () => batchToggleShownModels(true);
 if ($("uncheck-all-models-btn")) $("uncheck-all-models-btn").onclick = () => batchToggleShownModels(false);
 if ($("check-all-models-page")) $("check-all-models-page").onclick = () => batchToggleShownModels(true);
@@ -3479,7 +3483,7 @@ function renderOrchParticipantsBuilder() {
       if (!list.length) {
         const fallbackOpt = document.createElement("option");
         fallbackOpt.value = part.model || "";
-        fallbackOpt.textContent = part.model ? `${part.model} (Configure or enable models in Settings)` : "No enabled models — check Models & providers";
+        fallbackOpt.textContent = part.model ? `${part.model} (Configure or enable models in Settings)` : "No enabled models — check Settings → AI providers";
         modSelect.appendChild(fallbackOpt);
         return;
       }

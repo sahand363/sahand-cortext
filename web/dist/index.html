@@ -39,11 +39,8 @@
     <div class="nav-caption">NAVIGATION</div>
     <nav class="main-nav">
       <button class="nav-link active" data-page="chat"><span class="nav-icon">▤</span>Chat <span class="nav-count" id="chat-count">00</span></button>
-      <button class="nav-link" data-page="sessions"><span class="nav-icon">◷</span>Sessions <span class="nav-count" id="bot-sessions-count">00</span></button>
-      <button class="nav-link" data-page="models"><span class="nav-icon">✳</span>Models & providers</button>
       <button class="nav-link" data-page="orchestration"><span class="nav-icon">⌘</span>AI orchestration <span class="nav-count" id="orch-count">00</span></button>
       <button class="nav-link" data-page="skills"><span class="nav-icon">✦</span>Skills</button>
-      <button class="nav-link" data-page="personas"><span class="nav-icon">🤖</span>Personas</button>
       <button class="nav-link" data-page="channels"><span class="nav-icon">📣</span>Channels</button>
       <button class="nav-link" data-page="memory"><span class="nav-icon">🧠</span>Memories</button>
       <button class="nav-link" data-page="mobile"><span class="nav-icon">📱</span>Mobile App</button>
@@ -176,45 +173,6 @@
         </details>
       </section>
 
-      <section id="page-models" class="page module-page hidden">
-        <div class="page-heading">
-          <div><div class="eyebrow">THE INTELLIGENCE LAYER</div><h1>Models & providers</h1><p>Use <b>Uncheck All</b> to bench models in bulk, then check only the models you want active in Chat, Orchestration, and Failovers.</p></div>
-          <div class="heading-actions">
-            <button type="button" class="btn btn-quiet btn-small" id="check-all-models-page">✓ Check All</button>
-            <button type="button" class="btn btn-quiet btn-small" id="uncheck-all-models-page">☐ Uncheck All</button>
-            <button type="button" class="btn btn-quiet btn-small" id="refresh-models-page">↻ Refresh list</button>
-            <button type="button" class="btn btn-primary btn-small" id="test-all-models-page">⚡ Test shown models</button>
-          </div>
-        </div>
-
-        <div class="provider-switcher" id="models-provider-tabs"></div>
-
-        <div class="provider-feature">
-          <div class="provider-feature-head">
-            <div class="provider-main">
-              <div class="provider-logo gemini-logo" id="models-feature-logo">✳</div>
-              <div>
-                <div class="provider-overline">SELECTED PROVIDER</div>
-                <h3 id="models-feature-title">Provider</h3>
-                <p id="models-feature-desc">Click any model card below to test live generation. Uncheck "Enabled" on any model you want to hide or exclude from failovers.</p>
-              </div>
-            </div>
-            <span class="status-pill" id="models-provider-status">Needs setup</span>
-          </div>
-
-          <div class="filter-bar">
-            <div id="models-page-summary" class="models-summary">Select a provider or add its API key in Settings.</div>
-            <label class="free-filter-wrap hidden" id="models-free-filter-wrap">
-              <input type="checkbox" id="models-free-only">
-              <span>Show free models only (<code>:free</code>)</span>
-            </label>
-          </div>
-
-          <div id="models-page-grid" class="api-models-grid"></div>
-          <div class="provider-footer"><span>API keys are stored securely on this server</span><button class="text-action" data-goto="settings">Manage API keys & custom providers in Settings →</button></div>
-        </div>
-      </section>
-
       <section id="page-orchestration" class="page module-page hidden">
         <div class="page-heading">
           <div>
@@ -280,7 +238,7 @@
                     <input type="checkbox" id="orch-opt-global-fallback">
                     <div>
                       <b>Fallback to any other verified & enabled working model if all assigned participants fail</b>
-                      <small>Only uses models that have passed testing AND have their "Enabled" checkbox checked in Models & providers.</small>
+                      <small>Only uses models that have passed testing AND have their "Enabled" checkbox checked in Settings → AI providers.</small>
                     </div>
                   </label>
                 </div>
@@ -687,18 +645,6 @@
         </div>
       </section>
 
-      <section id="page-sessions" class="page module-page hidden">
-        <div class="page-heading">
-          <div>
-            <div class="eyebrow">EXTERNAL CHATBOT & TELEGRAM LOGS</div>
-            <h1>Bot Sessions</h1>
-            <p>Conversations happening through your Telegram bots and external chatbot plugins.</p>
-          </div>
-          <button class="btn btn-quiet btn-small" id="refresh-bot-sessions-btn">↻ Refresh</button>
-        </div>
-        <div id="sessions-grid" class="sessions-grid"></div>
-      </section>
-
       <section id="page-skills" class="page module-page hidden">
         <div class="page-heading">
           <div>
@@ -709,51 +655,6 @@
           <button class="btn btn-quiet btn-small" id="refresh-skills-btn">↻ Refresh</button>
         </div>
         <div id="skills-list" class="sessions-grid"></div>
-      </section>
-
-      <section id="page-personas" class="page module-page hidden">
-        <div class="page-heading">
-          <div>
-            <div class="eyebrow">PLUGGABLE CHATBOTS</div>
-            <h1>Personas</h1>
-            <p>Specialised AI assistants with their own instructions. Pick one in Chat or in the Android app to talk to it. Advanced options (voice, models, Telegram) live in Settings → Chatbots &amp; personas.</p>
-          </div>
-          <div style="display:flex;gap:8px">
-            <button class="btn btn-quiet btn-small" id="refresh-personas-page-btn">↻ Refresh</button>
-            <button class="btn btn-primary btn-small" id="new-persona-page-btn">＋ New Persona</button>
-          </div>
-        </div>
-
-        <form id="persona-page-form" class="settings-panel hidden" style="margin-bottom:12px">
-          <div class="settings-section-head" style="padding-bottom:12px;margin-bottom:14px">
-            <div>
-              <h2 id="persona-page-form-title">New Persona</h2>
-              <p>Name it and write what it should do.</p>
-            </div>
-            <button type="button" id="cancel-persona-page-btn" class="btn btn-quiet btn-small">Cancel</button>
-          </div>
-          <div class="orch-part-grid" style="margin-bottom:12px">
-            <label>
-              <span>Name</span>
-              <input id="persona-page-name" type="text" class="form-control" placeholder="e.g. Senior Go Reviewer" required>
-            </label>
-            <label>
-              <span>Short description</span>
-              <input id="persona-page-desc" type="text" class="form-control" placeholder="e.g. Reviews Go code strictly">
-            </label>
-          </div>
-          <div style="margin-bottom:12px">
-            <label style="display:grid;gap:6px;font-size:13px;color:var(--muted)">
-              <span>Role &amp; system instructions</span>
-              <textarea id="persona-page-prompt" dir="auto" rows="4" class="form-control" placeholder="Define who this persona is, its rules, and what it should or shouldn't do…"></textarea>
-            </label>
-          </div>
-          <div class="key-actions">
-            <button type="submit" class="btn btn-primary btn-small" id="save-persona-page-btn">Save Persona <span>↗</span></button>
-          </div>
-        </form>
-
-        <div id="personas-page-list" class="sessions-grid"></div>
       </section>
 
       <section id="page-usage" class="page module-page hidden">

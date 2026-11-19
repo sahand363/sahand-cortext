@@ -1,4 +1,4 @@
-# Sahand-CorText · v0.9.8
+# Sahand-CorText · v0.9.9
 
 **A private, secure, single-user AI workspace hosted on your own Ubuntu server.**
 
@@ -10,7 +10,7 @@ It supports many providers through one registry — AIPrime, Google Gemini, Anth
 
 ## 📸 Screenshots
 
-**Models & providers** — every provider's models in one registry, each tested live and enabled or benched with one click.
+**AI providers** (in Settings) — every provider's models in one registry, each tested live and enabled or benched with one click.
 
 ![Models & providers](docs/screenshots/models-providers.webp)
 
