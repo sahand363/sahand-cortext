@@ -35,6 +35,43 @@ panel_url(){
   echo "http://${ip}:8787"
 }
 
+# Plain HTTP is "on" when the hub listens on every interface (reachable at
+# http://IP:8787), "off" when it only listens on 127.0.0.1 behind Caddy.
+http_state(){
+  local a; a=$(getv HUB_ADDR)
+  [[ "$a" == 127.0.0.1:* || "$a" == localhost:* ]] && echo off || echo on
+}
+
+http_toggle(){
+  local port; port=$(getv HUB_ADDR); port="${port##*:}"; port="${port:-8787}"
+  if [[ "$(http_state)" == on ]]; then
+    if ! command -v caddy >/dev/null 2>&1 || [[ ! -f "$CADDY" ]]; then
+      echo -e "${R}HTTPS isn't set up yet, so turning plain HTTP off would lock you out.${N}"
+      echo -e "Run option 4 (Configure SSL) first."
+      pause; return
+    fi
+    sed -i "s/^HUB_ADDR=.*/HUB_ADDR=127.0.0.1:${port}/" "$ENV_FILE"
+    sed -i 's/^HUB_COOKIE_SECURE=.*/HUB_COOKIE_SECURE=true/' "$ENV_FILE"
+    systemctl restart "$APP"
+    echo -e "${G}Plain HTTP is OFF. The panel is only reachable at $(panel_url)${N}"
+  else
+    echo -e "${Y}Plain HTTP sends your password, session and chats unencrypted."
+    echo -e "Anyone between you and the server (Wi-Fi, ISP, VPN provider) can read them.${N}"
+    read -rp "Turn plain HTTP ON? [y/N]: " ok </dev/tty
+    [[ "$ok" =~ ^[Yy]$ ]] || { pause; return; }
+    sed -i "s/^HUB_ADDR=.*/HUB_ADDR=0.0.0.0:${port}/" "$ENV_FILE"
+    # Browsers drop "Secure" cookies on http://, which would make login
+    # silently fail, so the flag has to go off while HTTP is allowed.
+    sed -i 's/^HUB_COOKIE_SECURE=.*/HUB_COOKIE_SECURE=false/' "$ENV_FILE"
+    systemctl restart "$APP"
+    local ip; ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+    echo -e "${G}Plain HTTP is ON: http://${ip:-SERVER-IP}:${port}${N}"
+    command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active" && \
+      echo -e "${Y}ufw is active: allow it with  sudo ufw allow ${port}/tcp${N}"
+  fi
+  pause
+}
+
 pause(){ echo; read -rp "Press Enter to return to menu…" _ </dev/tty; }
 
 header(){
@@ -44,6 +81,7 @@ header(){
     echo -e "  ${G}✓ INSTALLATION COMPLETE — SAHAND-CORTEXT IS RUNNING${N}"
   fi
   echo -e "  ${Y}PANEL LINK :${N} ${C}$(panel_url)${N}"
+  echo -e "  ${Y}PLAIN HTTP :${N} $(http_state)"
   echo -e "  ${Y}STATUS     :${N} $(systemctl is-active "$APP" 2>/dev/null || echo unknown)   |   ${Y}QUICK UPDATE :${N} sudo cortext update"
   echo -e "${G}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${N}"
   echo -e "${C}"
@@ -205,9 +243,10 @@ while true; do
   2) Show panel address
   3) Change username and password
   4) Configure / renew SSL (HTTPS)
-  5) Restart service
-  6) View live logs
-  7) Uninstall Sahand-CorText
+  5) Plain HTTP access: $(http_state | tr a-z A-Z)  (toggle)
+  6) Restart service
+  7) View live logs
+  8) Uninstall Sahand-CorText
   0) Exit
 EOF
   read -rp $'\nSelect an option: ' choice </dev/tty
@@ -216,9 +255,10 @@ EOF
     2) echo -e "\nPanel URL: ${C}$(panel_url)${N}"; pause ;;
     3) change_login ;;
     4) ssl_setup ;;
-    5) systemctl restart "$APP"; systemctl --no-pager --full status "$APP"; pause ;;
-    6) journalctl -u "$APP" -f ;;
-    7) uninstall_app ;;
+    5) http_toggle ;;
+    6) systemctl restart "$APP"; systemctl --no-pager --full status "$APP"; pause ;;
+    7) journalctl -u "$APP" -f ;;
+    8) uninstall_app ;;
     0) exit 0 ;;
     *) echo "Invalid option."; sleep 1 ;;
   esac

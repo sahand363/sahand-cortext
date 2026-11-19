@@ -65,9 +65,10 @@ sudo cortext
 | **2. Show Panel Address** | Displays your local and remote panel URLs. |
 | **3. Change Credentials** | Securely updates your administrator username and password. |
 | **4. Configure / Renew SSL** | Installs Caddy, provisions Let's Encrypt certificates, and configures HTTPS and secure cookie flags. |
-| **5. Restart Service** | Restarts the background application service. |
-| **6. View Live Logs** | Streams real-time application logs using `journalctl`. |
-| **7. Uninstall** | Removes application binaries, system services, and optionally database files. |
+| **5. Plain HTTP access** | Turns direct `http://IP:8787` access on or off. Off (after SSL) means HTTPS only. On keeps HTTPS working but also allows unencrypted access, and turns off the secure-cookie flag so HTTP logins work. |
+| **6. Restart Service** | Restarts the background application service. |
+| **7. View Live Logs** | Streams real-time application logs using `journalctl`. |
+| **8. Uninstall** | Removes application binaries, system services, and optionally database files. |
 
 **Quick Update Command**
 
