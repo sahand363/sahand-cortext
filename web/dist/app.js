@@ -1711,7 +1711,7 @@ async function loadBotSessions() {
     if (!botSessionsCache.length) {
       const empty = document.createElement("div");
       empty.className = "orch-empty-note";
-      empty.textContent = "No Telegram chatbot conversations yet. Once someone messages one of your connected Telegram bots, its session log will appear here.";
+      empty.textContent = "🔒 Telegram conversations are private: each one is stored encrypted with its own key and never shown here, not even to you. People can see what a bot remembers about them with /memory and erase it with /forget.";
       grid.appendChild(empty);
       return;
     }

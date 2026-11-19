@@ -1,4 +1,4 @@
-# Sahand-CorText · v0.9.2
+# Sahand-CorText · v0.9.3
 
 **A private, secure, single-user AI workspace hosted on your own Ubuntu server.**
 
@@ -143,7 +143,13 @@ Multi-model collaboration with intelligent task routing across specialized model
 Learn a web page as a skill (`/learn`), or a page plus its same-site links (`/learn-deep`, up to 10 pages). Skills are managed on the **Skills** page and can be assigned to the main chat, to one or many Telegram bots, or to everyone. URL fetching blocks private, loopback, and internal addresses (SSRF protection).
 
 ### 💬 Telegram Bots
-Long-polling Telegram bridge: each bot has its own persona, model, and skills. Commands: `/start`, `/help`, `/learn`, `/learn-deep`, `/skills`, `/new`, `/status`. Bot replies render mixed Persian/English correctly (RTL isolation).
+Long-polling Telegram bridge: each bot has its own persona, model, and skills. Commands: `/start`, `/help`, `/learn`, `/learn-deep`, `/skills`, `/new`, `/memory`, `/forget`, `/status`. Bot replies render mixed Persian/English correctly (RTL isolation).
+
+**Private by design.** Telegram chats never appear in the panel or its API, not even to the owner. Each chat (bot + Telegram chat) is stored encrypted with AES-256-GCM under its own key, derived from a server secret (`$HUB_DATA_DIR/telegram-chats.key`, kept outside the database and outside backups) and the Telegram chat id. The database alone, or a backup, can't be read, and rows don't reveal which chat they belong to. Chats from older versions are encrypted and their plaintext deleted on first start.
+
+**Remembers people.** Every few messages the bot extracts durable facts about the person it's talking to and keeps them, encrypted, in that chat's own memory, so it knows them next time. Each person can see what it remembers with `/memory` and erase it with `/forget`. `/new` starts a fresh conversation but keeps the memory.
+
+Note: the hub has to decrypt a chat to reply, so someone with root on the server and the key file could still change the code to read chats. Moving the server or restoring a backup without the key file starts Telegram chats fresh.
 
 ### 👤 Personas & Voice Trainer
 Personas with their own system prompt, voice, and allowed models, usable in the web chat and in Telegram bots.

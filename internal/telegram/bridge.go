@@ -15,9 +15,9 @@ import (
 	"time"
 
 	"github.com/sahand363/sahand-cortext/internal/chat"
+	"github.com/sahand363/sahand-cortext/internal/memory"
 	"github.com/sahand363/sahand-cortext/internal/persona"
 	"github.com/sahand363/sahand-cortext/internal/provider"
-	"github.com/sahand363/sahand-cortext/internal/memory"
 	"github.com/sahand363/sahand-cortext/internal/skill"
 )
 
@@ -31,6 +31,9 @@ type BridgeManager struct {
 	activePollers map[string]*botPoller
 	stagedSkills  map[int64]*skill.StagedDraft // keyed by Telegram chatID
 	mu            sync.Mutex
+
+	private    *privateStore   // encrypted per-chat history and memory
+	extracting map[string]bool // chats with a memory extraction running
 }
 
 type botPoller struct {
@@ -49,7 +52,29 @@ func NewBridgeManager(db interface{}, personaStore *persona.Store, skillStore *s
 		keyLookup:     keyLookup,
 		activePollers: make(map[string]*botPoller),
 		stagedSkills:  make(map[int64]*skill.StagedDraft),
+		extracting:    make(map[string]bool),
 	}
+}
+
+// EnablePrivateChats turns on encrypted storage for Telegram chats, keyed by
+// a secret kept in dataDir, and moves any plaintext chats from older
+// versions into it. Must be called before StartSync.
+func (b *BridgeManager) EnablePrivateChats(dataDir string) error {
+	db, ok := b.dbConn.(*sql.DB)
+	if !ok {
+		return fmt.Errorf("telegram: no database")
+	}
+	ps, err := newPrivateStore(db, dataDir)
+	if err != nil {
+		return err
+	}
+	b.private = ps
+	if n, err := ps.migratePlaintext(); err != nil {
+		log.Printf("[Telegram] Private chat migration incomplete: %v", err)
+	} else if n > 0 {
+		log.Printf("[Telegram] Encrypted %d Telegram chat(s) and removed their plaintext copies", n)
+	}
+	return nil
 }
 
 func (b *BridgeManager) StartSync(ctx context.Context) {
@@ -193,7 +218,7 @@ func pollTelegramBot(ctx context.Context, mgr *BridgeManager, personaID, token s
 				}
 			}
 
-			mgr.handleIncomingMessage(ctx, client, apiBase, p, up.Message.Chat.ID, up.Message.From.ID, up.Message.Text)
+			mgr.handleIncomingMessage(ctx, client, apiBase, p, up.Message.Chat.ID, up.Message.From.ID, personLabel(up.Message.From.FirstName, up.Message.From.Username), up.Message.Text)
 		}
 	}
 }
@@ -306,12 +331,9 @@ func (b *BridgeManager) handleIncomingMessage(
 	p *persona.Persona,
 	chatID int64,
 	userID int64,
+	who string,
 	text string,
 ) {
-	db, ok := b.dbConn.(*sql.DB)
-	if !ok {
-		return
-	}
 
 	trimmedText := strings.TrimSpace(text)
 
@@ -377,7 +399,7 @@ func (b *BridgeManager) handleIncomingMessage(
 
 		switch cmd {
 		case "/start", "/help":
-			msg := fmt.Sprintf("🤖 %s %s\n\nCommands:\n/learn <url> - Visit a link, extract a skill, and save it to DB\n/learn-deep <url> - Learn a page AND its same-site links (up to 10 pages)\n/skills - List active skills in my knowledge base\n/new - Start a fresh conversation\n/status - Check bot status", p.Icon, p.Name)
+			msg := fmt.Sprintf("🤖 %s %s\n\nCommands:\n/learn <url> - Visit a link, extract a skill, and save it to DB\n/learn-deep <url> - Learn a page AND its same-site links (up to 10 pages)\n/skills - List active skills in my knowledge base\n/new - Start a fresh conversation\n/memory - What I remember about you\n/forget - Erase what I remember about you\n/status - Check bot status\n\n🔒 Our chat is stored encrypted. Not even the bot's owner can read it.", p.Icon, p.Name)
 			sendTelegramMessage(client, apiBase, chatID, msg)
 			return
 
@@ -443,9 +465,42 @@ func (b *BridgeManager) handleIncomingMessage(
 			return
 
 		case "/new":
-			sessID := fmt.Sprintf("tg-%d-%d", chatID, time.Now().Unix())
-			_, _ = db.Exec(`INSERT INTO sessions(id, title, persona_id, pinned) VALUES(?, ?, ?, 0)`, sessID, fmt.Sprintf("%s Telegram Chat", p.Icon), p.ID)
-			sendTelegramMessage(client, apiBase, chatID, "✨ Started a fresh conversation!")
+			if b.private == nil {
+				sendTelegramMessage(client, apiBase, chatID, "⚠️ Private storage is unavailable on the server.")
+				return
+			}
+			_ = b.private.clearHistory(b.private.ref(p.ID, chatID))
+			sendTelegramMessage(client, apiBase, chatID, "✨ Started a fresh conversation! I still remember what you've told me about yourself; /forget erases that.")
+			return
+
+		case "/memory":
+			if b.private == nil {
+				sendTelegramMessage(client, apiBase, chatID, "⚠️ Private storage is unavailable on the server.")
+				return
+			}
+			facts, _ := b.private.facts(b.private.ref(p.ID, chatID))
+			if len(facts) == 0 {
+				sendTelegramMessage(client, apiBase, chatID, "🧠 I don't remember anything about you yet. I learn as we chat.")
+				return
+			}
+			var sb strings.Builder
+			sb.WriteString("🧠 What I remember about you (only visible in this chat):\n\n")
+			for _, f := range facts {
+				sb.WriteString("• " + f + "\n")
+			}
+			sb.WriteString("\n/forget erases all of it.")
+			sendTelegramMessage(client, apiBase, chatID, sb.String())
+			return
+
+		case "/forget":
+			if b.private == nil {
+				sendTelegramMessage(client, apiBase, chatID, "⚠️ Private storage is unavailable on the server.")
+				return
+			}
+			r := b.private.ref(p.ID, chatID)
+			_ = b.private.forget(r)
+			_ = b.private.clearHistory(r)
+			sendTelegramMessage(client, apiBase, chatID, "🧹 Done. I've erased everything I remembered about you, and our chat history.")
 			return
 
 		case "/status":
@@ -455,31 +510,22 @@ func (b *BridgeManager) handleIncomingMessage(
 		}
 	}
 
-	// 3. Normal Chat Flow with Active Skills Injected
-	sessID := fmt.Sprintf("tg-%d", chatID)
-	var existingPersona string
-	err := db.QueryRow(`SELECT coalesce(persona_id,'') FROM sessions WHERE id = ?`, sessID).Scan(&existingPersona)
-	if err != nil {
-		_, _ = db.Exec(`INSERT INTO sessions(id, title, persona_id, pinned) VALUES(?, ?, ?, 0)`,
-			sessID, fmt.Sprintf("%s %s", p.Icon, p.Name), p.ID)
+	// 3. Normal Chat Flow: encrypted history + what the bot knows about this person
+	if b.private == nil {
+		sendTelegramMessage(client, apiBase, chatID, "⚠️ Private storage is unavailable on the server, so I can't keep our chat safe right now.")
+		return
 	}
+	ref := b.private.ref(p.ID, chatID)
 
-	_, _ = db.Exec(`INSERT INTO messages(session_id, role, content) VALUES(?, 'user', ?)`, sessID, trimmedText)
-
-	rows, err := db.Query(`SELECT role, content FROM messages WHERE session_id = ? ORDER BY id ASC`, sessID)
+	if err := b.private.appendMessage(nil, ref, "user", trimmedText); err != nil {
+		sendTelegramMessage(client, apiBase, chatID, "⚠️ Could not save your message securely.")
+		return
+	}
+	history, _, err := b.private.history(ref, 0)
 	if err != nil {
 		sendTelegramMessage(client, apiBase, chatID, "⚠️ Database error loading history.")
 		return
 	}
-
-	var history []provider.Message
-	for rows.Next() {
-		var role, content string
-		if rows.Scan(&role, &content) == nil {
-			history = append(history, provider.Message{Role: role, Content: content})
-		}
-	}
-	rows.Close() // release the single SQLite connection BEFORE the skill lookup below (which queries the same DB) and before the long AI call — otherwise the skill lookup blocks forever waiting for this connection and every login hangs
 
 	sysPrompt := p.BuildCombinedSystemPrompt()
 	if b.skillStore != nil {
@@ -488,9 +534,8 @@ func (b *BridgeManager) handleIncomingMessage(
 	if b.memoryStore != nil {
 		sysPrompt += b.memoryStore.BuildMemoryPromptBlock(ctx, []string{p.ID}, trimmedText)
 	}
-	if strings.TrimSpace(sysPrompt) != "" {
-		history = append([]provider.Message{{Role: "system", Content: sysPrompt}}, history...)
-	}
+	sysPrompt += personPromptBlock(who, b.privateFacts(ref))
+	history = append([]provider.Message{{Role: "system", Content: sysPrompt}}, history...)
 	promptMessages := chat.TruncateHistory(history, chat.DefaultConfig())
 
 	prov, mod, err := b.resolveProviderAndModel(p)
@@ -506,10 +551,82 @@ func (b *BridgeManager) handleIncomingMessage(
 		return
 	}
 
-	_, _ = db.Exec(`INSERT INTO messages(session_id, role, content) VALUES(?, 'assistant', ?)`, sessID, answer)
-	_, _ = db.Exec(`UPDATE sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = ?`, sessID)
-
+	_ = b.private.appendMessage(nil, ref, "assistant", answer)
 	sendTelegramMessage(client, apiBase, chatID, answer)
+
+	go b.learnAboutPerson(ref, prov, apiKey, mod)
+}
+
+func (b *BridgeManager) privateFacts(r chatRef) []string {
+	facts, _ := b.private.facts(r)
+	return facts
+}
+
+// personLabel names the Telegram user for the model ("Sara (@sara_k)").
+func personLabel(firstName, username string) string {
+	firstName = strings.TrimSpace(firstName)
+	username = strings.TrimSpace(username)
+	switch {
+	case firstName != "" && username != "":
+		return fmt.Sprintf("%s (@%s)", firstName, username)
+	case firstName != "":
+		return firstName
+	case username != "":
+		return "@" + username
+	}
+	return ""
+}
+
+func personPromptBlock(who string, facts []string) string {
+	var sb strings.Builder
+	sb.WriteString("\n\n## The person you are chatting with\n")
+	if who != "" {
+		sb.WriteString("Telegram name: " + who + "\n")
+	}
+	if len(facts) == 0 {
+		sb.WriteString("You don't know anything else about them yet. Learn about them naturally as you talk.\n")
+		return sb.String()
+	}
+	sb.WriteString("What you remember about them from earlier conversations (use it naturally, don't recite it):\n")
+	for _, f := range facts {
+		sb.WriteString("- " + f + "\n")
+	}
+	return sb.String()
+}
+
+// learnEvery is how many new messages (both sides) trigger a memory update.
+const learnEvery = 6
+
+// learnAboutPerson extracts durable facts about the person from messages not
+// yet processed and saves them, encrypted, to this chat's memory. Runs in the
+// background after a reply; one extraction per chat at a time.
+func (b *BridgeManager) learnAboutPerson(ref chatRef, prov, apiKey, mod string) {
+	b.mu.Lock()
+	if b.extracting[ref.sid] {
+		b.mu.Unlock()
+		return
+	}
+	b.extracting[ref.sid] = true
+	b.mu.Unlock()
+	defer func() {
+		b.mu.Lock()
+		delete(b.extracting, ref.sid)
+		b.mu.Unlock()
+	}()
+
+	facts, upto := b.private.facts(ref)
+	msgs, last, err := b.private.history(ref, upto)
+	if err != nil || len(msgs) < learnEvery {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	newFacts, err := memory.ExtractFromMessages(ctx, b.router, apiKey, prov, mod, facts, msgs)
+	if err != nil {
+		log.Printf("[Telegram] Memory update skipped: %v", err)
+		return
+	}
+	_ = b.private.saveFacts(ref, append(facts, newFacts...), last)
 }
 
 func (b *BridgeManager) setting(key string) string {

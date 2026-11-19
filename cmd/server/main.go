@@ -32,7 +32,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const AppVersion = "0.9.2"
+const AppVersion = "0.9.3"
 
 type App struct {
 	db             *sql.DB
@@ -2666,6 +2666,9 @@ func main() {
 	}
 
 	tgBridge := telegram.NewBridgeManager(db, personaStore, skillStore, memoryStore, router, app.providerKey)
+	if err := tgBridge.EnablePrivateChats(dataDir); err != nil {
+		log.Printf("[Telegram] Encrypted chat storage unavailable, bots will refuse to chat: %v", err)
+	}
 	bridgeCtx, bridgeCancel := context.WithCancel(context.Background())
 	tgBridge.StartSync(bridgeCtx)
 	app.startMemoryExtractor()
