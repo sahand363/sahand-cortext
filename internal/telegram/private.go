@@ -329,3 +329,66 @@ func (ps *privateStore) migratePlaintext() (int, error) {
 	}
 	return moved, nil
 }
+
+// migrateTelegramMemories moves facts that older versions extracted from
+// Telegram chats into the panel's Memories page (memories.source_session
+// "tg-...") into that person's private, encrypted memory, and deletes the
+// visible copies. Facts whose bot can't be told are deleted. Safe to run on
+// every start.
+func (ps *privateStore) migrateTelegramMemories() (int, error) {
+	rows, err := ps.db.Query(`SELECT id, text, scope, source_session FROM memories WHERE source_session LIKE 'tg-%'`)
+	if err != nil {
+		if strings.Contains(err.Error(), "no such table") {
+			return 0, nil
+		}
+		return 0, err
+	}
+	type mem struct{ id, text, scope, src string }
+	var list []mem
+	for rows.Next() {
+		var m mem
+		if rows.Scan(&m.id, &m.text, &m.scope, &m.src) == nil {
+			list = append(list, m)
+		}
+	}
+	rows.Close()
+
+	byChat := map[string][]string{}
+	refs := map[string]chatRef{}
+	for _, m := range list {
+		sm := tgSessionRe.FindStringSubmatch(m.src)
+		if sm == nil || m.scope == "" || m.scope == "main" || m.scope == "all" {
+			continue
+		}
+		chatID, err := strconv.ParseInt(sm[1], 10, 64)
+		if err != nil {
+			continue
+		}
+		r := ps.ref(m.scope, chatID)
+		refs[r.sid] = r
+		byChat[r.sid] = append(byChat[r.sid], strings.TrimSpace(m.text))
+	}
+	for sid, add := range byChat {
+		r := refs[sid]
+		facts, upto := ps.facts(r)
+		seen := map[string]bool{}
+		for _, f := range facts {
+			seen[strings.ToLower(f)] = true
+		}
+		for _, f := range add {
+			if f != "" && !seen[strings.ToLower(f)] {
+				facts = append(facts, f)
+				seen[strings.ToLower(f)] = true
+			}
+		}
+		if err := ps.saveFacts(r, facts, upto); err != nil {
+			return 0, err
+		}
+	}
+	res, err := ps.db.Exec(`DELETE FROM memories WHERE source_session LIKE 'tg-%'`)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}

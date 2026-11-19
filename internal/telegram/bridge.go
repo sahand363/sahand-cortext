@@ -74,6 +74,11 @@ func (b *BridgeManager) EnablePrivateChats(dataDir string) error {
 	} else if n > 0 {
 		log.Printf("[Telegram] Encrypted %d Telegram chat(s) and removed their plaintext copies", n)
 	}
+	if n, err := ps.migrateTelegramMemories(); err != nil {
+		log.Printf("[Telegram] Moving Telegram memories to private storage failed: %v", err)
+	} else if n > 0 {
+		log.Printf("[Telegram] Moved %d Telegram-learned fact(s) out of the Memories page into private storage", n)
+	}
 	return nil
 }
 

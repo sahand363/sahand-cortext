@@ -20,6 +20,8 @@ func TestPrivateStoreEncryptsAndMigrates(t *testing.T) {
 		CREATE TABLE sessions(id TEXT PRIMARY KEY, title TEXT, persona_id TEXT, pinned INTEGER, updated_at TEXT);
 		CREATE TABLE messages(id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, role TEXT, content TEXT);
 		CREATE TABLE memory_extraction_state(session_id TEXT PRIMARY KEY, last_message_id INTEGER);
+		CREATE TABLE memories(id TEXT PRIMARY KEY, text TEXT, scope TEXT, source_session TEXT);
+		INSERT INTO memories VALUES('m1','Sara likes tea','bot1','tg--100123'),('m2','Owner fact','main',''),('m3','orphan','main','tg-5');
 		INSERT INTO sessions(id, persona_id) VALUES('tg--100123', 'bot1'), ('web-1', '');
 		INSERT INTO messages(session_id, role, content) VALUES('tg--100123','user','my secret is pineapple'),('tg--100123','assistant','noted'),('web-1','user','hello');
 	`); err != nil {
@@ -44,7 +46,18 @@ func TestPrivateStoreEncryptsAndMigrates(t *testing.T) {
 		t.Fatal("web chat must be untouched")
 	}
 
+	if n, err := ps.migrateTelegramMemories(); err != nil || n != 2 {
+		t.Fatalf("memories: n=%d err=%v", n, err)
+	}
+	var memLeft int
+	db.QueryRow(`SELECT count(*) FROM memories`).Scan(&memLeft)
+	if memLeft != 1 {
+		t.Fatal("owner memory must stay, telegram ones must go")
+	}
 	r := ps.ref("bot1", -100123)
+	if f, _ := ps.facts(r); len(f) != 1 || f[0] != "Sara likes tea" {
+		t.Fatalf("moved facts: %v", f)
+	}
 	hist, _, err := ps.history(r, 0)
 	if err != nil || len(hist) != 2 || hist[0].Content != "my secret is pineapple" {
 		t.Fatalf("history: %+v %v", hist, err)
