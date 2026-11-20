@@ -19,6 +19,7 @@ import (
 	"github.com/sahand363/sahand-cortext/internal/persona"
 	"github.com/sahand363/sahand-cortext/internal/provider"
 	"github.com/sahand363/sahand-cortext/internal/skill"
+	"github.com/sahand363/sahand-cortext/internal/websearch"
 )
 
 type BridgeManager struct {
@@ -32,8 +33,9 @@ type BridgeManager struct {
 	stagedSkills  map[int64]*skill.StagedDraft // keyed by Telegram chatID
 	mu            sync.Mutex
 
-	private    *privateStore   // encrypted per-chat history and memory
-	extracting map[string]bool // chats with a memory extraction running
+	private    *privateStore     // encrypted per-chat history and memory
+	web        *websearch.Engine // web search for bot chats (nil = off)
+	extracting map[string]bool   // chats with a memory extraction running
 }
 
 type botPoller struct {
@@ -55,6 +57,10 @@ func NewBridgeManager(db interface{}, personaStore *persona.Store, skillStore *s
 		extracting:    make(map[string]bool),
 	}
 }
+
+// EnableWebSearch lets the bots search the web (mode from the hub
+// setting websearch_mode). Each chat's notes are sealed with its own key.
+func (b *BridgeManager) EnableWebSearch(e *websearch.Engine) { b.web = e }
 
 // EnablePrivateChats turns on encrypted storage for Telegram chats, keyed by
 // a secret kept in dataDir, and moves any plaintext chats from older
@@ -400,7 +406,12 @@ func (b *BridgeManager) handleIncomingMessage(
 	}
 
 	// 2. Handle Slash Commands
-	if strings.HasPrefix(trimmedText, "/") {
+	forcedQuery, isSearchCmd := websearch.ParseCommand(trimmedText)
+	if isSearchCmd && forcedQuery == "" {
+		sendTelegramMessage(client, apiBase, chatID, "🔎 Usage: /search <what to look up>\nExample: /search weather in Berlin tomorrow")
+		return
+	}
+	if strings.HasPrefix(trimmedText, "/") && !isSearchCmd {
 		parts := strings.Fields(trimmedText)
 		cmd := strings.ToLower(parts[0])
 		if idx := strings.Index(cmd, "@"); idx != -1 {
@@ -409,7 +420,7 @@ func (b *BridgeManager) handleIncomingMessage(
 
 		switch cmd {
 		case "/start", "/help":
-			msg := fmt.Sprintf("🤖 %s %s\n\nCommands:\n/learn <url> - Visit a link, extract a skill, and save it to DB\n/learn-deep <url> - Learn a page AND its same-site links (up to 10 pages)\n/skills - List active skills in my knowledge base\n/new - Start a fresh conversation\n/memory - What I remember about you\n/forget - Erase what I remember about you\n/status - Check bot status\n\n🔒 Our chat is stored encrypted. Not even the bot's owner can read it.", p.Icon, p.Name)
+			msg := fmt.Sprintf("🤖 %s %s\n\nCommands:\n/learn <url> - Visit a link, extract a skill, and save it to DB\n/learn-deep <url> - Learn a page AND its same-site links (up to 10 pages)\n/search <query> - Search the web and answer from it\n/skills - List active skills in my knowledge base\n/new - Start a fresh conversation\n/memory - What I remember about you\n/forget - Erase what I remember about you\n/status - Check bot status\n\n🔒 Our chat is stored encrypted. Not even the bot's owner can read it.", p.Icon, p.Name)
 			sendTelegramMessage(client, apiBase, chatID, msg)
 			return
 
@@ -510,7 +521,8 @@ func (b *BridgeManager) handleIncomingMessage(
 			r := b.private.ref(p.ID, chatID)
 			_ = b.private.forget(r)
 			_ = b.private.clearHistory(r)
-			sendTelegramMessage(client, apiBase, chatID, "🧹 Done. I've erased everything I remembered about you, and our chat history.")
+			_ = b.private.forgetWebNotes(r)
+			sendTelegramMessage(client, apiBase, chatID, "🧹 Done. I've erased everything I remembered about you, our chat history, and your saved web searches.")
 			return
 
 		case "/status":
@@ -555,7 +567,30 @@ func (b *BridgeManager) handleIncomingMessage(
 	}
 
 	apiKey := b.keyLookup(prov)
-	answer, _, err := b.router.Call(ctx, prov, apiKey, mod, promptMessages, provider.CallOpts{})
+	call := func(ctx context.Context, m []provider.Message, _ func(string)) (string, error) {
+		out, _, err := b.router.Call(ctx, prov, apiKey, mod, m, provider.CallOpts{})
+		return out, err
+	}
+	var answer string
+	if b.web != nil {
+		pickFrom := trimmedText
+		if isSearchCmd {
+			pickFrom = forcedQuery
+		}
+		answer, err = b.web.Run(ctx, websearch.Turn{
+			Mode:        websearch.NormalizeMode(b.setting(websearch.SettingKey)),
+			Notebook:    b.private.notebook(ref),
+			Messages:    promptMessages,
+			UserMessage: pickFrom,
+			ForcedQuery: forcedQuery,
+			Call:        call,
+			Status: func(st string) {
+				sendTelegramMessage(client, apiBase, chatID, "🔎 "+st+" …")
+			},
+		})
+	} else {
+		answer, err = call(ctx, promptMessages, nil)
+	}
 	if err != nil {
 		sendTelegramMessage(client, apiBase, chatID, fmt.Sprintf("⚠️ AI error: %s", err.Error()))
 		return

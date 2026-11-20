@@ -698,6 +698,7 @@
           <div class="settings-nav">
             <button class="settings-tab active" data-tab="provider-settings">AI providers</button>
             <button class="settings-tab" data-tab="personas-settings">Chatbots & personas</button>
+            <button class="settings-tab" data-tab="websearch-settings">Web search</button>
             <button class="settings-tab" data-tab="general-settings">General</button>
             <button class="settings-tab" data-tab="security-settings">Security</button>
           </div>
@@ -994,6 +995,24 @@ Sahand: آره ردیفه الان دارم تستش میکنم 🚀"></textarea
                   <button type="submit" class="btn btn-primary btn-small" id="save-persona-btn">Save Chatbot Persona <span>↗</span></button>
                 </div>
               </form>
+            </div>
+
+            <div id="websearch-settings" class="settings-panel hidden">
+              <div class="settings-section-head"><div><h2>Web search</h2><p>Free search (DuckDuckGo, no key) in the main chat, the Android app and your Telegram bots. Each search is saved as a short note with its sources, never the whole pages, and reused later.</p></div></div>
+              <div class="setting-row">
+                <div><b>When to search</b><small>Auto: the AI searches when a question needs fresh facts, and you can force one with <code>/search &lt;query&gt;</code>. Only /search: never on its own.</small></div>
+                <select id="websearch-mode-select" class="form-control" style="width:auto;min-width:190px">
+                  <option value="auto">Auto + /search</option>
+                  <option value="command">Only /search</option>
+                  <option value="off">Off</option>
+                </select>
+              </div>
+              <div class="setting-row">
+                <div><b>Saved web notes</b><small id="websearch-notes-meta">Loading…</small></div>
+                <button type="button" class="btn btn-quiet btn-small" id="websearch-clear-btn">Clear all notes</button>
+              </div>
+              <p class="muted-note" style="margin:6px 0 12px">Notes from Telegram chats are sealed with each chat's own key and are not listed here; <code>/forget</code> in that chat erases them.</p>
+              <div id="websearch-notes-list" class="websearch-notes-list"></div>
             </div>
 
             <div id="general-settings" class="settings-panel hidden">

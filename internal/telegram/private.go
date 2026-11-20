@@ -83,6 +83,9 @@ func newPrivateStore(db *sql.DB, dataDir string) (*privateStore, error) {
 	if err := ps.initSchema(); err != nil {
 		return nil, err
 	}
+	if err := ps.initWebNotesSchema(); err != nil {
+		return nil, err
+	}
 	return ps, nil
 }
 

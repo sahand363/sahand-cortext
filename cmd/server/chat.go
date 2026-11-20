@@ -13,6 +13,7 @@ import (
 	"github.com/sahand363/sahand-cortext/internal/persona"
 	"github.com/sahand363/sahand-cortext/internal/provider"
 	"github.com/sahand363/sahand-cortext/internal/skill"
+	"github.com/sahand363/sahand-cortext/internal/websearch"
 	_ "modernc.org/sqlite"
 )
 
@@ -360,13 +361,26 @@ func (a *App) sendMessage(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// "/search <query>": search the web first, then answer from the note.
+	forcedQuery, isSearchCmd := websearch.ParseCommand(trimmedMsg)
+	if isSearchCmd && forcedQuery == "" {
+		_, _ = a.db.Exec(`INSERT INTO messages(session_id,role,content) VALUES(?,?,?)`, t.sessionID, "user", body.Message)
+		_, _ = a.db.Exec(`INSERT INTO messages(session_id,role,content) VALUES(?,?,?)`, t.sessionID, "assistant", searchUsage)
+		jsonOut(w, 200, map[string]any{"reply": searchUsage, "provider": t.normProvider, "model": t.chosenModel, "persona_id": t.activePersonaID})
+		return
+	}
+	pickFrom := body.Message
+	if isSearchCmd {
+		pickFrom = forcedQuery
+	}
+
 	promptMessages, err := a.buildChatPrompt(r.Context(), t, body.Message)
 	if err != nil {
 		jsonOut(w, 500, map[string]string{"error": "database error"})
 		return
 	}
 
-	answer, elapsed, err := a.router.Call(r.Context(), t.normProvider, a.providerKey(t.normProvider), t.chosenModel, promptMessages, provider.CallOpts{})
+	answer, elapsed, err := a.runChatTurn(r.Context(), t, promptMessages, pickFrom, forcedQuery, nil, nil)
 	if err != nil {
 		a.saveTestRecord(t.normProvider, t.chosenModel, ModelTestRecord{Status: "failed", LatencyMs: elapsed, LastError: err.Error()})
 		jsonOut(w, 502, map[string]string{"error": fmt.Sprintf("[%s · %s] %s", t.providerName, t.chosenModel, err.Error())})

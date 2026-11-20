@@ -34,7 +34,7 @@ import (
 	"time"
 
 	"github.com/sahand363/sahand-cortext/internal/mobile"
-	"github.com/sahand363/sahand-cortext/internal/provider"
+	"github.com/sahand363/sahand-cortext/internal/websearch"
 )
 
 const (
@@ -641,7 +641,8 @@ func (a *App) mobileChatStream(w http.ResponseWriter, r *http.Request) {
 	a.mu.Lock()
 	_, hasStaged := a.webStagedSkill[body.SessionID]
 	a.mu.Unlock()
-	if (hasStaged && !strings.HasPrefix(trimmedMsg, "/")) || strings.HasPrefix(trimmedMsg, "/learn ") || strings.HasPrefix(trimmedMsg, "/learn-deep ") {
+	forcedQuery, isSearchCmd := websearch.ParseCommand(trimmedMsg)
+	if (hasStaged && !strings.HasPrefix(trimmedMsg, "/")) || strings.HasPrefix(trimmedMsg, "/learn ") || strings.HasPrefix(trimmedMsg, "/learn-deep ") || (isSearchCmd && forcedQuery == "") {
 		status, respBody := a.dispatchChat(r, body.SessionID, body.Message, body.Provider, body.Model, body.PersonaID)
 		sw := newMobileSSEWriter(w, a.mobileToken())
 		if status != http.StatusOK {
@@ -691,12 +692,21 @@ func (a *App) mobileChatStream(w http.ResponseWriter, r *http.Request) {
 	sw := newMobileSSEWriter(w, a.mobileToken())
 	stopHeartbeat := sw.startHeartbeat(r, 15*time.Second)
 	var streamed strings.Builder
-	answer, elapsed, err := a.router.CallStream(r.Context(), t.normProvider, a.providerKey(t.normProvider), t.chosenModel, promptMessages, provider.CallOpts{}, func(chunk string) {
+	pickFrom := body.Message
+	if isSearchCmd {
+		pickFrom = forcedQuery
+	}
+	// Web search: text is streamed only once it is a real answer (never
+	// a search request); while searching, a {"status": ...} event is sent
+	// (older apps ignore it; the heartbeat keeps the stream open).
+	answer, elapsed, err := a.runChatTurn(r.Context(), t, promptMessages, pickFrom, forcedQuery, func(chunk string) {
 		if chunk == "" {
 			return
 		}
 		streamed.WriteString(chunk)
 		sw.event(map[string]string{"chunk": chunk})
+	}, func(st string) {
+		sw.event(map[string]string{"status": "🔎 " + st})
 	})
 	stopHeartbeat()
 	if err != nil {

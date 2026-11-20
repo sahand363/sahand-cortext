@@ -24,7 +24,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const AppVersion = "0.9.9"
+const AppVersion = "0.10.0"
 
 func main() {
 	if len(os.Args) > 1 && (os.Args[1] == "version" || os.Args[1] == "--version") {
@@ -78,6 +78,7 @@ func main() {
 	if err := tgBridge.EnablePrivateChats(dataDir); err != nil {
 		log.Printf("[Telegram] Encrypted chat storage unavailable, bots will refuse to chat: %v", err)
 	}
+	tgBridge.EnableWebSearch(newWebEngine())
 	bridgeCtx, bridgeCancel := context.WithCancel(context.Background())
 	tgBridge.StartSync(bridgeCtx)
 	app.startMemoryExtractor()
@@ -123,6 +124,9 @@ func main() {
 	mux.HandleFunc("/api/memories", app.auth(app.handleMemories))
 	mux.HandleFunc("/api/memories/extract", app.auth(app.handleMemoryExtract))
 	mux.HandleFunc("/api/memories/", app.auth(app.handleMemoryByID))
+	mux.HandleFunc("/api/websearch", app.auth(app.handleWebSearch))
+	mux.HandleFunc("/api/websearch/notes", app.auth(app.handleWebNotes))
+	mux.HandleFunc("/api/websearch/notes/", app.auth(app.handleWebNotes))
 	mux.HandleFunc("/api/setup/gemini", app.auth(app.saveProviderKey))
 	mux.HandleFunc("/api/setup/provider", app.auth(app.saveProviderKey))
 	mux.HandleFunc("/api/models", app.auth(app.handleModels))

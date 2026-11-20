@@ -18,6 +18,7 @@ import (
 	"github.com/sahand363/sahand-cortext/internal/persona"
 	"github.com/sahand363/sahand-cortext/internal/provider"
 	"github.com/sahand363/sahand-cortext/internal/skill"
+	"github.com/sahand363/sahand-cortext/internal/websearch"
 	_ "modernc.org/sqlite"
 )
 
@@ -41,6 +42,8 @@ type App struct {
 	orchPool            *orchestration.WorkerPool
 	loginLimit          *loginLimiter
 	channels            *channel.Service
+	web                 *websearch.Engine
+	webNotes            *websearch.SQLStore
 }
 
 type Session struct {
@@ -182,6 +185,15 @@ func (a *App) initDB() error {
 		if err := a.channels.Store.InitSchema(); err != nil {
 			return err
 		}
+	}
+	if a.webNotes == nil {
+		a.webNotes = websearch.NewSQLStore(a.db)
+	}
+	if err := a.webNotes.InitSchema(); err != nil {
+		return err
+	}
+	if a.web == nil {
+		a.web = newWebEngine()
 	}
 	if err := a.orchStorage.InitSchema(); err != nil {
 		return err

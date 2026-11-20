@@ -512,19 +512,52 @@ function buildZipBlob(files) {
   return new Blob([...localChunks, ...centralChunks, eocd], { type: "application/zip" });
 }
 
-function downloadProjectZip(files, jobId) {
+// Orchestration downloads are named date_time_three-words.zip, e.g.
+// 2026-11-20_1406_telegram-bot-refactor.zip: the job's start time (local)
+// plus the first three meaningful words of its task.
+const ORCH_NAME_STOP = new Set(("a an the and or but for of to in on at by with from into about as is are was were be been " +
+  "make build create write please can could would should you your me my i we our it its this that these those " +
+  "using use new simple some any all just also then than so do does need want help me " +
+  "برای با از به در که این آن را یک و یا تا هم بساز بنویس کن").split(" "));
+
+function orchTaskWords(task) {
+  const words = String(task || "").toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+  const out = [];
+  for (const w of words) {
+    if (ORCH_NAME_STOP.has(w)) continue;
+    if (w.length < 3 && !/^\p{N}+$/u.test(w)) continue;
+    if (out.includes(w)) continue;
+    out.push(w.slice(0, 20));
+    if (out.length === 3) break;
+  }
+  return out.length ? out.join("-") : "orchestration-result";
+}
+
+function orchZipName(job, suffix) {
+  let d = null;
+  if (job && job.created_at) {
+    const ts = String(job.created_at);
+    d = new Date(ts.includes("T") ? ts : ts.replace(" ", "T") + (/[zZ]|[+-]\d\d:?\d\d$/.test(ts) ? "" : "Z"));
+  }
+  if (!d || isNaN(d.getTime())) d = new Date();
+  const p = n => String(n).padStart(2, "0");
+  const stamp = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}`;
+  return `${stamp}_${orchTaskWords(job && job.task)}${suffix ? "_" + suffix : ""}.zip`;
+}
+
+function downloadProjectZip(files, zipName) {
   if (!files || !files.length) return;
   const zipBlob = buildZipBlob(files);
   const url = URL.createObjectURL(zipBlob);
   const a = document.createElement("a");
-  const cleanId = (jobId || "project").replace(/[^a-zA-Z0-9_-]/g, "");
+  const name = /\.zip$/i.test(zipName || "") ? zipName : `${String(zipName || "project").replace(/[^\p{L}\p{N}_-]/gu, "")}.zip`;
   a.href = url;
-  a.download = `${cleanId}-project.zip`;
+  a.download = name;
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
   setTimeout(() => URL.revokeObjectURL(url), 1500);
-  toast(`📦 Downloaded ${cleanId}-project.zip (${files.length} files)`);
+  toast(`📦 Downloaded ${name} (${files.length} files)`);
 }
 
 /* ============================================================================
@@ -2593,6 +2626,9 @@ function switchSettingsTab(tabId) {
   if (tabId === "personas-settings") {
     renderPersonasGrid();
   }
+  if (tabId === "websearch-settings") {
+    loadWebSearchSettings();
+  }
 }
 
 document.querySelectorAll(".settings-tab").forEach(b => b.onclick = () => switchSettingsTab(b.dataset.tab));
@@ -4324,7 +4360,7 @@ function renderOrchJobDetails(d) {
     const zipBtn = $("orch-download-zip-btn");
     if (zipBtn) {
       zipBtn.textContent = `📦 Download Project (.zip · ${files.length} file${files.length === 1 ? "" : "s"})`;
-      zipBtn.onclick = () => downloadProjectZip(files, d.id);
+      zipBtn.onclick = () => downloadProjectZip(files, orchZipName(d));
     }
 
     const dlBtn = $("orch-download-result-btn");
@@ -4479,7 +4515,7 @@ function renderOrchJobDetails(d) {
         dlTurnBtn.onclick = () => {
           const turnFiles = extractProjectFiles(displayContent, `${d.id}-turn-${idx + 1}`).files;
           if (turnFiles.length > 1) {
-            downloadProjectZip(turnFiles, `${d.id}-turn-${idx + 1}`);
+            downloadProjectZip(turnFiles, orchZipName(d, `turn${idx + 1}`));
           } else {
             downloadSingleFileObj(turnFiles[0]);
           }
@@ -5112,5 +5148,94 @@ if ($("new-channel-btn")) {
       await loadChannelPosts();
     } catch (e) { $("channel-write-status").textContent = e.message; }
     btn.disabled = false;
+  };
+}
+
+
+/* ============================================================================
+   WEB SEARCH SETTINGS (v0.10.0)
+   ============================================================================ */
+
+function formatNoteBytes(n) {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / 1024 / 1024).toFixed(2)} MB`;
+}
+
+async function loadWebSearchSettings() {
+  const sel = $("websearch-mode-select");
+  const meta = $("websearch-notes-meta");
+  const list = $("websearch-notes-list");
+  if (!sel || !list) return;
+  try {
+    const d = await api("/api/websearch");
+    sel.value = d.mode || "auto";
+    meta.textContent = d.count
+      ? `${d.count} note${d.count === 1 ? "" : "s"} · ${formatNoteBytes(d.bytes || 0)} · the oldest unused ones are dropped after ${d.max_notes}.`
+      : "No notes yet. They appear here after the first search.";
+    list.innerHTML = "";
+    (d.notes || []).forEach(n => {
+      const card = document.createElement("div");
+      card.className = "websearch-note";
+      const head = document.createElement("div");
+      head.className = "websearch-note-head";
+      const q = document.createElement("b");
+      q.setAttribute("dir", "auto");
+      q.textContent = n.query;
+      const right = document.createElement("small");
+      right.textContent = `${formatShortTimestamp(n.created_at)} · used ${n.uses || 0}× `;
+      const del = document.createElement("button");
+      del.type = "button";
+      del.className = "mini-act danger";
+      del.textContent = "Delete";
+      del.onclick = async () => {
+        try {
+          await api(`/api/websearch/notes/${encodeURIComponent(n.id)}`, { method: "DELETE" });
+          card.remove();
+          toast("Note deleted");
+          loadWebSearchSettings();
+        } catch (e) { toast(e.message || "Could not delete"); }
+      };
+      right.appendChild(del);
+      head.append(q, right);
+      const body = document.createElement("pre");
+      body.setAttribute("dir", "auto");
+      body.textContent = n.summary;
+      card.append(head, body);
+      (n.sources || []).slice(0, 6).forEach((s, i) => {
+        const line = document.createElement("div");
+        line.className = "src";
+        const a = document.createElement("a");
+        a.href = s.url;
+        a.target = "_blank";
+        a.rel = "noopener noreferrer";
+        a.textContent = `[${i + 1}] ${s.title || s.url}`;
+        line.appendChild(a);
+        card.appendChild(line);
+      });
+      list.appendChild(card);
+    });
+  } catch (e) {
+    if (meta) meta.textContent = "Could not load: " + (e.message || e);
+  }
+}
+
+if ($("websearch-mode-select")) {
+  $("websearch-mode-select").onchange = async e => {
+    try {
+      const d = await api("/api/websearch", { method: "PUT", body: JSON.stringify({ mode: e.target.value }) });
+      const label = { auto: "Auto + /search", command: "Only /search", off: "Off" }[d.mode] || d.mode;
+      toast(`Web search: ${label}`);
+    } catch (err) { toast(err.message || "Could not save"); }
+  };
+}
+if ($("websearch-clear-btn")) {
+  $("websearch-clear-btn").onclick = async () => {
+    if (!confirm("Delete all saved web notes? Telegram chats' own notes are not affected.")) return;
+    try {
+      const d = await api("/api/websearch/notes", { method: "DELETE" });
+      toast(`Deleted ${d.deleted || 0} note(s)`);
+      loadWebSearchSettings();
+    } catch (e) { toast(e.message || "Could not clear"); }
   };
 }
