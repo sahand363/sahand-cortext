@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"regexp"
 	"strings"
 	"sync"
@@ -41,6 +42,9 @@ const (
 	pagesToRead        = 3
 	pageExcerptChars   = 5000
 	maxNoteChars       = 1800
+	// reuseWindow: a search whose query matches a note made this recently
+	// reuses the note instead of hitting the search engine again.
+	reuseWindow = 6 * time.Hour
 )
 
 // CallFunc runs the chat model once. onChunk gets streamed text and may
@@ -143,7 +147,9 @@ func instructions(today string) string {
 		"The hub will search, give you a short note, and ask you again. If a note covers the topic but lacks the detail asked about, " +
 		"search again with a narrower query for just that part. Notes can be out of date for fast-changing topics, so check their date. " +
 		"Do not search for small talk, general knowledge you are sure of, or code you can write yourself. " +
-		"When your answer uses web information, end it with the source links you used.\n"
+		"When your answer uses web information, end it with the source links you used.\n" +
+		"Web notes in this prompt are real search results the hub fetched for you, so use them. If earlier replies in this chat said " +
+		"the web search did not work, that is out of date: ignore it and never repeat it.\n"
 }
 
 func notesBlock(notes []Note) string {
@@ -225,14 +231,30 @@ func (e *Engine) Run(ctx context.Context, t Turn) (string, error) {
 		msgs = addSystem(msgs, instructions(today))
 	}
 
+	haveNotes := false
+	if len(msgs) > 0 && strings.Contains(msgs[0].Content, "=== WEB NOTES") {
+		haveNotes = true
+	}
 	research := func(q string) {
 		searches++
+		if n := recentNote(ctx, t.Notebook, q, e.now()); n != nil {
+			haveNotes = true
+			_ = t.Notebook.Touch(ctx, []string{n.ID})
+			msgs = addSystem(msgs, "\n\n=== NEW WEB NOTE (searched a moment ago) ===\n"+FormatNote(*n))
+			return
+		}
 		status("Searching the web: " + q)
 		note, err := e.Research(ctx, t.Notebook, q, t.Call)
 		if err != nil {
-			msgs = addSystem(msgs, fmt.Sprintf("\n\n=== WEB SEARCH FAILED ===\nThe search for %q failed (%s). Answer from what you know, and say briefly that the web search did not work.\n", q, err.Error()))
+			log.Printf("websearch: search %q failed: %v", q, err)
+			if haveNotes {
+				msgs = addSystem(msgs, fmt.Sprintf("\n\n=== EXTRA SEARCH DID NOT WORK ===\nAn extra search for %q did not work, but the web notes above are real search results. Answer the user from them now, in full, with their sources. Do not say the web search failed.\n", q))
+				return
+			}
+			msgs = addSystem(msgs, fmt.Sprintf("\n\n=== WEB SEARCH FAILED ===\nThe search for %q failed (%s). Answer from what you know, and say briefly that the web search did not work this time.\n", q, err.Error()))
 			return
 		}
+		haveNotes = true
 		msgs = addSystem(msgs, "\n\n=== NEW WEB NOTE (just searched) ===\n"+FormatNote(*note))
 	}
 
@@ -257,7 +279,11 @@ func (e *Engine) Run(ctx context.Context, t Turn) (string, error) {
 			return StripMarkers(answer), nil
 		}
 		if !allowModelSearch || searches >= maxSearchesPerTurn {
-			msgs = addSystem(msgs, "\n\nNo more web searches are possible for this message. Answer now with what you have, and say what you could not confirm. Do not ask for another search.\n")
+			if haveNotes {
+				msgs = addSystem(msgs, "\n\nYou have already searched for this message: the web notes above are your search results. Answer the user now from them, in full, with their sources. Do not ask for another search and do not say the search failed.\n")
+			} else {
+				msgs = addSystem(msgs, "\n\nNo more web searches are possible for this message. Answer now with what you know, and say what you could not confirm. Do not ask for another search.\n")
+			}
 			g2 := newGate(t.Emit)
 			final, err := t.Call(ctx, msgs, g2.write)
 			if err != nil {
@@ -275,6 +301,54 @@ func (e *Engine) Run(ctx context.Context, t Turn) (string, error) {
 		}
 		research(q)
 	}
+}
+
+// recentNote returns a saved note for the same search made within
+// reuseWindow with the same words (any order). A narrower query searches
+// again, so a follow-up for detail is never answered from the broad note.
+func recentNote(ctx context.Context, nb Notebook, q string, now time.Time) *Note {
+	if nb == nil {
+		return nil
+	}
+	all, err := nb.List(ctx)
+	if err != nil {
+		return nil
+	}
+	qw := Words(q)
+	if len(qw) == 0 {
+		return nil
+	}
+	var best *Note
+	for i := range all {
+		n := &all[i]
+		at, err := time.Parse("2006-01-02 15:04:05", n.CreatedAt)
+		if err != nil || now.Sub(at) > reuseWindow || now.Sub(at) < -time.Minute {
+			continue
+		}
+		if NormalizeQuery(n.Query) != NormalizeQuery(q) {
+			nw := Words(n.Query)
+			if !(subset(qw, nw) && subset(nw, qw)) {
+				continue
+			}
+		}
+		if best == nil || n.CreatedAt > best.CreatedAt {
+			best = n
+		}
+	}
+	return best
+}
+
+func subset(a, b []string) bool {
+	set := make(map[string]bool, len(b))
+	for _, w := range b {
+		set[w] = true
+	}
+	for _, w := range a {
+		if !set[w] {
+			return false
+		}
+	}
+	return true
 }
 
 // Research searches, reads the top pages, has the model write a short

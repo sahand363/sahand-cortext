@@ -247,3 +247,60 @@ func TestPickMatchesFollowUpsAndPersian(t *testing.T) {
 		t.Fatalf("unrelated pick %+v", p)
 	}
 }
+
+// A question asked again soon after reuses the fresh note instead of
+// hitting the search engine, and a failed extra search never makes the
+// model deny the notes it already has.
+func TestRecentNoteReuseAndFailureWithNotes(t *testing.T) {
+	now := time.Date(2026, 11, 21, 8, 0, 0, 0, time.UTC)
+	searches := 0
+	fail := false
+	e := &Engine{
+		Search: func(ctx context.Context, q string, max int) ([]Result, error) {
+			searches++
+			if fail {
+				return nil, ErrNoResults
+			}
+			return []Result{{Title: "News", URL: "https://example.com/n", Snippet: "Iran news today"}}, nil
+		},
+		Now: func() time.Time { return now },
+	}
+	nb := &memNotebook{}
+	var lastSys string
+	call := func(ctx context.Context, msgs []provider.Message, onChunk func(string)) (string, error) {
+		if strings.Contains(msgs[0].Content, "research notes") {
+			return "- Iran news item [1]", nil
+		}
+		lastSys = msgs[0].Content
+		if !strings.Contains(lastSys, "NEW WEB NOTE") && !strings.Contains(lastSys, "SEARCH DID NOT WORK") && !strings.Contains(lastSys, "already searched") {
+			return "[[SEARCH: اخبار ایران امروز]]", nil
+		}
+		if strings.Count(lastSys, "NEW WEB NOTE") < 2 && !strings.Contains(lastSys, "already searched") && !strings.Contains(lastSys, "DID NOT WORK") {
+			return "[[SEARCH: مهمترین اخبار ایران امروز]]", nil
+		}
+		return "answer from notes", nil
+	}
+	run := func() string {
+		ans, err := e.Run(context.Background(), Turn{Mode: ModeAuto, Notebook: nb,
+			Messages:    []provider.Message{{Role: "system", Content: "S"}, {Role: "user", Content: "اخبار امروز ایران"}},
+			UserMessage: "اخبار امروز ایران", Call: call})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return ans
+	}
+	if ans := run(); ans != "answer from notes" {
+		t.Fatalf("first turn answer %q", ans)
+	}
+	first := searches
+	fail = true
+	if ans := run(); ans != "answer from notes" {
+		t.Fatalf("second turn answer %q", ans)
+	}
+	if searches != first {
+		t.Fatalf("second turn should reuse fresh notes, searched %d more times", searches-first)
+	}
+	if strings.Contains(lastSys, "WEB SEARCH FAILED") {
+		t.Fatal("model was told the search failed although it had notes")
+	}
+}

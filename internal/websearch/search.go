@@ -67,6 +67,20 @@ func DuckDuckGo(ctx context.Context, query string, max int) ([]Result, error) {
 	}
 	client := &http.Client{Timeout: 15 * time.Second}
 
+	res, err := ddgOnce(ctx, client, query, max)
+	if err == nil {
+		return res, nil
+	}
+	// DuckDuckGo often refuses a burst of quick searches; wait and try once more.
+	select {
+	case <-ctx.Done():
+		return nil, err
+	case <-time.After(2500 * time.Millisecond):
+	}
+	return ddgOnce(ctx, client, query, max)
+}
+
+func ddgOnce(ctx context.Context, client *http.Client, query string, max int) ([]Result, error) {
 	var lastErr error
 	attempts := []struct {
 		method, endpoint string
@@ -85,6 +99,9 @@ func DuckDuckGo(ctx context.Context, query string, max int) ([]Result, error) {
 		res := at.parse(body)
 		if len(res) == 0 {
 			lastErr = ErrNoResults
+			if strings.Contains(body, "anomaly") || strings.Contains(body, "challenge-form") {
+				lastErr = errors.New("DuckDuckGo asked for a bot check (too many searches)")
+			}
 			continue
 		}
 		if len(res) > max {
