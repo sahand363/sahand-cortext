@@ -144,6 +144,8 @@ func instructions(today string) string {
 		"(news, prices, releases, versions, schedules, people, anything recent, or the user asks you to look something up) " +
 		"and the web notes in this prompt do not cover it, reply with ONLY this one line and nothing else:\n" +
 		"[[SEARCH: a short search query]]\n" +
+		"Write the query in the language most likely to find good sources (English is often best for international news), " +
+		"but always answer in the user's language. Never mention HTTP codes or search internals to the user.\n" +
 		"The hub will search, give you a short note, and ask you again. If a note covers the topic but lacks the detail asked about, " +
 		"search again with a narrower query for just that part. Notes can be out of date for fast-changing topics, so check their date. " +
 		"Do not search for small talk, general knowledge you are sure of, or code you can write yourself. " +
@@ -377,6 +379,9 @@ func (e *Engine) Research(ctx context.Context, nb Notebook, query string, call C
 				defer wg.Done()
 				fctx, cancel := context.WithTimeout(ctx, 12*time.Second)
 				defer cancel()
+				if unreadable(results[i].URL) {
+					return
+				}
 				text, err := e.Fetch(fctx, results[i].URL)
 				if err != nil {
 					return

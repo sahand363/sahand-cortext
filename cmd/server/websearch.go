@@ -13,11 +13,11 @@ import (
 )
 
 // Web search (v0.10.0): every chat can search the web for free
-// (DuckDuckGo, no key). Each search leaves a short note in web_notes,
+// (DuckDuckGo, then Google News and Wikipedia; no key). Each search leaves a short note in web_notes,
 // which later turns reuse. See internal/websearch.
 
 func newWebEngine() *websearch.Engine {
-	return &websearch.Engine{Search: websearch.DuckDuckGo, Fetch: skill.FetchAndCleanURL}
+	return &websearch.Engine{Search: websearch.DefaultSearch(), Fetch: skill.FetchAndCleanURL}
 }
 
 func (a *App) webSearchMode() string { return websearch.NormalizeMode(a.setting(websearch.SettingKey)) }

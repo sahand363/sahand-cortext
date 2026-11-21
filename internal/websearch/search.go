@@ -71,6 +71,9 @@ func DuckDuckGo(ctx context.Context, query string, max int) ([]Result, error) {
 	if err == nil {
 		return res, nil
 	}
+	if isRefusal(err) {
+		return nil, err // refused: let the next source answer
+	}
 	// DuckDuckGo often refuses a burst of quick searches; wait and try once more.
 	select {
 	case <-ctx.Done():
