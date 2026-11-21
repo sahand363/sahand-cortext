@@ -1,4 +1,4 @@
-# Sahand-CorText · v0.10.2
+# Sahand-CorText · v0.10.3
 
 **A private, secure, single-user AI workspace hosted on your own Ubuntu server.**
 
@@ -141,7 +141,9 @@ AIPrime, Gemini, Anthropic, OpenAI-compatible, and custom providers behind one r
 Multi-model collaboration with intelligent task routing across specialized models, pause/resume, mid-job participant and model swapping, and a live progress timeline. Downloads are named by start time and task, e.g. `2026-11-20_1406_telegram-bot-refactor.zip`.
 
 ### 🔎 Web Search
-Free web search (DuckDuckGo first; if it refuses the server it falls back to Google News RSS and Wikipedia; no API key) in the main chat, the Android app and every Telegram bot. In **Auto** mode the AI searches on its own when a question needs fresh facts; `/search <query>` forces a search in any chat. Each search reads the top results, the chat's own model writes a short note (key facts, date, numbered sources), and only that note is kept, never the pages, so a thousand searches is about 2 MB. Later questions on the same topic reuse the note; when a note is too thin or old the AI searches again for just that part. Notes are listed and deletable in **Settings › Web search** (modes: Auto + /search, Only /search, Off). Telegram chats keep their own notes, sealed with that chat's key; `/forget` erases them.
+Web search in the main chat, the Android app and every Telegram bot. In **Auto** mode the AI searches on its own when a question needs fresh facts; `/search <query>` forces a search in any chat. Each search reads the top results, the chat's own model writes a short note (key facts, date, numbered sources), and only that note is kept, never the pages, so a thousand searches is about 2 MB. Later questions on the same topic reuse the note; when a note is too thin or old the AI searches again for just that part. Notes are listed and deletable in **Settings › Web search** (modes: Auto + /search, Only /search, Off). Telegram chats keep their own notes, sealed with that chat's key; `/forget` erases them.
+
+**Sources:** with a [Tavily](https://tavily.com) key (free plan about 1,000 searches a month; paste it in **Settings › Web search** → *Save & test*, stored encrypted, or set `TAVILY_API_KEY`) Tavily answers first, since it does not block server IPs. Without a key, or when Tavily fails or its credits run out, the free chain answers: DuckDuckGo, then Google News RSS, then Wikipedia. A source that refuses is skipped for 10 minutes (Tavily for 1 hour when its monthly credits are used up).
 
 ### 📚 Skills Engine
 Learn a web page as a skill (`/learn`), or a page plus its same-site links (`/learn-deep`, up to 10 pages). Skills are managed on the **Skills** page and can be assigned to the main chat, to one or many Telegram bots, or to everyone. URL fetching blocks private, loopback, and internal addresses (SSRF protection).

@@ -3,8 +3,12 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"os"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sahand363/sahand-cortext/internal/provider"
@@ -13,11 +17,119 @@ import (
 )
 
 // Web search (v0.10.0): every chat can search the web for free
-// (DuckDuckGo, then Google News and Wikipedia; no key). Each search leaves a short note in web_notes,
+// (Tavily when the owner set a key, then DuckDuckGo, Google News and Wikipedia). Each search leaves a short note in web_notes,
 // which later turns reuse. See internal/websearch.
 
-func newWebEngine() *websearch.Engine {
-	return &websearch.Engine{Search: websearch.DefaultSearch(), Fetch: skill.FetchAndCleanURL}
+func newWebEngine(a *App) *websearch.Engine {
+	return &websearch.Engine{Search: websearch.DefaultSearch(a.tavilyConfig()), Fetch: skill.FetchAndCleanURL}
+}
+
+// tavilyKey is the owner's Tavily key: Settings › Web search (stored
+// encrypted), else the TAVILY_API_KEY environment variable.
+func (a *App) tavilyKey() string {
+	if v := strings.TrimSpace(a.setting(websearch.TavilySettingKey)); v != "" {
+		return provider.DecryptAPIKey(v)
+	}
+	return strings.TrimSpace(os.Getenv("TAVILY_API_KEY"))
+}
+
+const tavilyUsageKey = "tavily_usage" // "YYYY-MM:count", searches this month
+
+var tavilyUsageMu sync.Mutex
+
+func (a *App) tavilyUsedThisMonth() int {
+	month, n := splitUsage(a.setting(tavilyUsageKey))
+	if month != time.Now().Format("2006-01") {
+		return 0
+	}
+	return n
+}
+
+func splitUsage(v string) (string, int) {
+	month, count, ok := strings.Cut(v, ":")
+	if !ok {
+		return "", 0
+	}
+	n, _ := strconv.Atoi(count)
+	return month, n
+}
+
+func (a *App) tavilyConfig() websearch.TavilyConfig {
+	return websearch.TavilyConfig{
+		Key: a.tavilyKey,
+		OnUse: func() {
+			tavilyUsageMu.Lock()
+			defer tavilyUsageMu.Unlock()
+			now := time.Now().Format("2006-01")
+			month, n := splitUsage(a.setting(tavilyUsageKey))
+			if month != now {
+				n = 0
+			}
+			_ = a.setSetting(tavilyUsageKey, fmt.Sprintf("%s:%d", now, n+1))
+		},
+	}
+}
+
+// keyHint shows only the start and the last 4 characters of a key.
+func keyHint(k string) string {
+	if len(k) <= 10 {
+		return "••••"
+	}
+	return k[:5] + "…" + k[len(k)-4:]
+}
+
+func (a *App) tavilyStatus() map[string]any {
+	k := a.tavilyKey()
+	st := map[string]any{"set": k != "", "used_this_month": a.tavilyUsedThisMonth(), "from_env": false}
+	if k != "" {
+		st["hint"] = keyHint(k)
+		st["from_env"] = strings.TrimSpace(a.setting(websearch.TavilySettingKey)) == ""
+	}
+	return st
+}
+
+// PUT    /api/websearch/tavily {key} -> tests the key with one search, then saves it encrypted
+// DELETE /api/websearch/tavily       -> removes the saved key
+func (a *App) handleTavilyKey(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodPut, http.MethodPost:
+		var body struct {
+			Key string `json:"key"`
+		}
+		if json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&body) != nil {
+			jsonOut(w, 400, map[string]string{"error": "invalid payload"})
+			return
+		}
+		key := strings.TrimSpace(body.Key)
+		if key == "" || strings.ContainsAny(key, " \t\r\n") {
+			jsonOut(w, 400, map[string]string{"error": "Paste the Tavily key (it starts with tvly-)."})
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 25*time.Second)
+		defer cancel()
+		test := websearch.Tavily(websearch.TavilyConfig{Key: func() string { return key }, OnUse: a.tavilyConfig().OnUse})
+		if _, err := test(ctx, "CorText connection test", 1); err != nil {
+			jsonOut(w, 400, map[string]string{"error": "Tavily did not accept this key: " + err.Error()})
+			return
+		}
+		enc, ok := provider.EncryptAPIKey(key)
+		if !ok {
+			enc = key
+		}
+		if err := a.setSetting(websearch.TavilySettingKey, enc); err != nil {
+			jsonOut(w, 500, map[string]string{"error": err.Error()})
+			return
+		}
+		jsonOut(w, 200, map[string]any{"ok": true, "tavily": a.tavilyStatus()})
+	case http.MethodDelete:
+		if _, err := a.db.Exec(`DELETE FROM settings WHERE key=?`, websearch.TavilySettingKey); err != nil {
+			jsonOut(w, 500, map[string]string{"error": err.Error()})
+			return
+		}
+		jsonOut(w, 200, map[string]any{"ok": true, "tavily": a.tavilyStatus()})
+	default:
+		http.Error(w, "method not allowed", 405)
+	}
 }
 
 func (a *App) webSearchMode() string { return websearch.NormalizeMode(a.setting(websearch.SettingKey)) }
@@ -40,7 +152,7 @@ func (a *App) runChatTurn(ctx context.Context, t *chatTarget, msgs []provider.Me
 		return out, err
 	}
 	if a.web == nil {
-		a.web = newWebEngine()
+		a.web = newWebEngine(a)
 	}
 	var nb websearch.Notebook
 	if a.webNotes != nil {
@@ -89,7 +201,7 @@ func (a *App) handleWebSearch(w http.ResponseWriter, r *http.Request) {
 				size += len(s.Title) + len(s.URL)
 			}
 		}
-		jsonOut(w, 200, map[string]any{"mode": a.webSearchMode(), "notes": notes, "count": len(notes), "bytes": size, "max_notes": websearch.MaxOwnerNotes})
+		jsonOut(w, 200, map[string]any{"mode": a.webSearchMode(), "notes": notes, "count": len(notes), "bytes": size, "max_notes": websearch.MaxOwnerNotes, "tavily": a.tavilyStatus()})
 	case http.MethodPut, http.MethodPost:
 		var body struct {
 			Mode string `json:"mode"`

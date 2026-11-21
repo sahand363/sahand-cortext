@@ -40,12 +40,15 @@ func Chain(sources ...NamedSearch) SearchFunc {
 			if err == nil && len(res) > 0 {
 				return res, nil
 			}
+			if errors.Is(err, ErrNoKey) {
+				continue // optional source with no key: skip quietly
+			}
 			if err == nil {
 				err = ErrNoResults
 			}
-			if isRefusal(err) {
+			if d := pauseFor(err); d > 0 {
 				mu.Lock()
-				pausedUntil[s.Name] = time.Now().Add(10 * time.Minute)
+				pausedUntil[s.Name] = time.Now().Add(d)
 				mu.Unlock()
 			}
 			log.Printf("websearch: %s: %v", s.Name, err)
@@ -67,10 +70,11 @@ type NamedSearch struct {
 	Search SearchFunc
 }
 
-// DefaultSearch is the hub's search: DuckDuckGo, then Google News (RSS),
-// then Wikipedia.
-func DefaultSearch() SearchFunc {
+// DefaultSearch is the hub's search: Tavily (only when a key is set),
+// then DuckDuckGo, Google News (RSS) and Wikipedia.
+func DefaultSearch(tavily TavilyConfig) SearchFunc {
 	return Chain(
+		NamedSearch{"tavily", Tavily(tavily)},
 		NamedSearch{"duckduckgo", DuckDuckGo},
 		NamedSearch{"google-news", GoogleNews},
 		NamedSearch{"wikipedia", Wikipedia},

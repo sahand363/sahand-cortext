@@ -193,7 +193,7 @@ func (a *App) initDB() error {
 		return err
 	}
 	if a.web == nil {
-		a.web = newWebEngine()
+		a.web = newWebEngine(a)
 	}
 	if err := a.orchStorage.InitSchema(); err != nil {
 		return err

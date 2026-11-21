@@ -998,7 +998,7 @@ Sahand: آره ردیفه الان دارم تستش میکنم 🚀"></textarea
             </div>
 
             <div id="websearch-settings" class="settings-panel hidden">
-              <div class="settings-section-head"><div><h2>Web search</h2><p>Free search (DuckDuckGo, with Google News and Wikipedia as backups; no key) in the main chat, the Android app and your Telegram bots. Each search is saved as a short note with its sources, never the whole pages, and reused later.</p></div></div>
+              <div class="settings-section-head"><div><h2>Web search</h2><p>Search with Tavily when you add a key below, otherwise free search (DuckDuckGo, with Google News and Wikipedia as backups) in the main chat, the Android app and your Telegram bots. Each search is saved as a short note with its sources, never the whole pages, and reused later.</p></div></div>
               <div class="setting-row">
                 <div><b>When to search</b><small>Auto: the AI searches when a question needs fresh facts, and you can force one with <code>/search &lt;query&gt;</code>. Only /search: never on its own.</small></div>
                 <select id="websearch-mode-select" class="form-control" style="width:auto;min-width:190px">
@@ -1006,6 +1006,14 @@ Sahand: آره ردیفه الان دارم تستش میکنم 🚀"></textarea
                   <option value="command">Only /search</option>
                   <option value="off">Off</option>
                 </select>
+              </div>
+              <div class="setting-row">
+                <div><b>Tavily key</b><small id="tavily-status">Not set. Without a key the free sources are used, and DuckDuckGo may block your server for a while after many searches.</small></div>
+                <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+                  <input type="password" id="tavily-key-input" class="form-control" placeholder="tvly-…" autocomplete="off" style="width:220px">
+                  <button type="button" class="btn btn-small" id="tavily-save-btn">Save &amp; test</button>
+                  <button type="button" class="btn btn-quiet btn-small hidden" id="tavily-remove-btn">Remove</button>
+                </div>
               </div>
               <div class="setting-row">
                 <div><b>Saved web notes</b><small id="websearch-notes-meta">Loading…</small></div>

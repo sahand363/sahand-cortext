@@ -355,6 +355,9 @@ func subset(a, b []string) bool {
 
 // Research searches, reads the top pages, has the model write a short
 // note, saves it in nb (when not nil) and returns it.
+// richSnippetChars: a snippet this long already carries the page's facts.
+const richSnippetChars = 600
+
 func (e *Engine) Research(ctx context.Context, nb Notebook, query string, call CallFunc) (*Note, error) {
 	if e.Search == nil {
 		return nil, errors.New("web search is not configured")
@@ -380,6 +383,10 @@ func (e *Engine) Research(ctx context.Context, nb Notebook, query string, call C
 				fctx, cancel := context.WithTimeout(ctx, 12*time.Second)
 				defer cancel()
 				if unreadable(results[i].URL) {
+					return
+				}
+				// Tavily already sends the relevant passages; no page read needed.
+				if len([]rune(results[i].Snippet)) >= richSnippetChars {
 					return
 				}
 				text, err := e.Fetch(fctx, results[i].URL)

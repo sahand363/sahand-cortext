@@ -5170,6 +5170,7 @@ async function loadWebSearchSettings() {
   try {
     const d = await api("/api/websearch");
     sel.value = d.mode || "auto";
+    renderTavilyStatus(d.tavily);
     meta.textContent = d.count
       ? `${d.count} note${d.count === 1 ? "" : "s"} · ${formatNoteBytes(d.bytes || 0)} · the oldest unused ones are dropped after ${d.max_notes}.`
       : "No notes yet. They appear here after the first search.";
@@ -5229,6 +5230,50 @@ if ($("websearch-mode-select")) {
     } catch (err) { toast(err.message || "Could not save"); }
   };
 }
+function renderTavilyStatus(t) {
+  const st = $("tavily-status");
+  const rm = $("tavily-remove-btn");
+  if (!st || !t) return;
+  if (t.set) {
+    st.textContent = `Active: ${t.hint}${t.from_env ? " (from TAVILY_API_KEY)" : ""} · ${t.used_this_month || 0} searches this month (free plan: about 1,000). DuckDuckGo, Google News and Wikipedia stay as backups.`;
+  } else {
+    st.textContent = "Not set. Without a key the free sources are used, and DuckDuckGo may block your server for a while after many searches.";
+  }
+  if (rm) rm.classList.toggle("hidden", !t.set || t.from_env);
+}
+
+if ($("tavily-save-btn")) {
+  $("tavily-save-btn").onclick = async () => {
+    const inp = $("tavily-key-input");
+    const key = (inp.value || "").trim();
+    if (!key) { toast("Paste your Tavily key first"); return; }
+    const btn = $("tavily-save-btn");
+    btn.disabled = true;
+    btn.textContent = "Testing…";
+    try {
+      const d = await api("/api/websearch/tavily", { method: "PUT", body: JSON.stringify({ key }) });
+      inp.value = "";
+      renderTavilyStatus(d.tavily);
+      toast("Tavily key works and is saved");
+    } catch (e) {
+      toast(e.message || "Could not save the key");
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "Save & test";
+    }
+  };
+}
+if ($("tavily-remove-btn")) {
+  $("tavily-remove-btn").onclick = async () => {
+    if (!confirm("Remove the Tavily key? Search goes back to the free sources.")) return;
+    try {
+      const d = await api("/api/websearch/tavily", { method: "DELETE" });
+      renderTavilyStatus(d.tavily);
+      toast("Tavily key removed");
+    } catch (e) { toast(e.message || "Could not remove"); }
+  };
+}
+
 if ($("websearch-clear-btn")) {
   $("websearch-clear-btn").onclick = async () => {
     if (!confirm("Delete all saved web notes? Telegram chats' own notes are not affected.")) return;
